@@ -21,6 +21,7 @@ const char* GlycolLogger::stateToString(GlycolState state) {
         case GLYCOL_COOLING:          return "COOLING";
         case GLYCOL_COASTING:         return "COASTING";
         case GLYCOL_EMERGENCY_COOLING: return "EMERGENCY";
+        case GLYCOL_HEATING:          return "HEATING";
         default:                       return "UNKNOWN";
     }
 }
@@ -50,9 +51,14 @@ void GlycolLogger::rotateLogIfNeeded() {
     file.close();
 
     if (fileSize > MAX_LOG_SIZE) {
-        // Simple rotation: delete and start fresh
-        // Could implement log rotation (keeping old logs) if needed
-        FILESYSTEM.remove(LOG_FILENAME);
+        if (FILESYSTEM.exists(ARCHIVED_LOG_FILENAME)) {
+            FILESYSTEM.remove(ARCHIVED_LOG_FILENAME);
+        }
+
+        if (!FILESYSTEM.rename(LOG_FILENAME, ARCHIVED_LOG_FILENAME)) {
+            Serial.println("GlycolLog: Failed to archive log during rotation");
+        }
+
         writeHeader();
         Serial.println("GlycolLog: Log rotated due to size limit");
     }
@@ -125,6 +131,9 @@ void GlycolLogger::logTransition(
 void GlycolLogger::clearLog() {
     if (FILESYSTEM.exists(LOG_FILENAME)) {
         FILESYSTEM.remove(LOG_FILENAME);
+    }
+    if (FILESYSTEM.exists(ARCHIVED_LOG_FILENAME)) {
+        FILESYSTEM.remove(ARCHIVED_LOG_FILENAME);
     }
     writeHeader();
     Serial.println("GlycolLog: Log cleared");

@@ -32,7 +32,8 @@
 #include "EepromManager.h"
 #include "TempSensorDisconnected.h"
 #include "RotaryEncoder.h"
-#include "GlycolLog.h"
+#include "ChamberMode.h"
+#include "GlycolMode.h"
 
 TempControl tempControl;
 MinTimes minTimes;
@@ -93,6 +94,37 @@ uint16_t TempControl::waitTime;
 #ifndef max
 #define max _max
 #endif
+
+namespace {
+
+bool isBeerMode(const ControlSettings& settings) {
+    return settings.mode == Modes::beerConstant || settings.mode == Modes::beerProfile;
+}
+
+bool useGlycolBeerMode(const ControlSettings& settings) {
+    return extendedSettings.glycol && isBeerMode(settings);
+}
+
+} // namespace
+
+ControlContext TempControl::makeControlContext() {
+    return ControlContext{
+        cc,
+        cs,
+        cv,
+        minTimes,
+        beerSensor,
+        fridgeSensor,
+        heater,
+        cooler,
+        light,
+        state,
+        lastIdleTime,
+        lastHeatTime,
+        lastCoolTime,
+        waitTime,
+    };
+}
 
 
 /**
@@ -184,7 +216,7 @@ void TempControl::updateTemperatures(){
 
 void TempControl::updatePID(){
     static unsigned char integralUpdateCounter = 0;
-    if(tempControl.modeIsBeer()){
+    if(isBeerMode(cs)){
         if(cs.beerSetting == INVALID_TEMP){
             // beer setting is not updated yet
             // set fridge to unknown too
@@ -209,84 +241,21 @@ void TempControl::updatePID(){
         cv.beerDiff =  cs.beerSetting - beerSensor->readSlowFiltered();
         cv.beerSlope = beerSensor->readSlope();
 
-        if(extendedSettings.glycol) {
-            // ===== GLYCOL MODE: Predictive Bang-Bang Control =====
-            // PID is not used in glycol mode. Control is handled by updateGlycolState().
-            // We still calculate beerDiff and beerSlope above for display/logging purposes.
+        ControlContext controlCtx = makeControlContext();
+
+        if(useGlycolBeerMode(cs)) {
+            // ===== GLYCOL MODE =====
+            // Cooling is predictive bang-bang; heating is beer-only time-proportional PID.
 
             // Set fridgeSetting to INVALID_TEMP since it's not used in glycol mode
             cs.fridgeSetting = INVALID_TEMP;
 
-            // Clear PID outputs (not used, but set for display consistency)
-            cv.p = 0;
-            cv.i = 0;
-            cv.d = 0;
-            cv.diffIntegral = 0;
+            GlycolMode::Context glycolCtx(controlCtx, glycolLearned, glycolConfig, glycolRuntime);
+            GlycolMode::updatePID(glycolCtx, integralUpdateCounter);
 
         } else {
-            // ===== COMPRESSOR MODE: Cascaded PID control =====
-            // PID output is a fridge temperature setpoint
-
-            temperature fridgeFastFiltered = fridgeSensor->readFastFiltered();
-
-            if(integralUpdateCounter++ == 60){
-                integralUpdateCounter = 0;
-
-                temperature integratorUpdate = cv.beerDiff;
-
-                // Only update integrator in IDLE, because thats when the fridge temp has reached the fridge setting.
-                // If the beer temp is still not correct, the fridge setting is too low/high and integrator action is needed.
-                if(state != IDLE){
-                    integratorUpdate = 0;
-                }
-                else if(abs(integratorUpdate) < cc.iMaxError){
-                    // difference is smaller than iMaxError
-                    // check additional conditions to see if integrator should be active to prevent windup
-                    bool updateSign = (integratorUpdate > 0); // 1 = positive, 0 = negative
-                    bool integratorSign = (cv.diffIntegral > 0);
-
-                    if(updateSign == integratorSign){
-                        // beerDiff and integrator have same sign. Integrator would be increased.
-
-                        // If actuator is already at max increasing actuator will only cause integrator windup.
-                        integratorUpdate = (cs.fridgeSetting >= cc.tempSettingMax) ? 0 : integratorUpdate;
-                        integratorUpdate = (cs.fridgeSetting <= cc.tempSettingMin) ? 0 : integratorUpdate;
-                        integratorUpdate = ((cs.fridgeSetting - cs.beerSetting) >= cc.pidMax) ? 0 : integratorUpdate;
-                        integratorUpdate = ((cs.beerSetting - cs.fridgeSetting) >= cc.pidMax) ? 0 : integratorUpdate;
-
-                        // cooling and fridge temp is more than 2 degrees from setting, actuator is saturated.
-                        integratorUpdate = (!updateSign && (fridgeFastFiltered > (cs.fridgeSetting +1024))) ? 0 : integratorUpdate;
-
-                        // heating and fridge temp is more than 2 degrees from setting, actuator is saturated.
-                        integratorUpdate = (updateSign && (fridgeFastFiltered < (cs.fridgeSetting -1024))) ? 0 : integratorUpdate;
-                    }
-                    else{
-                        // integrator action is decreased. Decrease faster than increase.
-                        integratorUpdate = integratorUpdate*2;
-                    }
-                }
-                else{
-                    // decrease integral by 1/8 when far from the end value to reset the integrator
-                    integratorUpdate = -(cv.diffIntegral >> 3);
-                }
-                cv.diffIntegral = cv.diffIntegral + integratorUpdate;
-            }
-
-            // calculate PID parts. Use long_temperature to prevent overflow
-            cv.p = multiplyFactorTemperatureDiff(cc.Kp, cv.beerDiff);
-            cv.i = multiplyFactorTemperatureDiffLong(cc.Ki, cv.diffIntegral);
-            cv.d = multiplyFactorTemperatureDiff(cc.Kd, cv.beerSlope);
-            long_temperature newFridgeSetting = cs.beerSetting;
-            newFridgeSetting += cv.p;
-            newFridgeSetting += cv.i;
-            newFridgeSetting += cv.d;
-
-            // constrain to tempSettingMin or beerSetting - pidMax, whichever is lower.
-            temperature lowerBound = (cs.beerSetting <= cc.tempSettingMin + cc.pidMax) ? cc.tempSettingMin : cs.beerSetting - cc.pidMax;
-            // constrain to tempSettingMax or beerSetting + pidMax, whichever is higher.
-            temperature upperBound = (cs.beerSetting >= cc.tempSettingMax - cc.pidMax) ? cc.tempSettingMax : cs.beerSetting + cc.pidMax;
-
-            cs.fridgeSetting = constrain(constrainTemp16(newFridgeSetting), lowerBound, upperBound);
+            ChamberMode::Context chamberCtx(controlCtx, doPosPeakDetect, doNegPeakDetect);
+            ChamberMode::updatePID(chamberCtx, integralUpdateCounter);
         }
     }
     else if(cs.mode == Modes::fridgeConstant){
@@ -316,7 +285,7 @@ void TempControl::updateState(){
         // In glycol mode, fridge sensor is optional; in compressor mode it's required
         bool fridgeRequired = !extendedSettings.glycol;
         bool fridgeInvalid = (fridgeRequired && (!fridgeSensor->isConnected() || cs.fridgeSetting == INVALID_TEMP));
-        bool beerInvalid = (!beerSensor->isConnected() && tempControl.modeIsBeer());
+        bool beerInvalid = (!beerSensor->isConnected() && isBeerMode(cs));
 
         if(fridgeInvalid || beerInvalid) {
             // Stay idle when a required sensor is disconnected or settings are invalid
@@ -325,141 +294,21 @@ void TempControl::updateState(){
         }
     }
 
+    ControlContext controlCtx = makeControlContext();
+
     // ===== GLYCOL MODE STATE MACHINE =====
     // Uses predictive bang-bang control (see GLYCOL_COOLING_ALGORITHM.md)
-    if(extendedSettings.glycol && tempControl.modeIsBeer() && !stayIdle) {
-        updateGlycolState();
+    if(useGlycolBeerMode(cs) && !stayIdle) {
+        GlycolMode::Context glycolCtx(controlCtx, glycolLearned, glycolConfig, glycolRuntime);
+        if (GlycolMode::updateState(glycolCtx)) {
+            storeGlycolParams();
+        }
         // Glycol mode uses its own state machine - skip compressor mode logic
         return;
     }
 
-    // ===== COMPRESSOR MODE STATE MACHINE =====
-    uint16_t sinceIdle = timeSinceIdle();
-    uint16_t sinceCooling = timeSinceCooling();
-    uint16_t sinceHeating = timeSinceHeating();
-    temperature fridgeFast = fridgeSensor->readFastFiltered();
-    temperature beerFast = beerSensor->readFastFiltered();
-    ticks_seconds_t secs = ticks.seconds();
-    switch(state)
-    {
-        case IDLE:
-        case STATE_OFF:
-        case WAITING_TO_COOL:
-        case WAITING_TO_HEAT:
-        case WAITING_FOR_PEAK_DETECT:
-        {
-            lastIdleTime=secs;		
-            // set waitTime to zero. It will be set to the maximum required waitTime below when wait is in effect.
-            if(stayIdle){
-                break;
-            }
-            resetWaitTime();
-            if(fridgeFast > (cs.fridgeSetting+cc.idleRangeHigh) ){  // fridge temperature is too high			
-                tempControl.updateWaitTime(minTimes.MIN_SWITCH_TIME, sinceHeating);			
-                if(cs.mode==Modes::fridgeConstant){
-                    tempControl.updateWaitTime(minTimes.MIN_COOL_OFF_TIME_FRIDGE_CONSTANT, sinceCooling);
-                }
-                else{
-                    if(beerFast < (cs.beerSetting + 16) ){ // If beer is already under target, stay/go to idle. 1/2 sensor bit idle zone
-                        state = IDLE; // beer is already colder than setting, stay in or go to idle
-                        break;
-                    }
-                    tempControl.updateWaitTime(minTimes.MIN_COOL_OFF_TIME, sinceCooling);
-                }
-                if(tempControl.cooler != &defaultActuator){
-                    if(getWaitTime() > 0){
-                        state = WAITING_TO_COOL;
-                    }
-                    else{
-                        state = COOLING;	
-                    }
-                }
-            } else if(fridgeFast < (cs.fridgeSetting+cc.idleRangeLow)) {  // fridge temperature is too low
-                tempControl.updateWaitTime(minTimes.MIN_SWITCH_TIME, sinceCooling);
-                tempControl.updateWaitTime(minTimes.MIN_HEAT_OFF_TIME, sinceHeating);
-                if(cs.mode!=Modes::fridgeConstant){
-                    if(beerFast > (cs.beerSetting - 16)){ // If beer is already over target, stay/go to idle. 1/2 sensor bit idle zone
-                        state = IDLE;  // beer is already warmer than setting, stay in or go to idle
-                        break;
-                    }
-                }
-                if(tempControl.heater != &defaultActuator || (cc.lightAsHeater && (tempControl.light != &defaultActuator))){
-                    if(getWaitTime() > 0){
-                        state = WAITING_TO_HEAT;
-                    }
-                    else{
-                        state = HEATING;
-                    }
-                }
-            } else {
-                state = IDLE; // within IDLE range, always go to IDLE
-                break;
-            }
-            if(state == HEATING || state == COOLING){	
-                if(doNegPeakDetect == true || doPosPeakDetect == true){
-                    // If peak detect is not finished, but the fridge wants to switch to heat/cool
-                    // Wait for peak detection and display 'Await peak detect' on display
-                    state = WAITING_FOR_PEAK_DETECT;
-                    break;
-                }
-            }
-        }			
-        break; 
-        case COOLING:
-        case COOLING_MIN_TIME:
-        {
-            doNegPeakDetect=true;
-            lastCoolTime = secs;
-            updateEstimatedPeak(cc.maxCoolTimeForEstimate, cs.coolEstimator, sinceIdle);
-            state = COOLING; // set to cooling here, so the display of COOLING/COOLING_MIN_TIME is correct
-            
-            // stop cooling when estimated fridge temp peak lands on target or if beer is already too cold (1/2 sensor bit idle zone)
-            if(cv.estimatedPeak <= cs.fridgeSetting || (cs.mode != Modes::fridgeConstant && beerFast < (cs.beerSetting - 16))){
-                if(sinceIdle > minTimes.MIN_COOL_ON_TIME){
-                    cv.negPeakEstimate = cv.estimatedPeak; // remember estimated peak when I switch to IDLE, to adjust estimator later
-                    state=IDLE;
-                    break;
-                }
-                else{
-                    state = COOLING_MIN_TIME;
-                    break;
-                }				
-            }
-        }
-        break;
-        case HEATING:
-        case HEATING_MIN_TIME:
-        {
-            doPosPeakDetect=true;
-            lastHeatTime=secs;
-            updateEstimatedPeak(cc.maxHeatTimeForEstimate, cs.heatEstimator, sinceIdle);
-            state = HEATING; // reset to heating here, so the display of HEATING/HEATING_MIN_TIME is correct
-            
-            // stop heating when estimated fridge temp peak lands on target or if beer is already too warm (1/2 sensor bit idle zone)
-            if(cv.estimatedPeak >= cs.fridgeSetting || (cs.mode != Modes::fridgeConstant && beerFast > (cs.beerSetting + 16))){
-                if(sinceIdle > minTimes.MIN_HEAT_ON_TIME){
-                    cv.posPeakEstimate=cv.estimatedPeak; // remember estimated peak when I switch to IDLE, to adjust estimator later
-                    state=IDLE;
-                    break;
-                }
-                else{
-                    state = HEATING_MIN_TIME;
-                    break;
-                }
-            }
-        }
-        break;
-    }			
-}
-
-void TempControl::updateEstimatedPeak(uint16_t timeLimit, temperature estimator, uint16_t sinceIdle)
-{
-    uint16_t activeTime = min(timeLimit, sinceIdle); // heat or cool time in seconds
-    temperature estimatedOvershoot = ((long_temperature) estimator * activeTime)/3600; // overshoot estimator is in overshoot per hour
-    if(stateIsCooling()){
-        estimatedOvershoot = -estimatedOvershoot; // when cooling subtract overshoot from fridge temperature
-    }
-    cv.estimatedPeak = fridgeSensor->readFastFiltered() + estimatedOvershoot;
+    ChamberMode::Context chamberCtx(controlCtx, doPosPeakDetect, doNegPeakDetect);
+    ChamberMode::updateState(chamberCtx, stayIdle);
 }
 
 void TempControl::updateOutputs() {
@@ -482,123 +331,13 @@ void TempControl::detectPeaks(){
     if(extendedSettings.glycol) {
         return;
     }
-
-    //detect peaks in fridge temperature to tune overshoot estimators
-    LOG_ID_TYPE detected = 0;
-    temperature peak, estimate, error, oldEstimator, newEstimator;
-    
-    if(doPosPeakDetect && !stateIsHeating()){
-        peak = fridgeSensor->detectPosPeak();
-        estimate = cv.posPeakEstimate;
-        error = peak-estimate;
-        oldEstimator = cs.heatEstimator;
-        if(peak != INVALID_TEMP){
-            // positive peak detected
-            if(error > cc.heatingTargetUpper){
-                // Peak temperature was higher than the estimate.
-                // Overshoot was higher than expected
-                // Increase estimator to increase the estimated overshoot
-                increaseEstimator(&(cs.heatEstimator), error);
-            }
-            if(error < cc.heatingTargetLower){
-                // Peak temperature was lower than the estimate.
-                // Overshoot was lower than expected
-                // Decrease estimator to decrease the estimated overshoot
-                decreaseEstimator(&(cs.heatEstimator), error);
-            }
-            detected = INFO_POSITIVE_PEAK;
-        }
-        else if(timeSinceHeating() > minTimes.HEAT_PEAK_DETECT_TIME){
-            if(fridgeSensor->readFastFiltered() < (cv.posPeakEstimate+cc.heatingTargetLower)){
-                // Idle period almost reaches maximum allowed time for peak detection
-                // This is the heat, then drift up too slow (but in the right direction).
-                // estimator is too high
-                peak=fridgeSensor->readFastFiltered();
-                decreaseEstimator(&(cs.heatEstimator), error);			
-                detected = INFO_POSITIVE_DRIFT;
-            }
-            else{
-                // maximum time for peak estimation reached
-                doPosPeakDetect = false;	
-            }
-        }
-        if(detected){
-            newEstimator = cs.heatEstimator;	
-            cv.posPeak = peak;
-            doPosPeakDetect = false;
-        }
-    }			
-    else if(doNegPeakDetect && !stateIsCooling()){
-        peak = fridgeSensor->detectNegPeak();
-        estimate = cv.negPeakEstimate;
-        error = peak-estimate;
-        oldEstimator = cs.coolEstimator;
-        if(peak != INVALID_TEMP){
-            // negative peak detected
-            if(error < cc.coolingTargetLower){
-                // Peak temperature was lower than the estimate.
-                // Overshoot was higher than expected
-                // Increase estimator to increase the estimated overshoot
-                increaseEstimator(&(cs.coolEstimator), error);
-            }
-            if(error > cc.coolingTargetUpper){
-                // Peak temperature was higher than the estimate.
-                // Overshoot was lower than expected
-                // Decrease estimator to decrease the estimated overshoot
-                decreaseEstimator(&(cs.coolEstimator), error);
-
-            }
-            detected = INFO_NEGATIVE_PEAK;
-        }
-        else if(timeSinceCooling() > minTimes.COOL_PEAK_DETECT_TIME){
-            if(fridgeSensor->readFastFiltered() > (cv.negPeakEstimate+cc.coolingTargetUpper)){
-                // Idle period almost reaches maximum allowed time for peak detection
-                // This is the cooling, then drift down too slow (but in the right direction).
-                // estimator is too high
-                peak = fridgeSensor->readFastFiltered();
-                decreaseEstimator(&(cs.coolEstimator), error);
-                detected = INFO_NEGATIVE_DRIFT;
-            }
-            else{
-                // maximum time for peak estimation reached
-                doNegPeakDetect=false;
-            }
-        }
-        if(detected){
-            newEstimator = cs.coolEstimator;
-            cv.negPeak = peak;
-            doNegPeakDetect=false;
-        }
+    ControlContext controlCtx = makeControlContext();
+    ChamberMode::Context chamberCtx(controlCtx, doPosPeakDetect, doNegPeakDetect);
+    // Mode controllers own their learning algorithms; TempControl owns
+    // persistence and performs it only when learned settings actually change.
+    if (ChamberMode::detectPeaks(chamberCtx)) {
+        storeSettings();
     }
-    if(detected){
-        // send out log message for type of peak detected
-        logInfoTempTempFixedFixed(detected, peak, estimate, oldEstimator, newEstimator);
-    }
-}
-
-/**
- * Increase the estimator value.
- *
- * Increase estimator at least 20%, max 50%s
- */
-void TempControl::increaseEstimator(temperature * estimator, temperature error){
-    temperature factor = 614 + constrainTemp((temperature) abs(error)>>5, 0, 154); // 1.2 + 3.1% of error, limit between 1.2 and 1.5
-    *estimator = multiplyFactorTemperatureDiff(factor, *estimator);
-    if(*estimator < 25){
-        *estimator = intToTempDiff(5)/100; // make estimator at least 0.05
-    }
-    TempControl::storeSettings();
-}
-
-/**
- * Decrease the esimator value.
- *
- * Decrease estimator at least 16.7% (1/1.2), max 33.3% (1/1.5)
- */
-void TempControl::decreaseEstimator(temperature * estimator, temperature error){
-    temperature factor = 426 - constrainTemp((temperature) abs(error)>>5, 0, 85); // 0.833 - 3.1% of error, limit between 0.667 and 0.833
-    *estimator = multiplyFactorTemperatureDiff(factor, *estimator);
-    TempControl::storeSettings();
 }
 
 /**
@@ -1046,6 +785,10 @@ void GlycolRuntimeState::reset() {
     negative_rate_count = 0;
     setpoint_changed_this_cycle = false;
     cooling_duration_s = 0;
+    heating_output = 0;
+    heating_window_start_ms = 0;
+    heating_window_on_time_s = 0;
+    heating_wait_reason = GLYCOL_HEATING_WAIT_NONE;
     force_minimum_cooling = false;
     rate_buffer_head = 0;
     rate_buffer_count = 0;
@@ -1061,557 +804,4 @@ void TempControl::loadGlycolParams() {
 
 void TempControl::storeGlycolParams() {
     glycolLearned.storeToFilesystem();
-}
-
-/**
- * Add a temperature sample to the rate calculation buffer
- */
-void TempControl::glycolAddRateSample(float temp) {
-    uint32_t now = millis();
-
-    // Add to circular buffer
-    glycolRuntime.rate_buffer[glycolRuntime.rate_buffer_head].timestamp_ms = now;
-    glycolRuntime.rate_buffer[glycolRuntime.rate_buffer_head].temp = temp;
-
-    glycolRuntime.rate_buffer_head = (glycolRuntime.rate_buffer_head + 1) % RATE_BUFFER_SIZE;
-    if (glycolRuntime.rate_buffer_count < RATE_BUFFER_SIZE) {
-        glycolRuntime.rate_buffer_count++;
-    }
-}
-
-/**
- * Calculate temperature rate of change using linear regression
- * Returns rate in degrees per minute
- */
-float TempControl::glycolCalculateRate() {
-    if (glycolRuntime.rate_buffer_count < 5) {
-        return 0.0f;  // Not enough data
-    }
-
-    // Find oldest and newest samples to check for stale data
-    uint8_t oldest_idx = (glycolRuntime.rate_buffer_head + RATE_BUFFER_SIZE - glycolRuntime.rate_buffer_count) % RATE_BUFFER_SIZE;
-    uint8_t newest_idx = (glycolRuntime.rate_buffer_head + RATE_BUFFER_SIZE - 1) % RATE_BUFFER_SIZE;
-
-    uint32_t time_span = glycolRuntime.rate_buffer[newest_idx].timestamp_ms -
-                         glycolRuntime.rate_buffer[oldest_idx].timestamp_ms;
-
-    if (time_span > 180000) {  // > 3 minutes of data is stale
-        return 0.0f;
-    }
-
-    // Linear regression: temp = rate * time + intercept
-    float sum_t = 0, sum_temp = 0, sum_t2 = 0, sum_t_temp = 0;
-    float t0 = glycolRuntime.rate_buffer[oldest_idx].timestamp_ms;
-    int n = glycolRuntime.rate_buffer_count;
-
-    for (int i = 0; i < n; i++) {
-        uint8_t idx = (oldest_idx + i) % RATE_BUFFER_SIZE;
-        float t = (glycolRuntime.rate_buffer[idx].timestamp_ms - t0) / 60000.0f;  // minutes
-        float temp = glycolRuntime.rate_buffer[idx].temp;
-        sum_t += t;
-        sum_temp += temp;
-        sum_t2 += t * t;
-        sum_t_temp += t * temp;
-    }
-
-    float denominator = n * sum_t2 - sum_t * sum_t;
-    if (fabsf(denominator) < 0.0001f) {
-        return 0.0f;  // Division by zero guard
-    }
-
-    float rate = (n * sum_t_temp - sum_t * sum_temp) / denominator;
-    return rate;  // degrees per minute
-}
-
-/**
- * Estimate coast amount using hybrid model
- * Uses k * |rate| when rate is substantial, C_off otherwise
- */
-float TempControl::glycolEstimateCoast() {
-    float rate = fabsf(glycolRuntime.current_cooling_rate);
-
-    if (rate > glycolConfig.min_rate_for_k_model) {
-        // Rate is substantial - use rate-dependent model
-        return glycolLearned.k * rate;
-    } else {
-        // Rate is tiny - use average coast
-        return glycolLearned.C_off;
-    }
-}
-
-/**
- * Check if we should start cooling
- * Based on anticipated peak temperature
- */
-bool TempControl::glycolShouldStartCooling() {
-    if (cs.beerSetting == INVALID_TEMP) return false;
-
-    float current_temp = tempToDouble(beerSensor->readFastFiltered(), 2);
-    float setpoint = tempToDouble(cs.beerSetting, 2);
-
-    // Calculate lookahead time: dead time L + buffer
-    float lookahead_s = glycolLearned.L + 30.0f;  // L + 30s buffer
-    float lookahead_min = lookahead_s / 60.0f;
-
-    // Calculate anticipated peak
-    float anticipated_peak = current_temp + (glycolLearned.drift_rate * lookahead_min);
-
-    // Start cooling if anticipated peak exceeds setpoint + trigger margin
-    return anticipated_peak >= (setpoint + glycolConfig.trigger_margin);
-}
-
-/**
- * Check if we should stop cooling
- * Based on predicted final temperature after coast
- */
-bool TempControl::glycolShouldStopCooling() {
-    if (cs.beerSetting == INVALID_TEMP) return false;
-
-    float current_temp = tempToDouble(beerSensor->readFastFiltered(), 2);
-    float setpoint = tempToDouble(cs.beerSetting, 2);
-
-    // Estimate where temperature will end up if we stop now
-    float estimated_coast = glycolEstimateCoast();
-    float predicted_final = current_temp - estimated_coast;
-
-    return predicted_final <= setpoint;
-}
-
-/**
- * Check for emergency condition (can't cool fast enough)
- * Uses horizon-based prediction instead of instantaneous rate
- */
-bool TempControl::glycolIsEmergency() {
-    if (cs.beerSetting == INVALID_TEMP) return false;
-
-    float current_temp = tempToDouble(beerSensor->readFastFiltered(), 2);
-    float setpoint = tempToDouble(cs.beerSetting, 2);
-
-    // We're already at or below setpoint - not an emergency
-    if (current_temp <= setpoint) return false;
-
-    // Check if we've been cooling long enough to see an effect
-    if (glycolRuntime.cooling_duration_s < glycolConfig.emergency_detection_time_s) {
-        return false;
-    }
-
-    // Predict temperature at horizon if we continue cooling
-    float predicted_at_horizon = current_temp + (glycolRuntime.current_cooling_rate * glycolConfig.emergency_horizon_min);
-
-    // If we can't reach setpoint even in horizon_min of continuous cooling, it's emergency
-    return predicted_at_horizon > (setpoint + 0.1f);  // 0.1 margin
-}
-
-/**
- * Check if we can exit emergency mode
- */
-bool TempControl::glycolCanExitEmergency() {
-    if (cs.beerSetting == INVALID_TEMP) return false;
-
-    float current_temp = tempToDouble(beerSensor->readFastFiltered(), 2);
-    float setpoint = tempToDouble(cs.beerSetting, 2);
-
-    // Check minimum dwell time
-    uint32_t emergency_duration = (millis() - glycolRuntime.emergency_entry_time) / 1000;
-    if (emergency_duration < glycolConfig.min_emergency_dwell_time_s) {
-        return false;
-    }
-
-    // Exit if we've reached setpoint
-    if (current_temp <= setpoint) {
-        return true;
-    }
-
-    // Exit if cooling is now effective (meaningful negative rate)
-    // and we're predicted to reach setpoint within a reasonable time
-    if (glycolRuntime.current_cooling_rate < -glycolConfig.min_rate_for_k_model) {
-        // Predict time to reach setpoint at current rate
-        float temp_diff = current_temp - setpoint;
-        float rate = fabsf(glycolRuntime.current_cooling_rate);
-        if (rate > 0.001f) {
-            float time_to_setpoint = temp_diff / rate;  // minutes
-            if (time_to_setpoint < glycolConfig.emergency_horizon_min / 2.0f) {
-                return true;  // We'll reach setpoint in reasonable time
-            }
-        }
-    }
-
-    return false;
-}
-
-/**
- * Transition to GLYCOL_IDLE state
- */
-void TempControl::glycolTransitionToIdle() {
-    GlycolState prev_state = glycolRuntime.state;
-    glycolRuntime.state = GLYCOL_IDLE;
-    glycolRuntime.setpoint_changed_this_cycle = false;
-    state = IDLE;
-    lastIdleTime = ticks.seconds();
-
-    // Log transition
-#ifdef ENABLE_GLYCOL_LOGGING
-    float current_temp = tempToDouble(beerSensor->readFastFiltered(), 2);
-    float setpoint = tempToDouble(cs.beerSetting, 2);
-    glycolLog.logTransition(
-        prev_state, GLYCOL_IDLE,
-        current_temp, setpoint,
-        glycolRuntime.current_cooling_rate,
-        glycolRuntime.cooling_duration_s,
-        glycolEstimateCoast(),
-        glycolLearned.k, glycolLearned.C_off, glycolLearned.L,
-        glycolRuntime.force_minimum_cooling,
-        "Transition to idle"
-    );
-#endif
-}
-
-/**
- * Transition to GLYCOL_COOLING state
- */
-void TempControl::glycolTransitionToCooling() {
-    GlycolState prev_state = glycolRuntime.state;
-    float setpoint = tempToDouble(cs.beerSetting, 2);
-
-    glycolRuntime.state = GLYCOL_COOLING;
-    glycolRuntime.t_pump_on = millis();
-    glycolRuntime.temp_at_pump_on = tempToDouble(beerSensor->readFastFiltered(), 2);
-    glycolRuntime.cooling_confirmed = false;
-    glycolRuntime.negative_rate_count = 0;
-    glycolRuntime.setpoint_changed_this_cycle = false;
-    glycolRuntime.cooling_duration_s = 0;
-
-    // Clear rate buffer for fresh measurements
-    glycolRuntime.rate_buffer_count = 0;
-    glycolRuntime.rate_buffer_head = 0;
-
-    state = COOLING;
-    lastCoolTime = ticks.seconds();
-
-    // Log transition
-#ifdef ENABLE_GLYCOL_LOGGING
-    const char* reason = glycolRuntime.force_minimum_cooling
-        ? "Starting cooling (forced minimum)"
-        : "Starting cooling (prediction-based)";
-    glycolLog.logTransition(
-        prev_state, GLYCOL_COOLING,
-        glycolRuntime.temp_at_pump_on, setpoint,
-        glycolRuntime.current_cooling_rate,
-        0,  // cooling_duration_s is 0 at start
-        glycolEstimateCoast(),
-        glycolLearned.k, glycolLearned.C_off, glycolLearned.L,
-        glycolRuntime.force_minimum_cooling,
-        reason
-    );
-#endif
-}
-
-/**
- * Transition to GLYCOL_COASTING state
- */
-void TempControl::glycolTransitionToCoasting() {
-    GlycolState prev_state = glycolRuntime.state;
-    float setpoint = tempToDouble(cs.beerSetting, 2);
-
-    glycolRuntime.state = GLYCOL_COASTING;
-    glycolRuntime.t_pump_off = millis();
-    glycolRuntime.temp_at_pump_off = tempToDouble(beerSensor->readFastFiltered(), 2);
-    glycolRuntime.min_temp_reached = glycolRuntime.temp_at_pump_off;
-    glycolRuntime.cooling_rate_at_pump_off = glycolRuntime.current_cooling_rate;
-    glycolRuntime.cooling_duration_s = (glycolRuntime.t_pump_off - glycolRuntime.t_pump_on) / 1000;
-
-    // Hot glycol compensation: during long runs, hot beer warms the glycol reservoir.
-    // After pump stops, the chiller cools the reservoir back to its setpoint.
-    // Next cycle will have cold glycol - force minimum time and re-learn.
-    const char* reason;
-    if (glycolRuntime.cooling_duration_s > glycolConfig.hot_glycol_threshold_s) {
-        glycolRuntime.force_minimum_cooling = true;
-        reason = "Stopping cooling (long run - forcing min next)";
-    } else {
-        reason = "Stopping cooling (coast prediction)";
-    }
-
-    state = IDLE;
-    lastIdleTime = ticks.seconds();
-
-    // Log transition
-#ifdef ENABLE_GLYCOL_LOGGING
-    glycolLog.logTransition(
-        prev_state, GLYCOL_COASTING,
-        glycolRuntime.temp_at_pump_off, setpoint,
-        glycolRuntime.cooling_rate_at_pump_off,
-        glycolRuntime.cooling_duration_s,
-        glycolEstimateCoast(),
-        glycolLearned.k, glycolLearned.C_off, glycolLearned.L,
-        glycolRuntime.force_minimum_cooling,
-        reason
-    );
-#endif
-}
-
-/**
- * Transition to GLYCOL_EMERGENCY_COOLING state
- */
-void TempControl::glycolTransitionToEmergency() {
-    GlycolState prev_state = glycolRuntime.state;
-    float current_temp = tempToDouble(beerSensor->readFastFiltered(), 2);
-    float setpoint = tempToDouble(cs.beerSetting, 2);
-
-    glycolRuntime.state = GLYCOL_EMERGENCY_COOLING;
-    glycolRuntime.emergency_entry_time = millis();
-
-    state = COOLING;
-    lastCoolTime = ticks.seconds();
-
-    // Log transition
-#ifdef ENABLE_GLYCOL_LOGGING
-    glycolLog.logTransition(
-        prev_state, GLYCOL_EMERGENCY_COOLING,
-        current_temp, setpoint,
-        glycolRuntime.current_cooling_rate,
-        glycolRuntime.cooling_duration_s,
-        glycolEstimateCoast(),
-        glycolLearned.k, glycolLearned.C_off, glycolLearned.L,
-        glycolRuntime.force_minimum_cooling,
-        "EMERGENCY - cannot keep up with cooling demand"
-    );
-#endif
-}
-
-/**
- * Update learned parameters after a cooling cycle
- */
-void TempControl::glycolUpdateLearning() {
-    // Clear force_minimum_cooling flag - we've completed a cycle and can resume normal prediction
-    if (glycolRuntime.force_minimum_cooling) {
-        glycolRuntime.force_minimum_cooling = false;
-        logDebug("Glycol: Cleared force_minimum_cooling after cycle");
-    }
-
-    // Check cycle validity for training
-    bool cycle_valid =
-        glycolRuntime.cooling_duration_s >= glycolConfig.min_training_duration_s &&
-        (glycolRuntime.temp_at_pump_on - glycolRuntime.temp_at_pump_off) >= glycolConfig.min_training_drop &&
-        !glycolRuntime.setpoint_changed_this_cycle &&
-        fabsf(glycolRuntime.cooling_rate_at_pump_off) > glycolConfig.min_training_rate;
-
-    if (!cycle_valid) {
-        logDebug("Glycol: Cycle not valid for training");
-        return;
-    }
-
-    float actual_coast = glycolRuntime.temp_at_pump_off - glycolRuntime.min_temp_reached;
-    float setpoint = tempToDouble(cs.beerSetting, 2);
-
-    // Always update C_off for valid cycles
-    glycolLearned.C_off = 0.85f * glycolLearned.C_off + 0.15f * actual_coast;
-    glycolLearned.C_off = constrain(glycolLearned.C_off, 0.05f, 2.0f);
-
-    // Update k if rate was meaningful
-    if (fabsf(glycolRuntime.cooling_rate_at_pump_off) > glycolConfig.min_training_rate) {
-        float observed_k = actual_coast / fabsf(glycolRuntime.cooling_rate_at_pump_off);
-
-        // Clamp observed_k before using
-        observed_k = constrain(observed_k, 0.5f, 20.0f);
-
-        // Sanity check against C_off
-        float implied_coast_at_typical_rate = observed_k * 0.05f;
-        float alpha;
-
-        if (implied_coast_at_typical_rate > glycolLearned.C_off * 3.0f ||
-            implied_coast_at_typical_rate < glycolLearned.C_off * 0.3f) {
-            // This k seems unreasonable - reduce learning rate
-            alpha = 0.05f;
-        } else {
-            // Normal adaptive learning rate based on prediction error
-            float prediction_error = setpoint - glycolRuntime.min_temp_reached;
-
-            if (fabsf(prediction_error) > 0.5f) {
-                alpha = 0.5f;   // Big miss - adapt fast
-            } else if (fabsf(prediction_error) > 0.2f) {
-                alpha = 0.3f;   // Medium miss
-            } else {
-                alpha = 0.15f;  // Small miss - fine tuning
-            }
-        }
-
-        // Update k with exponential moving average
-        glycolLearned.k = (1.0f - alpha) * glycolLearned.k + alpha * observed_k;
-        glycolLearned.k = constrain(glycolLearned.k, 1.0f, 15.0f);
-    }
-
-    logDebug("Glycol: Learning update - k=%.2f, C_off=%.3f", glycolLearned.k, glycolLearned.C_off);
-
-    // Persist learned parameters
-    storeGlycolParams();
-}
-
-/**
- * Main glycol state machine update
- * Called from updateState() when in glycol mode
- */
-void TempControl::updateGlycolState() {
-    if (!extendedSettings.glycol || !modeIsBeer()) return;
-    if (cs.beerSetting == INVALID_TEMP) {
-        glycolTransitionToIdle();
-        return;
-    }
-
-    // Get current temperature and add to rate buffer
-    float current_temp = tempToDouble(beerSensor->readFastFiltered(), 2);
-    float setpoint = tempToDouble(cs.beerSetting, 2);
-    glycolAddRateSample(current_temp);
-
-    // Update current cooling rate
-    glycolRuntime.current_cooling_rate = glycolCalculateRate();
-
-    // Safety check: temperature too low
-    if (current_temp < (setpoint - glycolConfig.safety_margin_low)) {
-        if (glycolRuntime.state != GLYCOL_IDLE && glycolRuntime.state != GLYCOL_COASTING) {
-            logDebug("Glycol: Safety limit - beer too cold");
-            glycolTransitionToIdle();
-            return;
-        }
-    }
-
-    switch (glycolRuntime.state) {
-        case GLYCOL_IDLE: {
-            // Update drift rate while idle
-            if (glycolRuntime.current_cooling_rate > 0) {  // Only update if warming
-                glycolLearned.drift_rate = 0.85f * glycolLearned.drift_rate +
-                                           0.15f * glycolRuntime.current_cooling_rate;
-                glycolLearned.drift_rate = constrain(glycolLearned.drift_rate, 0.0f, 0.5f);
-            }
-
-            // Check if we should start cooling
-            uint16_t time_since_pump_off = (millis() - glycolRuntime.t_pump_off) / 1000;
-            bool min_off_elapsed = (glycolRuntime.t_pump_off == 0) ||
-                                   (time_since_pump_off >= glycolConfig.min_off_time_s);
-
-            if (min_off_elapsed && glycolShouldStartCooling()) {
-                glycolTransitionToCooling();
-            }
-            break;
-        }
-
-        case GLYCOL_COOLING: {
-            // Update cooling duration
-            glycolRuntime.cooling_duration_s = (millis() - glycolRuntime.t_pump_on) / 1000;
-
-            // Dead time learning: detect when cooling starts taking effect
-            if (!glycolRuntime.cooling_confirmed) {
-                if (glycolRuntime.current_cooling_rate < -0.01f) {  // Negative rate threshold
-                    glycolRuntime.negative_rate_count++;
-                    if (glycolRuntime.negative_rate_count >= 3) {
-                        // Cooling confirmed
-                        float L_observed = (millis() - glycolRuntime.t_pump_on) / 1000.0f;
-                        L_observed = constrain(L_observed, 5.0f, 120.0f);
-                        glycolLearned.L = 0.8f * glycolLearned.L + 0.2f * L_observed;
-                        glycolRuntime.cooling_confirmed = true;
-                    }
-                } else {
-                    glycolRuntime.negative_rate_count = 0;
-                }
-            }
-
-            // Safety: max continuous on time
-            uint32_t max_on_s = glycolConfig.max_continuous_on_time_min * 60;
-            if (glycolRuntime.cooling_duration_s > max_on_s) {
-                logDebug("Glycol: Max continuous on time exceeded");
-                glycolTransitionToCoasting();
-                return;
-            }
-
-            // Check for emergency condition
-            if (glycolIsEmergency()) {
-                glycolTransitionToEmergency();
-                return;
-            }
-
-            // Check if minimum on time has elapsed before making stop decisions
-            if (glycolRuntime.cooling_duration_s < glycolConfig.min_on_time_s) {
-                state = COOLING_MIN_TIME;
-                break;
-            }
-            state = COOLING;
-
-            // If force_minimum_cooling is set (after a long run warmed the reservoir),
-            // stop immediately after min_on_time and let the learning adapt
-            if (glycolRuntime.force_minimum_cooling) {
-                logDebug("Glycol: Forced minimum cooling - stopping to re-learn");
-                glycolTransitionToCoasting();
-                break;
-            }
-
-            // Check if we should stop cooling
-            if (glycolShouldStopCooling()) {
-                glycolTransitionToCoasting();
-            }
-            break;
-        }
-
-        case GLYCOL_COASTING: {
-            // Track minimum temperature
-            if (current_temp < glycolRuntime.min_temp_reached) {
-                glycolRuntime.min_temp_reached = current_temp;
-            }
-
-            // Check if temperature has stabilized or started rising
-            bool stabilized = (glycolRuntime.current_cooling_rate >= -0.005f);  // Near zero or positive
-
-            uint16_t time_since_pump_off = (millis() - glycolRuntime.t_pump_off) / 1000;
-            // Wait at least dead time (L) to observe the effect of cooling
-            // min_off_time_s is for pump protection; L is for observation
-            uint16_t observation_time = max(glycolConfig.min_off_time_s, (uint16_t)glycolLearned.L);
-            bool min_off_elapsed = time_since_pump_off >= observation_time;
-
-            if (stabilized && min_off_elapsed) {
-                // Calculate actual coast achieved
-                float actual_coast = glycolRuntime.temp_at_pump_off - glycolRuntime.min_temp_reached;
-
-                // If coast was ineffective (minimal temp drop) and we're still above setpoint,
-                // go back to cooling to extend cooling time instead of going to idle
-                bool coast_ineffective = actual_coast < 0.05f;  // Less than 0.05° drop
-                bool still_above_setpoint = current_temp > setpoint;
-
-                if (coast_ineffective && still_above_setpoint) {
-                    // Coast didn't work - extend cooling time
-                    logDebug("Glycol: Coast ineffective, extending cooling");
-                    glycolTransitionToCooling();
-                } else {
-                    // Normal coast completion - perform learning and go to idle
-                    glycolUpdateLearning();
-                    glycolTransitionToIdle();
-                }
-            }
-            break;
-        }
-
-        case GLYCOL_EMERGENCY_COOLING: {
-            // Update cooling duration for safety check
-            uint32_t emergency_duration = (millis() - glycolRuntime.emergency_entry_time) / 1000;
-
-            // Safety: max continuous on time
-            uint32_t max_on_s = glycolConfig.max_continuous_on_time_min * 60;
-            if (emergency_duration > max_on_s) {
-                logDebug("Glycol: Max on time in emergency, forcing off");
-                glycolTransitionToCoasting();
-                return;
-            }
-
-            // Safety: temperature too low
-            if (current_temp < (setpoint - glycolConfig.safety_margin_low)) {
-                logDebug("Glycol: Safety limit in emergency");
-                glycolTransitionToIdle();
-                return;
-            }
-
-            // Check if we can exit emergency
-            if (glycolCanExitEmergency()) {
-                logDebug("Glycol: Exiting emergency mode");
-                glycolTransitionToCooling();  // Return to normal predictive control
-            }
-            break;
-        }
-    }
 }

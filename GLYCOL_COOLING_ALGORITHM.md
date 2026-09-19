@@ -4,11 +4,15 @@
 
 This document describes a predictive, adaptive bang-bang control algorithm for glycol-based fermentation cooling. The algorithm uses a single temperature sensor (beer temperature) and a single control output (pump on/off) to maintain precise temperature control despite significant thermal delays in the system.
 
+## Activation
+
+Glycol mode can be enabled and configured from the main web interface.
+
 ## System Characteristics
 
 - **Input:** Beer temperature (single sensor)
 - **Output:** Pump on/off (binary control)
-- **Response delay (L):** ~30 seconds from pump activation to observable temperature change (learned)
+- **Response delay (L):** effective learned delay from pump activation to observable temperature change; varies by cooling hardware, glycol temperature, flow, volume, and thermal coupling
 - **Coast period:** ~5 minutes of continued cooling after pump stops (learned)
 - **Minimum pump on/off time:** 15 seconds (pump protection)
 
@@ -53,7 +57,7 @@ The algorithm maintains several learned parameters that adapt to the specific sy
 |-----------|-------|-------------|---------------|
 | `k` | minutes | Coast factor (rate-dependent model) | 5.0 |
 | `C_off` | °C or °F | Average coast drop (rate-independent fallback) | 0.3 |
-| `L` | seconds | Dead time from pump ON to observable cooling | 30 |
+| `L` | seconds | Effective learned dead time from pump ON to observable cooling | 300 |
 | `drift_rate` | °/min | Rate of temperature rise when idle | 0.02 |
 
 ---
@@ -139,7 +143,7 @@ While COASTING:
     - Track temperature
     - Update min_temp_reached whenever we see a new minimum
 
-    SAFETY: Force pump ON if:
+    SAFETY: Force pump OFF if:
         current_temp < setpoint - safety_margin_low  // e.g., 0.5-1.0°
         (This catches "model went off the rails" cases)
 
@@ -315,7 +319,7 @@ if (!cooling_confirmed && cooling_rate < -confirmation_threshold) {
     // Require sustained negative rate (e.g., 3 consecutive readings)
     if (++negative_rate_count >= 3) {
         L_observed = (now - t_pump_on) / 1000.0;  // convert to seconds
-        L_observed = constrain(L_observed, 5.0, 120.0);  // reasonable bounds
+        L_observed = constrain(L_observed, 5.0, 300.0);  // reasonable bounds
         L = 0.8 * L + 0.2 * L_observed;
         cooling_confirmed = true;
     }
@@ -449,7 +453,7 @@ For first-time operation (no learned values):
 |-----------|---------------|-------|-------|
 | `k` | 5.0 | minutes | Conservative coast factor |
 | `C_off` | 0.3 | ° | Typical coast drop |
-| `L` | 30 | seconds | Typical dead time |
+| `L` | 300 | seconds | Conservative effective dead time; learned from observed system response |
 | `drift_rate` | 0.02 | °/min | Typical ambient-driven drift |
 | `trigger_margin` | 0.1 | ° | Small hysteresis |
 | `safety_margin_low` | 0.5 | ° | Hard limit below setpoint |

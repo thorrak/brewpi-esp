@@ -59,9 +59,6 @@ struct GlycolConfig : public JSONSaveable {
     // Hot glycol compensation
     uint16_t hot_glycol_threshold_s;  //!< Pump run time above which reservoir is warmed by beer
 
-    // Coast observation
-    uint16_t min_coast_observation_s; //!< Minimum time to observe coast before checking stabilization
-
     GlycolConfig();
     void setDefaults();
     void toJson(JsonDocument& doc);

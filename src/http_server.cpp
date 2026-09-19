@@ -575,6 +575,42 @@ bool processControlConstantsJson(const JsonDocument& json, bool triggerUpstreamU
         }
     }
 
+    // KpHeat
+    if(json["KpHeat"].is<double>()) {
+        char valStr[8];
+        snprintf(valStr, sizeof(valStr), "%.3f", json["KpHeat"].as<double>());
+        temperature newVal = stringToFixedPoint(valStr);
+        if(tempControl.cc.Kp_heat != newVal) {
+            tempControl.cc.Kp_heat = newVal;
+            saveSettings = true;
+            Log.notice(F("Settings update, [KpHeat]:(%s) applied.\r\n"), valStr);
+        }
+    }
+
+    // KiHeat
+    if(json["KiHeat"].is<double>()) {
+        char valStr[8];
+        snprintf(valStr, sizeof(valStr), "%.3f", json["KiHeat"].as<double>());
+        temperature newVal = stringToFixedPoint(valStr);
+        if(tempControl.cc.Ki_heat != newVal) {
+            tempControl.cc.Ki_heat = newVal;
+            saveSettings = true;
+            Log.notice(F("Settings update, [KiHeat]:(%s) applied.\r\n"), valStr);
+        }
+    }
+
+    // KdHeat
+    if(json["KdHeat"].is<double>()) {
+        char valStr[8];
+        snprintf(valStr, sizeof(valStr), "%.3f", json["KdHeat"].as<double>());
+        temperature newVal = stringToFixedPoint(valStr);
+        if(tempControl.cc.Kd_heat != newVal) {
+            tempControl.cc.Kd_heat = newVal;
+            saveSettings = true;
+            Log.notice(F("Settings update, [KdHeat]:(%s) applied.\r\n"), valStr);
+        }
+    }
+
     // Temperature difference settings (use stringToTempDiff)
     // pidMax
     if(json["pidMax"].is<double>()) {
@@ -585,6 +621,18 @@ bool processControlConstantsJson(const JsonDocument& json, bool triggerUpstreamU
             tempControl.cc.pidMax = newVal;
             saveSettings = true;
             Log.notice(F("Settings update, [pidMax]:(%s) applied.\r\n"), valStr);
+        }
+    }
+
+    // pidMaxHeat
+    if(json["pidMaxHeat"].is<double>()) {
+        char valStr[8];
+        snprintf(valStr, sizeof(valStr), "%.1f", json["pidMaxHeat"].as<double>());
+        temperature newVal = stringToTempDiff(valStr);
+        if(tempControl.cc.pidMax_heat != newVal) {
+            tempControl.cc.pidMax_heat = newVal;
+            saveSettings = true;
+            Log.notice(F("Settings update, [pidMaxHeat]:(%s) applied.\r\n"), valStr);
         }
     }
 

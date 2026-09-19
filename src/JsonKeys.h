@@ -188,6 +188,4 @@ namespace GlycolKeys {
     constexpr auto emergency_detection_time_s = "emergency_detection_time_s";
     constexpr auto min_emergency_dwell_time_s = "min_emergency_dwell_time_s";
     constexpr auto hot_glycol_threshold_s = "hot_glycol_threshold_s";
-    constexpr auto min_coast_observation_s = "min_coast_observation_s";
 }
-
