@@ -31,7 +31,7 @@ const char* GlycolLogger::stateToString(GlycolState state) {
 void GlycolLogger::writeHeader() {
     FILE* file = fs_open(LOG_FILENAME, "w");
     if (!file) {
-        logWarning("GlycolLog: Failed to create log file");
+        Log.warning("GlycolLog: Failed to create log file");
         return;
     }
 
@@ -48,7 +48,10 @@ void GlycolLogger::rotateLogIfNeeded() {
 
     if (fileSize > MAX_LOG_SIZE) {
         if (fs_exists(ARCHIVED_LOG_FILENAME)) {
-            fs_remove(ARCHIVED_LOG_FILENAME);
+            if (!fs_remove(ARCHIVED_LOG_FILENAME)) {
+                Log.warning("GlycolLog: Failed to remove previous archive");
+                return;
+            }
         }
 
         char currentPath[288];
@@ -56,11 +59,13 @@ void GlycolLogger::rotateLogIfNeeded() {
         snprintf(currentPath, sizeof(currentPath), "%s%s", FS_PREFIX, LOG_FILENAME);
         snprintf(archivedPath, sizeof(archivedPath), "%s%s", FS_PREFIX, ARCHIVED_LOG_FILENAME);
         if (rename(currentPath, archivedPath) != 0) {
-            logWarning("GlycolLog: Failed to archive log during rotation");
+            Log.warning("GlycolLog: Failed to archive log during rotation");
+            // Do not truncate the active log if archiving failed.
+            return;
         }
 
         writeHeader();
-        logInfo("GlycolLog: Log rotated due to size limit");
+        Log.notice("GlycolLog: Log rotated due to size limit");
     }
 }
 
@@ -87,7 +92,7 @@ void GlycolLogger::logTransition(
 
     FILE* file = fs_open(LOG_FILENAME, "a");
     if (!file) {
-        logWarning("GlycolLog: Failed to open log file for writing");
+        Log.warning("GlycolLog: Failed to open log file for writing");
         return;
     }
 
@@ -132,7 +137,7 @@ void GlycolLogger::clearLog() {
         fs_remove(ARCHIVED_LOG_FILENAME);
     }
     writeHeader();
-    logInfo("GlycolLog: Log cleared");
+    Log.notice("GlycolLog: Log cleared");
 }
 
 void GlycolLogger::logReboot() {
@@ -145,7 +150,7 @@ void GlycolLogger::logReboot() {
 
     FILE* file = fs_open(LOG_FILENAME, "a");
     if (!file) {
-        logWarning("GlycolLog: Failed to open log file for reboot entry");
+        Log.warning("GlycolLog: Failed to open log file for reboot entry");
         return;
     }
 
@@ -162,7 +167,7 @@ void GlycolLogger::logReboot() {
     );
 
     fclose(file);
-    logInfo("GlycolLog: Logged reboot event");
+    Log.notice("GlycolLog: Logged reboot event");
 }
 
 size_t GlycolLogger::getLogSize() {

@@ -254,6 +254,25 @@ void TempControl::updatePID(){
     }
 }
 
+// Discard interrupted cycles, but preserve the actual output-off times so a
+// reconnect or mode change cannot bypass actuator protection.
+void TempControl::resetGlycolControl() {
+    uint32_t pumpOff = glycolRuntime.t_pump_off;
+    if (stateIsCooling()) {
+        lastCoolTime = ticks.seconds();
+        pumpOff = ticks.millis();
+    }
+    if (stateIsHeating()) {
+        lastHeatTime = ticks.seconds();
+    }
+    glycolRuntime.reset();
+    glycolRuntime.t_pump_off = pumpOff;
+    cv.p = cv.i = cv.d = 0;
+    cv.diffIntegral = 0;
+    waitTime = 0;
+    reset();
+}
+
 void TempControl::updateState(){
     //update state
     bool stayIdle = false;
@@ -267,17 +286,20 @@ void TempControl::updateState(){
     }
 
     if(cs.mode == Modes::off){
+        if (extendedSettings.glycol) resetGlycolControl();
         state = STATE_OFF;
         stayIdle = true;
     } else {
         // Check for invalid settings or disconnected sensors
         // In glycol mode, fridge sensor is optional; in compressor mode it's required
-        bool fridgeRequired = !extendedSettings.glycol;
+        bool fridgeRequired = !useGlycolBeerMode(cs);
         bool fridgeInvalid = (fridgeRequired && (!fridgeSensor->isConnected() || cs.fridgeSetting == INVALID_TEMP));
-        bool beerInvalid = (!beerSensor->isConnected() && isBeerMode(cs));
+        bool beerInvalid = isBeerMode(cs) &&
+            (!beerSensor->isConnected() || cs.beerSetting == INVALID_TEMP);
 
         if(fridgeInvalid || beerInvalid) {
             // Stay idle when a required sensor is disconnected or settings are invalid
+            if (extendedSettings.glycol) resetGlycolControl();
             state = IDLE;
             stayIdle = true;
         }
@@ -311,7 +333,11 @@ void TempControl::updateOutputs() {
 	bool cooling = stateIsCooling();
 	cooler->setActive(cooling);		
 	heater->setActive(!cc.lightAsHeater && heating);	
-	light->setActive(isDoorOpen() || (cc.lightAsHeater && heating) || cameraLightState.isActive());	
+	// A light assigned as the glycol heater must obey the same interlock.
+	bool lightActive = extendedSettings.glycol && cc.lightAsHeater
+		? heating
+		: isDoorOpen() || (cc.lightAsHeater && heating) || cameraLightState.isActive();
+	light->setActive(lightActive);
 	fan->setActive(heating || cooling);
 }
 
@@ -441,7 +467,14 @@ void TempControl::setMode(char newMode, bool force){
 		newMode = Modes::beerConstant;
 	}
 
-	if(newMode != cs.mode || state == WAITING_TO_HEAT || state == WAITING_TO_COOL || state == WAITING_FOR_PEAK_DETECT){
+	// WAITING_TO_HEAT also represents a normal glycol PWM off slice. Repeated
+	// settings payloads must not restart that window when the mode is unchanged.
+	if(extendedSettings.glycol && newMode == cs.mode && !force) {
+		return;
+	}
+
+	if((extendedSettings.glycol && force) || newMode != cs.mode || state == WAITING_TO_HEAT || state == WAITING_TO_COOL || state == WAITING_FOR_PEAK_DETECT){
+		if (extendedSettings.glycol) resetGlycolControl();
 		state = IDLE;
 		force = true;
 	}
@@ -772,6 +805,7 @@ void GlycolRuntimeState::reset() {
     setpoint_changed_this_cycle = false;
     cooling_duration_s = 0;
     heating_output = 0;
+    heating_window_active = false;
     heating_window_start_ms = 0;
     heating_window_on_time_s = 0;
     heating_wait_reason = GLYCOL_HEATING_WAIT_NONE;

@@ -120,6 +120,7 @@ struct GlycolRuntimeState {
     bool setpoint_changed_this_cycle;     //!< True if setpoint changed during this cycle
     uint16_t cooling_duration_s;          //!< Duration of current cooling cycle in seconds
     temperature heating_output;           //!< Heat authority from PID (0..pidMax_heat)
+    bool heating_window_active;          //!< A duty window has been started
     uint32_t heating_window_start_ms;     //!< Start of current heating duty-cycle window
     uint16_t heating_window_on_time_s;    //!< Requested ON time in current heating window
     GlycolHeatingWaitReason heating_wait_reason; //!< Internal reason for WAITING_TO_HEAT
@@ -422,6 +423,7 @@ public:
 private:
 	/** Build a mode-controller view over the current TempControl state. */
 	TEMP_CONTROL_METHOD ControlContext makeControlContext();
+	TEMP_CONTROL_METHOD void resetGlycolControl();
 
 	/**
    * Keep track of beer setting stored in EEPROM

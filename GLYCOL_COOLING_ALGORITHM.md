@@ -6,7 +6,7 @@ This document describes a predictive, adaptive bang-bang control algorithm for g
 
 ## Activation
 
-Glycol mode can be enabled and configured from the main web interface.
+Glycol mode can be enabled from the main web interface. Beer constant or beer profile mode uses the hybrid glycol controller; heating is described in [GLYCOL_HEATING_ALGORITHM.md](GLYCOL_HEATING_ALGORITHM.md). This document includes design rationale and illustrative pseudocode; `GlycolMode.cpp` and `GlycolParams.cpp` define current behavior and defaults.
 
 ## System Characteristics
 
@@ -14,7 +14,7 @@ Glycol mode can be enabled and configured from the main web interface.
 - **Output:** Pump on/off (binary control)
 - **Response delay (L):** effective learned delay from pump activation to observable temperature change; varies by cooling hardware, glycol temperature, flow, volume, and thermal coupling
 - **Coast period:** ~5 minutes of continued cooling after pump stops (learned)
-- **Minimum pump on/off time:** 15 seconds (pump protection)
+- **Minimum pump on/off time:** 10 seconds (pump protection)
 
 ## Core Philosophy
 
@@ -56,7 +56,7 @@ The algorithm maintains several learned parameters that adapt to the specific sy
 | Parameter | Units | Description | Initial Value |
 |-----------|-------|-------------|---------------|
 | `k` | minutes | Coast factor (rate-dependent model) | 5.0 |
-| `C_off` | °C or °F | Average coast drop (rate-independent fallback) | 0.3 |
+| `C_off` | °C or °F | Average coast drop (rate-independent fallback) | 0.5 |
 | `L` | seconds | Effective learned dead time from pump ON to observable cooling | 300 |
 | `drift_rate` | °/min | Rate of temperature rise when idle | 0.02 |
 
@@ -452,7 +452,7 @@ For first-time operation (no learned values):
 | Parameter | Initial Value | Units | Notes |
 |-----------|---------------|-------|-------|
 | `k` | 5.0 | minutes | Conservative coast factor |
-| `C_off` | 0.3 | ° | Typical coast drop |
+| `C_off` | 0.5 | ° | Typical coast drop |
 | `L` | 300 | seconds | Conservative effective dead time; learned from observed system response |
 | `drift_rate` | 0.02 | °/min | Typical ambient-driven drift |
 | `trigger_margin` | 0.1 | ° | Small hysteresis |
@@ -584,7 +584,7 @@ All divisions by rate are guarded with minimum thresholds. The rate calculation 
 ## Future Considerations
 
 ### Heating
-This document focuses on cooling only. Heating control will need to be addressed separately and may have different dynamics (e.g., heating elements vs heat exchange, different response times, different thermal mass considerations).
+This document focuses on cooling. Beer-temperature PID heating is implemented alongside it; see [GLYCOL_HEATING_ALGORITHM.md](GLYCOL_HEATING_ALGORITHM.md) for heater windows, direction delays, and output interlocks. Heating gains require tuning for the installation's thermal response.
 
 ### Duty-Cycle Modulation
 For very tight control near setpoint, a PWM-style approach within fixed time windows could be layered on top of this algorithm. This would allow finer-grained control when the error is small. Not implemented in V1.

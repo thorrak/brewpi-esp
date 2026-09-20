@@ -7,6 +7,7 @@
 #include <thorlog_espidf.h>
 #include <ArduinoJson.h>
 #include <esp_http_server.h>
+#include <cmath>
 
 #include "ESPEepromAccess.h"
 #include <esp_system.h>
@@ -524,6 +525,54 @@ bool processControlConstantsJson(const JsonDocument& json, bool triggerUpstreamU
     uint8_t failCount = 0;
     bool saveSettings = false;
 
+    // Validate all supplied heating constants before changing live settings.
+    // Keep the signed derivative gain (the default KdHeat is negative), but
+    // reject values that cannot fit the controller's fixed-point fields.
+    struct HeatingConstantUpdate {
+        const char* key;
+        temperature ControlConstants::* field;
+        bool temperatureDifference;
+        bool supplied = false;
+        temperature value = 0;
+    };
+    HeatingConstantUpdate heatingUpdates[] = {
+        {ControlConstantsKeys::kpHeat, &ControlConstants::Kp_heat, false},
+        {ControlConstantsKeys::kiHeat, &ControlConstants::Ki_heat, false},
+        {ControlConstantsKeys::kdHeat, &ControlConstants::Kd_heat, false},
+        {ControlConstantsKeys::pidMaxHeat, &ControlConstants::pidMax_heat, true},
+    };
+    char requestedTempFormat = tempControl.cc.tempFormat;
+    if (json["tempFormat"].is<const char*>()) {
+        const char* format = json["tempFormat"].as<const char*>();
+        if (strcmp(format, "C") == 0 || strcmp(format, "F") == 0) {
+            requestedTempFormat = format[0];
+        }
+    }
+    for (auto& update : heatingUpdates) {
+        JsonVariantConst input = json[update.key];
+        if (input.isUnbound()) {
+            continue;
+        }
+        if (!input.is<double>()) {
+            Log.warning("Invalid heating constant [%s]: expected a number.\r\n", update.key);
+            return false;
+        }
+        double value = input.as<double>();
+        double scale = TEMP_FIXED_POINT_SCALE;
+        if (update.temperatureDifference && requestedTempFormat == 'F') {
+            scale *= 5.0 / 9.0;
+        }
+        double fixedValue = value * scale;
+        double lowerBound = update.temperatureDifference ? 0.0 : MIN_TEMP;
+        if (!std::isfinite(value) || !std::isfinite(fixedValue) ||
+            fixedValue < lowerBound || fixedValue > MAX_TEMP) {
+            Log.warning("Invalid heating constant [%s]: outside fixed-point range.\r\n", update.key);
+            return false;
+        }
+        update.value = static_cast<temperature>(std::round(fixedValue));
+        update.supplied = true;
+    }
+
     // Temperature Format
     if(json["tempFormat"].is<const char *>()) {
         const char* formatStr = json["tempFormat"].as<const char *>();
@@ -600,42 +649,6 @@ bool processControlConstantsJson(const JsonDocument& json, bool triggerUpstreamU
         }
     }
 
-    // KpHeat
-    if(json["KpHeat"].is<double>()) {
-        char valStr[8];
-        snprintf(valStr, sizeof(valStr), "%.3f", json["KpHeat"].as<double>());
-        temperature newVal = stringToFixedPoint(valStr);
-        if(tempControl.cc.Kp_heat != newVal) {
-            tempControl.cc.Kp_heat = newVal;
-            saveSettings = true;
-            Log.notice("Settings update, [KpHeat]:(%s) applied.\r\n", valStr);
-        }
-    }
-
-    // KiHeat
-    if(json["KiHeat"].is<double>()) {
-        char valStr[8];
-        snprintf(valStr, sizeof(valStr), "%.3f", json["KiHeat"].as<double>());
-        temperature newVal = stringToFixedPoint(valStr);
-        if(tempControl.cc.Ki_heat != newVal) {
-            tempControl.cc.Ki_heat = newVal;
-            saveSettings = true;
-            Log.notice("Settings update, [KiHeat]:(%s) applied.\r\n", valStr);
-        }
-    }
-
-    // KdHeat
-    if(json["KdHeat"].is<double>()) {
-        char valStr[8];
-        snprintf(valStr, sizeof(valStr), "%.3f", json["KdHeat"].as<double>());
-        temperature newVal = stringToFixedPoint(valStr);
-        if(tempControl.cc.Kd_heat != newVal) {
-            tempControl.cc.Kd_heat = newVal;
-            saveSettings = true;
-            Log.notice("Settings update, [KdHeat]:(%s) applied.\r\n", valStr);
-        }
-    }
-
     if(json["pidMax"].is<double>()) {
         char valStr[8];
         snprintf(valStr, sizeof(valStr), "%.1f", json["pidMax"].as<double>());
@@ -644,18 +657,6 @@ bool processControlConstantsJson(const JsonDocument& json, bool triggerUpstreamU
             tempControl.cc.pidMax = newVal;
             saveSettings = true;
             Log.notice("Settings update, [pidMax]:(%s) applied.\r\n", valStr);
-        }
-    }
-
-    // pidMaxHeat
-    if(json["pidMaxHeat"].is<double>()) {
-        char valStr[8];
-        snprintf(valStr, sizeof(valStr), "%.1f", json["pidMaxHeat"].as<double>());
-        temperature newVal = stringToTempDiff(valStr);
-        if(tempControl.cc.pidMax_heat != newVal) {
-            tempControl.cc.pidMax_heat = newVal;
-            saveSettings = true;
-            Log.notice("Settings update, [pidMaxHeat]:(%s) applied.\r\n", valStr);
         }
     }
 
@@ -835,6 +836,14 @@ bool processControlConstantsJson(const JsonDocument& json, bool triggerUpstreamU
     if(failCount) {
         Log.error("Error: Invalid control constants configuration.\r\n");
     } else {
+        for (const auto& update : heatingUpdates) {
+            temperature& currentValue = tempControl.cc.*(update.field);
+            if (update.supplied && currentValue != update.value) {
+                currentValue = update.value;
+                saveSettings = true;
+                Log.notice("Settings update, [%s] applied.\r\n", update.key);
+            }
+        }
         if(saveSettings) {
             TempControl::storeConstants();
         }

@@ -17,11 +17,13 @@ bool stateIsHeating(const GlycolMode::Context& ctx) {
 }
 
 bool heatingCapable(const GlycolMode::Context& ctx) {
-    return (ctx.heater != &defaultActuator) ||
-           (ctx.cc.lightAsHeater && (ctx.light != &defaultActuator));
+    return ctx.cc.lightAsHeater
+        ? ctx.light != &defaultActuator
+        : ctx.heater != &defaultActuator;
 }
 
 void resetHeatingWindow(GlycolMode::Context& ctx) {
+    ctx.runtime.heating_window_active = false;
     ctx.runtime.heating_window_start_ms = 0;
     ctx.runtime.heating_window_on_time_s = 0;
 }
@@ -78,7 +80,7 @@ float calculateRate(const GlycolMode::Context& ctx) {
     float sum_temp = 0;
     float sum_t2 = 0;
     float sum_t_temp = 0;
-    float t0 = ctx.runtime.rate_buffer[oldest_idx].timestamp_ms;
+    uint32_t t0 = ctx.runtime.rate_buffer[oldest_idx].timestamp_ms;
     int n = ctx.runtime.rate_buffer_count;
 
     for (int i = 0; i < n; i++) {
@@ -177,14 +179,15 @@ GlycolHeatingWindowState getHeatingWindowState(GlycolMode::Context& ctx, uint32_
     }
 
     uint32_t windowPeriodMs = (uint32_t) windowState.period_s * 1000UL;
-    if (ctx.runtime.heating_window_start_ms == 0) {
+    // Latch demand at the beginning of each window. Recomputing it during an
+    // off slice can start a late pulse shorter than the minimum on time.
+    if (!ctx.runtime.heating_window_active ||
+        (now - ctx.runtime.heating_window_start_ms) >= windowPeriodMs) {
+        ctx.runtime.heating_window_active = true;
         ctx.runtime.heating_window_start_ms = now;
-    } else if ((now - ctx.runtime.heating_window_start_ms) >= windowPeriodMs) {
-        uint32_t elapsedMs = now - ctx.runtime.heating_window_start_ms;
-        ctx.runtime.heating_window_start_ms = now - (elapsedMs % windowPeriodMs);
+        ctx.runtime.heating_window_on_time_s = heatingOnTime(ctx);
     }
 
-    ctx.runtime.heating_window_on_time_s = heatingOnTime(ctx);
     windowState.on_time_s = ctx.runtime.heating_window_on_time_s;
     windowState.elapsed_in_window_s = (now - ctx.runtime.heating_window_start_ms) / 1000UL;
     if (windowState.elapsed_in_window_s > windowState.period_s) {
@@ -309,6 +312,17 @@ void transitionToIdle(GlycolMode::Context& ctx) {
 #ifdef ENABLE_GLYCOL_LOGGING
     GlycolState prev_state = ctx.runtime.state;
 #endif
+    if (ctx.runtime.state == GLYCOL_COOLING ||
+        ctx.runtime.state == GLYCOL_EMERGENCY_COOLING) {
+        ctx.runtime.t_pump_off = ticks.millis();
+        ctx.lastCoolTime = ticks.seconds();
+    }
+    if (ctx.runtime.state == GLYCOL_HEATING) {
+        // Heater-induced warming is not ambient drift.
+        ctx.runtime.rate_buffer_head = 0;
+        ctx.runtime.rate_buffer_count = 0;
+        ctx.runtime.current_cooling_rate = 0;
+    }
     ctx.runtime.state = GLYCOL_IDLE;
     ctx.runtime.setpoint_changed_this_cycle = false;
     resetHeatingWindow(ctx);
@@ -379,6 +393,7 @@ void transitionToCoasting(GlycolMode::Context& ctx) {
 
     ctx.runtime.state = GLYCOL_COASTING;
     ctx.runtime.t_pump_off = ticks.millis();
+    ctx.lastCoolTime = ticks.seconds();
     ctx.runtime.temp_at_pump_off = tempToDouble(ctx.beerSensor->readFastFiltered(), 2);
     ctx.runtime.min_temp_reached = ctx.runtime.temp_at_pump_off;
     ctx.runtime.cooling_rate_at_pump_off = ctx.runtime.current_cooling_rate;
@@ -588,6 +603,15 @@ void updatePID(Context& ctx, unsigned char& integralUpdateCounter) {
 bool updateState(Context& ctx) {
     bool learnedParamsChanged = false;
 
+    // These timestamps describe the end of the latest active interval, not
+    // its start. Direction changes must wait after the output turns off.
+    if (stateIsHeating(ctx)) {
+        ctx.lastHeatTime = ticks.seconds();
+    }
+    if (ctx.state == COOLING || ctx.state == COOLING_MIN_TIME) {
+        ctx.lastCoolTime = ticks.seconds();
+    }
+
     if (ctx.cs.beerSetting == INVALID_TEMP) {
         transitionToIdle(ctx);
         return false;
@@ -595,8 +619,15 @@ bool updateState(Context& ctx) {
 
     float current_temp = tempToDouble(ctx.beerSensor->readFastFiltered(), 2);
     float setpoint = tempToDouble(ctx.cs.beerSetting, 2);
-    addRateSample(ctx, current_temp);
-    ctx.runtime.current_cooling_rate = calculateRate(ctx);
+    if (ctx.runtime.state == GLYCOL_IDLE &&
+        timeSinceHeating(ctx) < ctx.minTimes.MIN_SWITCH_TIME) {
+        ctx.runtime.rate_buffer_head = 0;
+        ctx.runtime.rate_buffer_count = 0;
+        ctx.runtime.current_cooling_rate = 0;
+    } else {
+        addRateSample(ctx, current_temp);
+        ctx.runtime.current_cooling_rate = calculateRate(ctx);
+    }
 
     if (current_temp < (setpoint - ctx.config.safety_margin_low)) {
         if (ctx.runtime.state == GLYCOL_COOLING ||
@@ -620,12 +651,19 @@ bool updateState(Context& ctx) {
                 ctx.learned.drift_rate = std::clamp(ctx.learned.drift_rate, 0.0f, 0.5f);
             }
 
-            uint16_t time_since_pump_off = (ticks.millis() - ctx.runtime.t_pump_off) / 1000;
+            uint32_t time_since_pump_off = (ticks.millis() - ctx.runtime.t_pump_off) / 1000;
             bool min_off_elapsed = (ctx.runtime.t_pump_off == 0) ||
                                    (time_since_pump_off >= ctx.config.min_off_time_s);
 
             if (min_off_elapsed && shouldStartCooling(ctx)) {
-                transitionToCooling(ctx);
+                uint16_t sinceHeating = timeSinceHeating(ctx);
+                if (sinceHeating < ctx.minTimes.MIN_SWITCH_TIME) {
+                    ctx.state = WAITING_TO_COOL;
+                    ctx.waitTime = ctx.minTimes.MIN_SWITCH_TIME - sinceHeating;
+                    ctx.lastIdleTime = ticks.seconds();
+                } else {
+                    transitionToCooling(ctx);
+                }
             } else {
                 ctx.state = IDLE;
                 ctx.lastIdleTime = ticks.seconds();
@@ -687,7 +725,7 @@ bool updateState(Context& ctx) {
             }
 
             bool stabilized = (ctx.runtime.current_cooling_rate >= -0.005f);
-            uint16_t time_since_pump_off = (ticks.millis() - ctx.runtime.t_pump_off) / 1000;
+            uint32_t time_since_pump_off = (ticks.millis() - ctx.runtime.t_pump_off) / 1000;
             uint16_t observation_time = std::max(ctx.config.min_off_time_s, (uint16_t) ctx.learned.L);
             bool min_off_elapsed = time_since_pump_off >= observation_time;
 

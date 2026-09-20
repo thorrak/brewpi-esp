@@ -68,7 +68,6 @@ void GlycolConfig::setDefaults() {
 
     // Hot glycol compensation
     hot_glycol_threshold_s = 300;    // 5 minutes - reservoir is warmed after long runs
-
 }
 
 void GlycolConfig::toJson(JsonDocument& doc) {

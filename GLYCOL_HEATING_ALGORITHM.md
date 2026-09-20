@@ -1,352 +1,112 @@
-# Glycol Heating Control Algorithm Design
+# Glycol Heating Control
 
-## Purpose
+Glycol beer control combines the existing predictive cooling algorithm with
+beer-temperature PID heating. Cooling is described in
+[GLYCOL_COOLING_ALGORITHM.md](GLYCOL_COOLING_ALGORITHM.md). The implementation is in
+`GlycolMode.cpp`; ordinary chamber control remains in `ChamberMode.cpp`.
 
-This document describes the intended control model for the heating phase when `extendedSettings.glycol` is enabled.
+## Activation and configuration
 
-Cooling and heating do not use the same strategy:
+Enable glycol mode in the web interface's settings, select beer constant or beer
+profile mode, and assign a beer sensor and heater. A configured light can act as
+the heater when `lightAsHeater` is enabled. A fridge sensor is optional for glycol
+beer control. While glycol mode is enabled, a request for fridge constant mode
+is redirected to beer constant mode. Ordinary chamber control requires a fridge
+sensor.
 
-- Cooling remains predictive bang-bang control with adaptive learning.
-- Heating is intentionally simpler: direct beer-temperature PID converted to time-proportional on/off control inside a fixed window.
+Heating uses the existing control constants:
 
-This file is not a runtime data table. It is a design/specification document meant to keep the implementation coherent and to make state transitions explicit before changing code.
+| API key | Field | Meaning |
+|---|---|---|
+| `KpHeat` | `cc.Kp_heat` | Proportional gain |
+| `KiHeat` | `cc.Ki_heat` | Integral gain |
+| `KdHeat` | `cc.Kd_heat` | Derivative gain; normally negative to oppose warming |
+| `pidMaxHeat` | `cc.pidMax_heat` | Maximum heating output; zero disables heating |
 
----
+`GET /api/cc/` reads these values and `PUT /api/cc/` updates and persists them.
+The main web interface enables glycol mode but has no form for these four gains.
+PID gains do not change with the display unit; `pidMaxHeat` is expressed as a temperature difference
+in the selected display unit. Gains accept the signed fixed-point range of
+approximately -63.998 to +63.998. `pidMaxHeat` must be nonnegative and fit the same
+internal range after conversion from Fahrenheit when applicable. Invalid numeric
+values or types are rejected before changing live settings.
 
-## Why A Separate Heating Design Exists
+The timing values are persisted in `minTimes`: `GLYCOL_WINDOW_PERIOD` defaults to
+1000 seconds and `GLYCOL_MIN_ON_TIME` to 10 seconds. `MIN_HEAT_OFF_TIME` and
+`MIN_SWITCH_TIME` protect output transitions. The web API returns the glycol
+window settings through `GET /api/extended/`, but does not currently expose an
+update handler or UI fields for them.
 
-The predictive cooling model is needed because glycol cooling has:
+## Demand and timing
 
-- meaningful dead time
-- significant post-stop coast
-- pump and reservoir behavior that changes during the cycle
-
-Heating usually behaves differently:
-
-- the heater response is slower and more monotonic
-- there is typically less "coast after stop" than with glycol cooling
-- a beer-only PID mapped to duty cycle is easier to reason about and tune
-
-So glycol mode should be treated as a hybrid controller:
-
-- predictive cooling
-- time-proportional heating
-
----
-
-## Control Pipeline
-
-Every second, the firmware loop runs:
-
-1. `updateTemperatures()`
-2. `detectPeaks()`
-3. `updatePID()`
-4. `updateState()`
-5. `updateOutputs()`
-
-For glycol heating, the intended meaning of each stage is:
-
-1. Sense the current beer temperature and filtered derivative.
-2. Ignore compressor-style peak detection.
-3. Compute heating demand only.
-4. Decide whether heating is allowed now and whether the current window slice is ON or OFF.
-5. Drive the heater output from the final state.
-
-The important rule is:
-
-`updatePID()` computes demand. It must not decide actuator timing.
-
-`updateState()` arbitrates protection delays, window timing, and public state.
-
-`updateOutputs()` only maps state to hardware pins.
-
----
-
-## Main Variables
-
-### Persistent Inputs
-
-- `cs.beerSetting`: beer temperature target
-- `cc.Kp_heat`, `cc.Ki_heat`, `cc.Kd_heat`: heating PID gains
-- `cc.pidMax_heat`: maximum heating authority
-- `minTimes.MIN_HEAT_OFF_TIME`: minimum heater off time
-- `minTimes.MIN_SWITCH_TIME`: minimum delay after cooling before heating
-- `minTimes.MIN_HEAT_ON_TIME`: minimum legacy heater on time state
-- `minTimes.GLYCOL_WINDOW_PERIOD`: duty-cycle window length in seconds
-- `minTimes.GLYCOL_MIN_ON_TIME`: minimum ON slice length inside a window
-- `glycolConfig.trigger_margin`: deadband used to begin heating
-
-### Runtime Inputs
-
-- `cv.beerDiff = beerSetting - beerTemp`
-- `cv.beerSlope`
-- `glycolRuntime.heating_output`: PID output clamped to `0..pidMax_heat`
-- `lastHeatTime`
-- `lastCoolTime`
-
-### Public State
-
-- `state = IDLE`
-- `state = WAITING_TO_HEAT`
-- `state = HEATING`
-- `state = HEATING_MIN_TIME`
-
-### Internal Glycol State
-
-- `glycolRuntime.state = GLYCOL_IDLE`
-- `glycolRuntime.state = GLYCOL_HEATING`
-
-The public `state` is legacy/UI/output state.
-
-The internal `glycolRuntime.state` is the real controller mode.
-
-These are related, but they are not the same thing.
-
----
-
-## Heating Philosophy
-
-The heating branch answers 4 separate questions every second:
-
-1. Is there heating demand?
-2. Is the heater allowed to start right now?
-3. If allowed, is the current duty-cycle slice ON or OFF?
-4. Given the answers above, what public state should be exposed?
-
-Most recent bugs came from mixing those 4 questions into one block.
-
----
-
-## Demand Calculation
-
-Heating demand is calculated in `updatePID()` from beer temperature only.
-
-The intended behavior is:
+The firmware updates temperatures, peak detection, PID, state, and outputs once
+per second. Glycol mode skips chamber peak detection and calculates heating demand
+from the beer sensor:
 
 ```text
-beer_error = setpoint - beer_temp
-beer_slope = d(beer_temp)/dt
-
-heating_output = clamp(P + I + D, 0, pidMax_heat)
+error = setpoint - slow_filtered_beer_temperature
+output = clamp(KpHeat * error + KiHeat * integral + KdHeat * beer_slope,
+               0, pidMaxHeat)
 ```
 
-Heating demand exists only when all of the following are true:
+The integral updates approximately once per minute, is suppressed during cooling
+and coasting, and is constrained to avoid accumulating demand beyond maximum
+output. Heating requires an assigned heater, a valid beer sensor and setpoint,
+a positive output, and a positive `pidMaxHeat`.
 
-- glycol mode is enabled
-- beer mode is active
-- heating hardware exists
-- `pidMax_heat > 0`
-- `heating_output > 0`
-- beer temperature is below the heating trigger threshold
+Heating starts when fast-filtered beer temperature is at or below
+`setpoint - trigger_margin`. It ends when temperature reaches the setpoint or
+demand disappears. Heating takes priority over a predictive cooling request while
+below this heating threshold. Cooling cannot start until `MIN_SWITCH_TIME` has
+elapsed after the last heating output.
 
-Recommended threshold:
+A heating window converts output to a relay ON duration:
 
 ```text
-start heating when beer_temp <= setpoint - trigger_margin
-stop heating when beer_temp >= setpoint
+on_time_seconds = floor(output / pidMaxHeat * GLYCOL_WINDOW_PERIOD)
 ```
 
-This gives a small deadband and avoids short toggling around setpoint.
-
----
-
-## Window Scheduler
-
-Heating is time-proportional.
-
-The duty-cycle window converts heating authority into ON time:
-
-```text
-on_time = heating_output / pidMax_heat * GLYCOL_WINDOW_PERIOD
-```
-
-Then it is clamped:
-
-- if `on_time == 0`, do not heat
-- if `0 < on_time < GLYCOL_MIN_ON_TIME`, force `on_time = GLYCOL_MIN_ON_TIME`
-- if `on_time > GLYCOL_WINDOW_PERIOD`, force `on_time = GLYCOL_WINDOW_PERIOD`
-
-This means the heater does not receive an analog value. It only receives ON or OFF, but with a duty cycle proportional to PID output.
-
----
-
-## Protection Gating
-
-Before an OFF-to-ON transition is allowed, both protections must be satisfied:
-
-```text
-timeSinceHeating() >= MIN_HEAT_OFF_TIME
-timeSinceCooling() >= MIN_SWITCH_TIME
-```
-
-Important rule:
-
-These protections apply only when starting a new ON segment.
-
-They must not force a transition back to waiting while the heater is already ON.
-
-Important rule:
-
-If protections block the start of a new ON segment, the ON segment must not be consumed while blocked.
-
-In practice this means the duty-cycle window should be delayed or restarted once the actuator is actually allowed to turn on.
-
----
-
-## State Machine
-
-The intended heating behavior is intentionally small:
-
-```text
-GLYCOL_IDLE
-    -> GLYCOL_HEATING when heating demand becomes true
-
-GLYCOL_HEATING
-    -> GLYCOL_IDLE when setpoint is reached or demand disappears
-```
-
-Inside `GLYCOL_HEATING`, the public exposed state can still change each second:
-
-- `WAITING_TO_HEAT` if protection delays block a new ON segment
-- `WAITING_TO_HEAT` if current duty-cycle slice is OFF
-- `HEATING_MIN_TIME` if current duty-cycle slice is ON and still inside minimum ON slice
-- `HEATING` if current duty-cycle slice is ON and beyond minimum ON slice
-
-So:
-
-- `GLYCOL_HEATING` is the internal controller state
-- `WAITING_TO_HEAT` is not always an error or protection state
-- `WAITING_TO_HEAT` can also mean "PWM slice is currently OFF"
-
-That ambiguity is acceptable for display compatibility, but it must be explicit in the design.
-
----
-
-## Transition Table
-
-This table is the main design artifact to reason about the implementation.
-
-| Condition | Internal glycol state | Public state | Heater output | Timers updated | Notes |
-|---|---|---|---|---|---|
-| Glycol disabled, not in beer mode, invalid setpoint, or no heater hardware | `GLYCOL_IDLE` | `IDLE` | OFF | `lastIdleTime` | Heating branch inactive |
-| Heating demand is false | `GLYCOL_IDLE` | `IDLE` | OFF | `lastIdleTime` | No need to heat |
-| Heating demand becomes true | `GLYCOL_HEATING` | `WAITING_TO_HEAT` | OFF | `lastIdleTime` | Enter heating controller |
-| In `GLYCOL_HEATING`, setpoint reached or demand disappears | `GLYCOL_IDLE` | `IDLE` | OFF | `lastIdleTime` | Exit heating controller |
-| In `GLYCOL_HEATING`, ON segment requested, but `MIN_HEAT_OFF_TIME` not satisfied | `GLYCOL_HEATING` | `WAITING_TO_HEAT` | OFF | `waitTime`, `lastIdleTime` | Protection wait; do not consume ON slice |
-| In `GLYCOL_HEATING`, ON segment requested, but `MIN_SWITCH_TIME` after cooling not satisfied | `GLYCOL_HEATING` | `WAITING_TO_HEAT` | OFF | `waitTime`, `lastIdleTime` | Protection wait; do not consume ON slice |
-| In `GLYCOL_HEATING`, protections satisfied and window slice is ON | `GLYCOL_HEATING` | `HEATING_MIN_TIME` or `HEATING` | ON | `lastHeatTime` | Public heating state depends on elapsed ON slice |
-| In `GLYCOL_HEATING`, protections satisfied and window slice is OFF | `GLYCOL_HEATING` | `WAITING_TO_HEAT` | OFF | `waitTime`, `lastIdleTime` | This is normal PWM OFF time |
-| Heating output collapses to zero inside current cycle | `GLYCOL_IDLE` | `IDLE` | OFF | `lastIdleTime` | No point keeping heating active |
-
----
-
-## Interpretation Of `WAITING_TO_HEAT`
-
-`WAITING_TO_HEAT` currently merges two different meanings:
-
-1. protection delay still active
-2. duty-cycle window is currently in its OFF portion
-
-The firmware can keep exposing the same legacy state for UI compatibility, but the implementation should internally distinguish the reason.
-
-Recommended internal distinction:
-
-```text
-wait_reason = NONE
-wait_reason = HEAT_OFF_DELAY
-wait_reason = SWITCH_DELAY
-wait_reason = PWM_OFF_SLICE
-```
-
-This does not need to be user-visible immediately, but it should exist in the design.
-
----
-
-## Required Invariants
-
-These invariants should hold at all times:
-
-- Cooling and heating must never be ON at the same time.
-- Protection delays apply only to OFF-to-ON transitions.
-- A blocked ON segment must not be consumed while blocked.
-- `stateIsHeating()` should mean "heater output is currently ON", not "controller is in heating mode".
-- `lastHeatTime` should move forward only while the heater output is actually ON.
-- `lastIdleTime` should move forward while no active heating or cooling output is running.
-- Reaching setpoint must force exit from `GLYCOL_HEATING`.
-- `WAITING_TO_HEAT` must be safe whether it means protection wait or PWM OFF slice.
-
-If any bug violates one of these invariants, the bug is structural, not just a tuning issue.
-
----
-
-## Recommended Code Structure
-
-To match this design, the heating branch should be readable as 4 steps:
-
-### Step 1: Demand
-
-```text
-bool demand = glycolHeatingDemandActive();
-```
-
-### Step 2: Protection
-
-```text
-HeatingGateResult gate = glycolHeatingProtectionGate();
-```
-
-Where `HeatingGateResult` answers:
-
-- allowed now?
-- remaining wait time?
-- wait reason?
-
-### Step 3: Window
-
-```text
-HeatingWindowResult window = glycolHeatingWindowState();
-```
-
-Where `HeatingWindowResult` answers:
-
-- window active?
-- on slice active?
-- seconds elapsed in window?
-- on time requested?
-
-### Step 4: Public State Mapping
-
-```text
-if (!demand) -> IDLE
-else if (!gate.allowed) -> WAITING_TO_HEAT
-else if (window.on_slice_active) -> HEATING or HEATING_MIN_TIME
-else -> WAITING_TO_HEAT
-```
-
-This is simpler to validate than a single large `case GLYCOL_HEATING`.
-
----
-
-## Tuning Notes
-
-- `GLYCOL_WINDOW_PERIOD = 1000s` is conservative and may feel very slow on a bench setup.
-- For hardware testing, a shorter window like `120s` or `180s` makes transitions easier to observe.
-- `GLYCOL_MIN_ON_TIME` should be long enough to avoid ineffective micro-bursts, but short enough not to overheat near setpoint.
-- `MIN_HEAT_OFF_TIME` and `MIN_SWITCH_TIME` are safety/protection parameters, not control gains.
-- `Kp_heat`, `Ki_heat`, `Kd_heat`, and `pidMax_heat` should be tuned independently from compressor cooling constants.
-
----
-
-## What This Document Is For
-
-This document is meant to prevent "symptom chasing".
-
-When heating behaves incorrectly, the first question should not be:
-
-"Which `if` is wrong?"
-
-It should be:
-
-"Which stage is wrong: demand, protection, window scheduling, or public state mapping?"
-
-That question is much easier to answer consistently.
+A positive duration is raised to `GLYCOL_MIN_ON_TIME` when necessary, then capped
+at the window period. A duration that rounds to zero produces no pulse. Duty is
+latched at the start of each window so changing PID output cannot create several
+ON pulses inside one window. Reaching the setpoint or losing demand still turns
+the heater off immediately; the minimum slice is not a reason to keep heating
+after demand ends.
+
+Before each OFF-to-ON transition, both `MIN_HEAT_OFF_TIME` since heating and
+`MIN_SWITCH_TIME` since cooling must have elapsed. These delays do not interrupt
+an already active ON slice. A blocked start resets the window, preserving a full
+ON slice once the delay expires.
+
+## States and output rules
+
+`GLYCOL_HEATING` is an internal mode. The existing public states describe the
+current relay command:
+
+| Public state | Heater command | Meaning |
+|---|---|---|
+| `HEATING_MIN_TIME` | ON | Early part of the ON slice |
+| `HEATING` | ON | Remaining ON slice |
+| `WAITING_TO_HEAT` | OFF | Protection delay or normal window OFF slice |
+| `IDLE` | OFF | No active heating demand |
+
+An internal wait reason distinguishes heater-off delay, direction-switch delay,
+and window OFF time. Cooling and heating outputs are mutually exclusive.
+When the light is the glycol heater, door and camera requests cannot turn it on
+outside an active heating state.
+
+Turning control off, losing a required sensor, or changing control mode clears
+heating demand, the integral and the duty window. Output-off timestamps remain
+available so restarting control still observes the protection delays.
+
+## Diagnostics and validation status
+
+With `ENABLE_GLYCOL_LOGGING`, heating transitions are included in
+`/glycol_log.csv`. Rotation retains the previous file at
+`/glycol_log.archived.csv`; each file rotates after approximately 30 KB. Clearing
+the glycol log clears both files. Archive failures leave the active log intact.
+
+The integration has not been validated with physical sensors, heater relays, or a
+glycol pump. No automated regression tests were added, as requested. Compilation
+and inspection cannot establish thermal performance or suitable heater tuning
+for a particular fermenter.
