@@ -225,7 +225,7 @@ void TempControl::updatePID(){
         if(!extendedSettings.glycol && fridgeSensor->getFailedReadCount() > 60) {
             return;
         }
-        
+
         // In compressor cooling, fridge setting is calculated with PID algorithm. Beer temperature error is input to PID
         // In glycol chilling, still calculate beer temperature error and slope - used by both modes
         cv.beerDiff =  cs.beerSetting - beerSensor->readSlowFiltered();
@@ -277,7 +277,7 @@ void TempControl::updateState(){
     //update state
     bool stayIdle = false;
     bool newDoorOpen = door->sense();
-        
+
     if(newDoorOpen!=doorOpen) {
         doorOpen = newDoorOpen;
         char annotation[64];
