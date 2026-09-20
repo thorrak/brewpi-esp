@@ -69,8 +69,6 @@ void GlycolConfig::setDefaults() {
     // Hot glycol compensation
     hot_glycol_threshold_s = 300;    // 5 minutes - reservoir is warmed after long runs
 
-    // Coast observation
-    min_coast_observation_s = 120;   // 2 minutes minimum observation
 }
 
 void GlycolConfig::toJson(JsonDocument& doc) {
@@ -87,7 +85,6 @@ void GlycolConfig::toJson(JsonDocument& doc) {
     doc[GlycolKeys::emergency_detection_time_s] = emergency_detection_time_s;
     doc[GlycolKeys::min_emergency_dwell_time_s] = min_emergency_dwell_time_s;
     doc[GlycolKeys::hot_glycol_threshold_s] = hot_glycol_threshold_s;
-    doc[GlycolKeys::min_coast_observation_s] = min_coast_observation_s;
 }
 
 void GlycolConfig::storeToFilesystem() {
@@ -113,5 +110,4 @@ void GlycolConfig::loadFromFilesystem() {
     if (json_doc[GlycolKeys::emergency_detection_time_s].is<uint16_t>()) emergency_detection_time_s = json_doc[GlycolKeys::emergency_detection_time_s];
     if (json_doc[GlycolKeys::min_emergency_dwell_time_s].is<uint16_t>()) min_emergency_dwell_time_s = json_doc[GlycolKeys::min_emergency_dwell_time_s];
     if (json_doc[GlycolKeys::hot_glycol_threshold_s].is<uint16_t>()) hot_glycol_threshold_s = json_doc[GlycolKeys::hot_glycol_threshold_s];
-    if (json_doc[GlycolKeys::min_coast_observation_s].is<uint16_t>()) min_coast_observation_s = json_doc[GlycolKeys::min_coast_observation_s];
 }

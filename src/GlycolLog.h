@@ -58,7 +58,8 @@ public:
 
 private:
     static constexpr const char* LOG_FILENAME = "/glycol_log.csv";
-    static constexpr size_t MAX_LOG_SIZE = 75000;  // ~75KB max log size
+    static constexpr const char* ARCHIVED_LOG_FILENAME = "/glycol_log.archived.csv";
+    static constexpr size_t MAX_LOG_SIZE = 30000;  // Keep both logs within the small filesystem budget
 
     void writeHeader();
     void rotateLogIfNeeded();

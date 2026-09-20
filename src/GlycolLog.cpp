@@ -23,6 +23,7 @@ const char* GlycolLogger::stateToString(GlycolState state) {
         case GLYCOL_COOLING:          return "COOLING";
         case GLYCOL_COASTING:         return "COASTING";
         case GLYCOL_EMERGENCY_COOLING: return "EMERGENCY";
+        case GLYCOL_HEATING:          return "HEATING";
         default:                       return "UNKNOWN";
     }
 }
@@ -46,8 +47,18 @@ void GlycolLogger::rotateLogIfNeeded() {
     size_t fileSize = getLogSize();
 
     if (fileSize > MAX_LOG_SIZE) {
-        // Simple rotation: delete and start fresh
-        fs_remove(LOG_FILENAME);
+        if (fs_exists(ARCHIVED_LOG_FILENAME)) {
+            fs_remove(ARCHIVED_LOG_FILENAME);
+        }
+
+        char currentPath[288];
+        char archivedPath[288];
+        snprintf(currentPath, sizeof(currentPath), "%s%s", FS_PREFIX, LOG_FILENAME);
+        snprintf(archivedPath, sizeof(archivedPath), "%s%s", FS_PREFIX, ARCHIVED_LOG_FILENAME);
+        if (rename(currentPath, archivedPath) != 0) {
+            logWarning("GlycolLog: Failed to archive log during rotation");
+        }
+
         writeHeader();
         logInfo("GlycolLog: Log rotated due to size limit");
     }
@@ -116,6 +127,9 @@ void GlycolLogger::logTransition(
 void GlycolLogger::clearLog() {
     if (fs_exists(LOG_FILENAME)) {
         fs_remove(LOG_FILENAME);
+    }
+    if (fs_exists(ARCHIVED_LOG_FILENAME)) {
+        fs_remove(ARCHIVED_LOG_FILENAME);
     }
     writeHeader();
     logInfo("GlycolLog: Log cleared");
