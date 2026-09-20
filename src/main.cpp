@@ -39,7 +39,6 @@
 #include <nvs_flash.h>
 #include <esp_netif.h>
 #include <esp_event.h>
-#include <esp_bus.h>
 
 #if BREWPI_SIMULATE
 #include "Simulator.h"
@@ -160,16 +159,18 @@ void setup()
   // browser auto-refresh during boot would otherwise crash the device.
   tempControl.init();
 
+  // Order matters: wifi_cfg's Network Provisioning backend (esp_wifi_config
+  // 0.1.0+) uses Espressif's wifi_prov_scheme_ble, which unconditionally calls
+  // esp_bt_controller_init() and brings up its own NimBLE host. If NimBLE is
+  // already up, that fails with ESP_ERR_INVALID_STATE and provisioning never
+  // starts. So wifi_cfg has to be initialised first; bt_scanner.init() below
+  // calls NimBLEDevice::init() afterwards and re-attaches to the controller,
+  // which is kept resident by .prov_ble.memory_policy = KEEP_ALL.
+  initialize_wifi();
+
 #ifdef HAS_BLUETOOTH
-  // Bring NimBLE up before wifi_cfg. wifi_cfg's BLE provisioning backend
-  // checks esp_bt_controller_get_status() at init time; if the stack is
-  // already running it registers as service-only and leaves the host task
-  // to us. Otherwise it claims ownership of NimBLE and bt_scanner.init()
-  // later fails with "BLE_INIT: controller init failed".
   bt_scanner.init();
 #endif
-
-  initialize_wifi();
 
 #if BREWPI_BUZZER
 	buzzer.init();
@@ -345,9 +346,6 @@ extern "C" void app_main(void) {
     if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
         ESP_ERROR_CHECK(ret);
     }
-
-    // Initialize esp_bus (required for esp_wifi_config events)
-    ESP_ERROR_CHECK(esp_bus_init());
 
     // Run setup on the main task (stack size set via CONFIG_ESP_MAIN_TASK_STACK_SIZE)
     setup();

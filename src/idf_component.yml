@@ -21,7 +21,4 @@ dependencies:
       - if: target in ["esp32","esp32s3","esp32c2","esp32c3","esp32c5","esp32c6","esp32c61","esp32h2","esp32p4"]
   joltwallet/littlefs: "^1.14"
   espressif/ds18b20: "^0.3.0"
-  thorrak/esp_wifi_config:
-    git: https://github.com/thorrak/esp_wifi_config.git
-    version: main
-  # thorrak/esp_bus: "^1.0.3"
+  thorrak/esp_wifi_config: "~0.4.1"

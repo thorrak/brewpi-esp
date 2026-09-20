@@ -31,13 +31,30 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 CONFIG_FREERTOS_TIMER_TASK_STACK_DEPTH=4096
 # The host stack needs to be larger to support certain WiFi Manager operations
 CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=6144
+# esp_wifi_config posts its events on the default event loop, so our handlers
+# (display updates, LittleFS writes, HTTP route registration) run on the system
+# event task. The 2304-byte default is too tight for that.
+CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
+# ESP-IDF 5.5.3 NimBLE host flow-control regression (IDFGH-17350) drops the BLE
+# link during the provisioning WiFi scan on classic ESP32. esp_wifi_config
+# refuses to build with this enabled on 5.5.3. Remove once on IDF 5.5.4+.
+CONFIG_BT_NIMBLE_HS_FLOW_CTRL=n
 CONFIG_BT_NIMBLE_LOG_LEVEL_WARNING=y
 CONFIG_BT_NIMBLE_LOG_LEVEL=2
 
 # ESP WiFi Config component settings
-# Reducing max networks (we don't use alternate networks), enabling (Custom) Web UI, and enabling BLE setup
+# Reducing max networks (we don't use alternate networks), enabling the SoftAP
+# captive portal with our custom Web UI (served from LittleFS), and enabling
+# ESP-IDF Network Provisioning over BLE.
 CONFIG_WIFI_CFG_MAX_NETWORKS=2
 # CONFIG_WIFI_CFG_ENABLE_CLI is not set
+CONFIG_WIFI_CFG_ENABLE_SOFTAP=y
 CONFIG_WIFI_CFG_ENABLE_WEBUI=y
+# esp_wifi_config 0.4.0 made the Web UI source an explicit Kconfig choice; a
+# custom path alone no longer selects the filesystem. Under PlatformIO the
+# component CMake never runs, so omitting this silently serves the library's
+# embedded UI instead of our branded one.
+CONFIG_WIFI_CFG_WEBUI_SOURCE_FILESYSTEM=y
 CONFIG_WIFI_CFG_WEBUI_CUSTOM_PATH="/littlefs/wifiui"
-CONFIG_WIFI_CFG_ENABLE_CUSTOM_BLE=y
+CONFIG_WIFI_CFG_ENABLE_NETWORK_PROVISIONING=y
+CONFIG_WIFI_CFG_NETWORK_PROVISIONING_BLE=y

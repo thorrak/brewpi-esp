@@ -17,7 +17,6 @@
 #include <esp_event.h>
 #include <esp_system.h>
 #include <esp_wifi_config.h>
-#include <esp_bus.h>
 #include <esp_log.h>
 #include <Ticks.h>
 #include <freertos/FreeRTOS.h>
@@ -44,11 +43,16 @@ extern void handleReset();  // Terrible practice. In brewpi-esp8266.cpp.
 static bool wifi_was_disconnected = false;
 
 
-// Not sure if this is sufficient to test for validity
+// RFC-1123 hostname label: 1-63 chars, alphanumerics and hyphens, no leading
+// or trailing hyphen. This matches the rule the provisioning Web UI enforces.
 bool isValidmDNSName(const char* mdns_name) {
-    for (size_t i = 0; i < strlen(mdns_name); ++i) {
-        // For now, we're just checking that every character in the string is alphanumeric. May need to add more validation here.
-        if (!isalnum(mdns_name[i]))
+    size_t len = strlen(mdns_name);
+    if (len == 0 || len > 63)
+        return false;
+    if (mdns_name[0] == '-' || mdns_name[len - 1] == '-')
+        return false;
+    for (size_t i = 0; i < len; ++i) {
+        if (!isalnum((unsigned char)mdns_name[i]) && mdns_name[i] != '-')
             return false;
     }
     return true;
@@ -56,12 +60,16 @@ bool isValidmDNSName(const char* mdns_name) {
 
 
 // -----------------------------------------------------------------------
-// WiFi Manager event callbacks (via esp_bus)
+// WiFi Config event callbacks
+//
+// esp_wifi_config (0.2.0+) posts these on the default event loop under the
+// WIFI_CFG_EVENT base, so they run on the system event task. Keep them light
+// (CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE is raised in sdkconfig.defaults).
 // -----------------------------------------------------------------------
 
 // Event callback for WiFi connecting (attempting to connect to a network)
-static void on_wifi_connecting(const char *event, const void *data, size_t len, void *ctx) {
-    if (data == nullptr || len == 0) {
+static void on_wifi_connecting(void *arg, esp_event_base_t base, int32_t event_id, void *data) {
+    if (data == nullptr) {
         return;
     }
     const char *ssid = (const char *)data;
@@ -77,8 +85,8 @@ static void on_wifi_connecting(const char *event, const void *data, size_t len, 
 }
 
 // Event callback for WiFi connected
-static void on_wifi_connected(const char *event, const void *data, size_t len, void *ctx) {
-    if (data == nullptr || len < sizeof(wifi_connected_t)) {
+static void on_wifi_connected(void *arg, esp_event_base_t base, int32_t event_id, void *data) {
+    if (data == nullptr) {
         Log.warning("WiFi connected event received with invalid payload\r\n");
         return;
     }
@@ -87,7 +95,7 @@ static void on_wifi_connected(const char *event, const void *data, size_t len, v
 }
 
 // Event callback for WiFi got IP
-static void on_wifi_got_ip(const char *event, const void *data, size_t len, void *ctx) {
+static void on_wifi_got_ip(void *arg, esp_event_base_t base, int32_t event_id, void *data) {
     wifi_status_t status;
     if (wifi_cfg_get_status(&status) == ESP_OK) {
         Log.notice("WiFi got IP: %s\r\n", status.ip);
@@ -101,8 +109,8 @@ static void on_wifi_got_ip(const char *event, const void *data, size_t len, void
 }
 
 // Event callback for WiFi disconnected
-static void on_wifi_disconnected(const char *event, const void *data, size_t len, void *ctx) {
-    if (data == nullptr || len < sizeof(wifi_disconnected_t)) {
+static void on_wifi_disconnected(void *arg, esp_event_base_t base, int32_t event_id, void *data) {
+    if (data == nullptr) {
         Log.warning("WiFi disconnected event received with invalid payload\r\n");
         return;
     }
@@ -112,7 +120,7 @@ static void on_wifi_disconnected(const char *event, const void *data, size_t len
 }
 
 // Event callback for AP started
-static void on_wifi_ap_started(const char *event, const void *data, size_t len, void *ctx) {
+static void on_wifi_ap_started(void *arg, esp_event_base_t base, int32_t event_id, void *data) {
     wifi_ap_status_t ap_status;
     Log.info("WiFi AP started for configuration.\r\n");
     if (wifi_cfg_get_ap_status(&ap_status) == ESP_OK) {
@@ -123,7 +131,7 @@ static void on_wifi_ap_started(const char *event, const void *data, size_t len, 
 }
 
 // Event callback for provisioning stopped — initialize the HTTP server routes
-static void on_provisioning_stopped(const char *event, const void *data, size_t len, void *ctx) {
+static void on_provisioning_stopped(void *arg, esp_event_base_t base, int32_t event_id, void *data) {
 #ifdef ENABLE_HTTP_INTERFACE
     Log.info("WiFi provisioning stopped, initializing HTTP server routes.\r\n");
     http_server.registerRoutes();
@@ -131,8 +139,8 @@ static void on_provisioning_stopped(const char *event, const void *data, size_t 
 }
 
 // Event callback for variable changes (e.g., mdns_name changed via WiFi manager API)
-static void on_var_changed(const char *event, const void *data, size_t len, void *ctx) {
-    if (data == nullptr || len < sizeof(wifi_var_t)) {
+static void on_var_changed(void *arg, esp_event_base_t base, int32_t event_id, void *data) {
+    if (data == nullptr) {
         return;
     }
     const wifi_var_t *var = (const wifi_var_t *)data;
@@ -220,65 +228,78 @@ void initialize_wifi() {
     http_server.startServer();
 #endif
 
-    // Subscribe to WiFi events via esp_bus
-    esp_bus_sub(WIFI_EVT(WIFI_CFG_EVT_CONNECTING), on_wifi_connecting, NULL);
-    esp_bus_sub(WIFI_EVT(WIFI_CFG_EVT_CONNECTED), on_wifi_connected, NULL);
-    esp_bus_sub(WIFI_EVT(WIFI_CFG_EVT_GOT_IP), on_wifi_got_ip, NULL);
-    // esp_bus_sub(WIFI_EVT(WIFI_CFG_EVT_DISCONNECTED), on_wifi_disconnected, NULL);
-    esp_bus_sub(WIFI_EVT(WIFI_CFG_EVT_AP_START), on_wifi_ap_started, NULL);
-    esp_bus_sub(WIFI_EVT(WIFI_CFG_EVT_VAR_CHANGED), on_var_changed, NULL);
-    esp_bus_sub(WIFI_EVT(WIFI_CFG_EVT_PROVISIONING_STOPPED), on_provisioning_stopped, NULL);
+    // Subscribe to WiFi events. esp_wifi_config (0.2.0+) posts these on the
+    // default event loop (created in app_main) under the WIFI_CFG_EVENT base.
+    // Registering before wifi_cfg_init() ensures we catch startup events.
+    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_CFG_EVENT, WIFI_CFG_EVENT_CONNECTING, on_wifi_connecting, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_CFG_EVENT, WIFI_CFG_EVENT_CONNECTED, on_wifi_connected, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_CFG_EVENT, WIFI_CFG_EVENT_GOT_IP, on_wifi_got_ip, NULL));
+    // ESP_ERROR_CHECK(esp_event_handler_register(WIFI_CFG_EVENT, WIFI_CFG_EVENT_DISCONNECTED, on_wifi_disconnected, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_CFG_EVENT, WIFI_CFG_EVENT_AP_START, on_wifi_ap_started, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_CFG_EVENT, WIFI_CFG_EVENT_VAR_CHANGED, on_var_changed, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_CFG_EVENT, WIFI_CFG_EVENT_PROVISIONING_STOPPED, on_provisioning_stopped, NULL));
 
-    // Default variables for WiFi manager - mdns_name is used to set the mDNS hostname
+    // Default variables for WiFi Config - mdns_name is used to set the mDNS hostname
     // This provides a default value; if NVS has a stored value, that takes precedence
     static wifi_var_t default_vars[] = {
         {"mdns_name", "brewpi"},
     };
 
-    // Configure WiFi Config
-    // TODO - Determine if I want "WIFI_PROV_ON_FAILURE" here
-    wifi_cfg_config_t wifi_config = {
-        .default_networks = NULL,
-        .default_network_count = 0,
-        .default_vars = default_vars,
-        .default_var_count = sizeof(default_vars) / sizeof(default_vars[0]),
-        .max_retry_per_network = 3,
-        .retry_interval_ms = 5000,
-        .retry_max_interval_ms = 60000,
-        .auto_reconnect = true,
-        .provisioning_mode = WIFI_PROV_ON_FAILURE,  // If we fail to connect to any known network, start provisioning (SoftAP + captive portal)
-        .stop_provisioning_on_connect = true,       // Stop the AP and captive portal once we successfully connect to a WiFi network
-        .provisioning_teardown_delay_ms = 5000,
-        .http_post_prov_mode = WIFI_HTTP_API_ONLY,  // Unregister captive portal/webui routes after provisioning so BrewPi can register its own
-        .default_ap = {
-            .ssid = WIFI_SETUP_AP_NAME,
-            .password = WIFI_SETUP_AP_PASS,
-            .channel = 1,
-            .max_connections = 4,
-            .hidden = false,
-            .ip = "192.168.4.1",
-            .netmask = "255.255.255.0",
-            .gateway = "192.168.4.1",
-            .dhcp_start = "192.168.4.2",
-            .dhcp_end = "192.168.4.20",
-        },
-        .always_use_ap_defaults = true,  // Ignore any saved AP config - ensure captive portal is always available and consistent
-        .enable_ap = true,
-        .http = {
+    // Configure WiFi Config. Start from the library defaults (required as of
+    // esp_wifi_config 0.2.0: wifi_cfg_init() no longer patches unset fields and
+    // rejects a zero retry backoff) and override only what BrewPi needs.
+    // Struct-value style rather than a designated initialiser: C++ requires
+    // designators in declaration order, which WIFI_CFG_DEFAULTS + overrides
+    // cannot satisfy.
+    wifi_cfg_config_t wifi_config = WIFI_CFG_DEFAULT_CONFIG();
+
+    wifi_config.default_vars = default_vars;
+    wifi_config.default_var_count = sizeof(default_vars) / sizeof(default_vars[0]);
+
+    // Retry policy: 3 attempts per network, 5 s backoff base, 60 s cap,
+    // auto-reconnect on. These match the library defaults; stated explicitly.
+    wifi_config.max_retry_per_network = 3;
+    wifi_config.retry_interval_ms = 5000;
+    wifi_config.retry_max_interval_ms = 60000;
+    wifi_config.auto_reconnect = true;
+
+    // If we fail to connect to any known network, start provisioning (SoftAP + captive portal + BLE)
+    wifi_config.provisioning_mode = WIFI_PROV_ON_FAILURE;
+    // Stop the AP and captive portal and deregister httpd endpoints once we successfully connect
+    wifi_config.stop_provisioning_on_connect = true;
+    wifi_config.provisioning_teardown_delay_ms = 5000;
+    // Unregister captive portal/webui routes after provisioning so BrewPi can register its own
+    wifi_config.http_post_prov_mode = WIFI_HTTP_API_ONLY;
+
+    // SoftAP for the captive portal. Only SSID, password and channel differ from
+    // the library defaults (192.168.4.1/24, DHCP .2-.20, 4 clients, not hidden).
+    strlcpy(wifi_config.default_ap.ssid, WIFI_SETUP_AP_NAME, sizeof(wifi_config.default_ap.ssid));
+    strlcpy(wifi_config.default_ap.password, WIFI_SETUP_AP_PASS, sizeof(wifi_config.default_ap.password));
+    wifi_config.default_ap.channel = 1;
+    wifi_config.always_use_ap_defaults = true;  // Ignore any saved AP config - ensure captive portal is always available and consistent
+    wifi_config.enable_ap = true;
+
+    // Share our HTTP server with wifi_cfg. API base path stays at the default
+    // /api/wifi; Basic Auth stays off (the default).
 #ifdef ENABLE_HTTP_INTERFACE
-            .httpd = http_server.getHandle(),  // Share our HTTP server with wifi_cfg
+    wifi_config.http.httpd = http_server.getHandle();
 #else
-            .httpd = NULL,
+    wifi_config.http.httpd = NULL;
 #endif
-            .api_base_path = "/api/wifi",
-            .enable_auth = false,
-            .auth_username = NULL,
-            .auth_password = NULL,
-        },
-        .ble = {
-            .device_name = "BrewPiESP-{id}",
-        },
-    };
+
+    // ESP-IDF Network Provisioning over BLE (replaces the pre-0.1.0 custom
+    // GATT service). Ignored at build time on targets without BLE.
+    wifi_config.prov_ble.device_name = "BrewPiESP-{id}";
+    wifi_config.prov_ble.security = WIFI_CFG_PROV_SECURITY_1;
+    wifi_config.prov_ble.pop = "brewpi";
+    // KEEP_ALL keeps the BT controller + BLE memory alive after the
+    // provisioning manager tears down, so bt_scanner can attach via
+    // NimBLEDevice::init() without re-initialising the controller.
+    wifi_config.prov_ble.memory_policy = WIFI_CFG_PROV_MEM_KEEP_ALL;
+    // Clear stored creds after max_failed_attempts so a wrong-password loop
+    // accepts a fresh attempt without rebooting.
+    wifi_config.prov_ble.reset_on_failure = true;
+    wifi_config.prov_ble.max_failed_attempts = 3;
 
     // Initialize WiFi Config
     esp_err_t err = wifi_cfg_init(&wifi_config);
@@ -287,6 +308,12 @@ void initialize_wifi() {
         vTaskDelay(pdMS_TO_TICKS(1000));
         esp_restart();
     }
+
+    // Push the config-file mDNS name into wifi_cfg's variable store now, before
+    // provisioning can start, so the captive portal wizard shows the current
+    // name. The var store is wiped by wifi_cfg_factory_reset() and would
+    // otherwise fall back to the "brewpi" default until we connect.
+    wifi_cfg_set_var("mdns_name", eepromManager.fetchmDNSName().c_str());
 
     // Wait for connection (5 minute timeout)
     err = wifi_cfg_wait_connected(5 * 60 * 1000);
