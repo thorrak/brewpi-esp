@@ -33,6 +33,14 @@
 #include "rest/rest_send.h"
 #include "http_server.h"
 
+#ifdef BREWPI_CHILLSIM_TEST
+#if __has_include("ChillsimTestCredentials.h")
+#include "ChillsimTestCredentials.h"
+#else
+#include "ChillsimTestCredentials.example.h"
+#endif
+#endif
+
 
 int telnet_server_fd = -1;
 int telnet_client_fd = -1;
@@ -242,7 +250,11 @@ void initialize_wifi() {
     // Default variables for WiFi Config - mdns_name is used to set the mDNS hostname
     // This provides a default value; if NVS has a stored value, that takes precedence
     static wifi_var_t default_vars[] = {
+#ifdef BREWPI_CHILLSIM_TEST
+        {"mdns_name", "chillsim"},
+#else
         {"mdns_name", "brewpi"},
+#endif
     };
 
     // Configure WiFi Config. Start from the library defaults (required as of
@@ -252,6 +264,19 @@ void initialize_wifi() {
     // designators in declaration order, which WIFI_CFG_DEFAULTS + overrides
     // cannot satisfy.
     wifi_cfg_config_t wifi_config = WIFI_CFG_DEFAULT_CONFIG();
+
+#ifdef BREWPI_CHILLSIM_TEST
+    // Reuse the trusted experiment LAN without logging credentials. Existing
+    // esp_wifi_config NVS networks still take precedence over these defaults.
+    static wifi_network_t test_network = {};
+    strlcpy(test_network.ssid, CHILLSIM_WIFI_SSID, sizeof(test_network.ssid));
+    strlcpy(test_network.password, CHILLSIM_WIFI_PASSWORD, sizeof(test_network.password));
+    test_network.priority = 1;
+    if (test_network.ssid[0]) {
+        wifi_config.default_networks = &test_network;
+        wifi_config.default_network_count = 1;
+    }
+#endif
 
     wifi_config.default_vars = default_vars;
     wifi_config.default_var_count = sizeof(default_vars) / sizeof(default_vars[0]);

@@ -5,7 +5,9 @@
 
 
 /**
- * Learned parameters for glycol mode (persisted to filesystem)
+ * Legacy predictive-controller parameters (retained on disk for rollback).
+ * Adaptive pulse-dose cooling does not consume or update these fields.
+ * Learned parameters for the former glycol mode (persisted to filesystem)
  * These adapt to the specific system characteristics over time
  */
 struct GlycolLearnedParams : public JSONSaveable {
@@ -24,7 +26,10 @@ struct GlycolLearnedParams : public JSONSaveable {
 };
 
 /**
- * Configuration parameters for glycol mode (persisted to filesystem)
+ * Legacy predictive cooling settings retained for configuration compatibility.
+ * Adaptive cooling uses the explicit SI-unit defaults in AdaptiveCooling::Config;
+ * these cooling fields are ignored. trigger_margin still controls heating start.
+ * Configuration parameters for legacy glycol mode (persisted to filesystem)
  */
 struct GlycolConfig : public JSONSaveable {
     // Timing

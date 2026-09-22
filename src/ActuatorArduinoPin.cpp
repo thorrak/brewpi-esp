@@ -19,6 +19,16 @@
 
 void DigitalPinActuator::setActive(bool active_setting) {
 
+#ifdef BREWPI_CHILLSIM_TEST
+    // GPIO25 is the known heater outlet. This test image cannot energize it,
+    // even through an old device mapping or a direct actuator-test command.
+    if (pin == 25) {
+        this->active = false;
+        gpio_set_level(GPIO_NUM_25, HIGH);
+        return;
+    }
+#endif
+
     bool oldActive = active;
     this->active = active_setting;
     gpio_set_level((gpio_num_t)pin, active_setting^invert ? HIGH : LOW);
@@ -32,4 +42,3 @@ void DigitalPinActuator::setActive(bool active_setting) {
     }
 
 }
-

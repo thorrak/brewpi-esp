@@ -70,6 +70,7 @@ class TempSensor {
   void setSensor(BasicTempSensor* sensor) {
    _sensor = sensor;
    failedReadCount = -1;
+   rawTemperature = TEMP_SENSOR_DISCONNECTED;
   }
 
   /**
@@ -95,6 +96,10 @@ class TempSensor {
 	bool isConnected() { return _sensor != NULL && _sensor->isConnected(); }
 
 	void update();
+
+	// Last successful update/init read, in offset Celsius Q9; never reads the bus.
+	// INVALID_TEMP immediately follows a failed read or sensor replacement.
+	temperature readRawCached() const { return rawTemperature; }
 
 	temperature readFastFiltered();
 
@@ -124,6 +129,7 @@ class TempSensor {
 
 	private:
 	BasicTempSensor* _sensor; //!< Wrapped basic sensor
+	temperature rawTemperature;
 	TempSensorFilter fastFilter; //!< Fast reacting filter
 	TempSensorFilter slowFilter; //!< Slow reacting filter
 	TempSensorFilter slopeFilter; //!< Slope filter

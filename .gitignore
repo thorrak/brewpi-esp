@@ -48,6 +48,9 @@ ui/coverage/
 ui/.env
 ui/.env.local
 ui/.env.*.local
+src/ChillsimTestCredentials.h
+# Generated from sdkconfig.defaults for the dedicated hardware test target.
+sdkconfig.esp32_chillsim_test
 # Files produced by `npm run build` and copied into data/ by build_ui.py.
 # Rebuild them locally with: pio run -e <env> -t buildfs
 data/5x8_lcd.eot

@@ -35,6 +35,7 @@
 #include "RotaryEncoder.h"
 #include "ChamberMode.h"
 #include "GlycolMode.h"
+#include <cmath>
 #include "GlycolLog.h"
 
 TempControl tempControl;
@@ -217,7 +218,8 @@ void TempControl::updatePID(){
         // Allow PID to continue using cached filter values for up to 60 seconds during temporary disconnections.
         // The filters retain their last valid values, providing resilience against brief sensor dropouts.
         // After 60 failed reads (~60 seconds), the cached data is too stale to be reliable.
-        if(beerSensor->getFailedReadCount() > 60) {
+        if(beerSensor->getFailedReadCount() > 60 ||
+           (useGlycolBeerMode(cs) && beerSensor->readRawCached() == INVALID_TEMP)) {
             return;
         }
 
@@ -235,7 +237,7 @@ void TempControl::updatePID(){
 
         if(useGlycolBeerMode(cs)) {
             // ===== GLYCOL MODE =====
-            // Cooling is predictive bang-bang; heating is beer-only time-proportional PID.
+            // Cooling is adaptive pulse dose; heating is beer-only time-proportional PID.
 
             // Set fridgeSetting to INVALID_TEMP since it's not used in glycol mode
             cs.fridgeSetting = INVALID_TEMP;
@@ -257,16 +259,19 @@ void TempControl::updatePID(){
 // Discard interrupted cycles, but preserve the actual output-off times so a
 // reconnect or mode change cannot bypass actuator protection.
 void TempControl::resetGlycolControl() {
-    uint32_t pumpOff = glycolRuntime.t_pump_off;
-    if (stateIsCooling()) {
-        lastCoolTime = ticks.seconds();
-        pumpOff = ticks.millis();
-    }
-    if (stateIsHeating()) {
-        lastHeatTime = ticks.seconds();
-    }
-    glycolRuntime.reset();
-    glycolRuntime.t_pump_off = pumpOff;
+    ControlContext controlCtx = makeControlContext();
+    GlycolMode::Context glycolCtx(controlCtx, glycolLearned, glycolConfig, glycolRuntime);
+    GlycolMode::suspend(glycolCtx);
+    // A mode transition into/out of manual test mode cannot rely on
+    // updateOutputs(), which normally bypasses commands in that mode.
+    // Apply the OFF edge now so the retained timing is the real command edge.
+    cooler->setActive(false);
+    heater->setActive(false);
+    if (cc.lightAsHeater) light->setActive(false);
+#ifdef BREWPI_CHILLSIM_TEST
+    light->setActive(false);
+#endif
+    fan->setActive(false);
     cv.p = cv.i = cv.d = 0;
     cv.diffIntegral = 0;
     waitTime = 0;
@@ -295,7 +300,8 @@ void TempControl::updateState(){
         bool fridgeRequired = !useGlycolBeerMode(cs);
         bool fridgeInvalid = (fridgeRequired && (!fridgeSensor->isConnected() || cs.fridgeSetting == INVALID_TEMP));
         bool beerInvalid = isBeerMode(cs) &&
-            (!beerSensor->isConnected() || cs.beerSetting == INVALID_TEMP);
+            (!beerSensor->isConnected() || cs.beerSetting == INVALID_TEMP ||
+             (useGlycolBeerMode(cs) && beerSensor->readRawCached() == INVALID_TEMP));
 
         if(fridgeInvalid || beerInvalid) {
             // Stay idle when a required sensor is disconnected or settings are invalid
@@ -308,7 +314,7 @@ void TempControl::updateState(){
     ControlContext controlCtx = makeControlContext();
 
     // ===== GLYCOL MODE STATE MACHINE =====
-    // Uses predictive bang-bang control (see GLYCOL_COOLING_ALGORITHM.md)
+    // Uses adaptive pulse dose (see docs/ADAPTIVE_GLYCOL_COOLING.md)
     if(useGlycolBeerMode(cs) && !stayIdle) {
         GlycolMode::Context glycolCtx(controlCtx, glycolLearned, glycolConfig, glycolRuntime);
         if (GlycolMode::updateState(glycolCtx)) {
@@ -325,11 +331,16 @@ void TempControl::updateState(){
 
 
 void TempControl::updateOutputs() {
+#ifndef BREWPI_CHILLSIM_TEST
 	if (cs.mode==Modes::test)
 		return;
+#endif
 		
 	cameraLight.update();
 	bool heating = stateIsHeating();
+#ifdef BREWPI_CHILLSIM_TEST
+	heating = false; // Physical test build cannot energize either heating path.
+#endif
 	bool cooling = stateIsCooling();
 	cooler->setActive(cooling);		
 	heater->setActive(!cc.lightAsHeater && heating);	
@@ -337,6 +348,9 @@ void TempControl::updateOutputs() {
 	bool lightActive = extendedSettings.glycol && cc.lightAsHeater
 		? heating
 		: isDoorOpen() || (cc.lightAsHeater && heating) || cameraLightState.isActive();
+	#ifdef BREWPI_CHILLSIM_TEST
+	lightActive = false;
+	#endif
 	light->setActive(lightActive);
 	fan->setActive(heating || cooling);
 }
@@ -484,6 +498,8 @@ void TempControl::setMode(char newMode, bool force){
 			cs.beerSetting = INVALID_TEMP;
 			cs.fridgeSetting = INVALID_TEMP;
 		}
+		// Apply the OFF edge before a filesystem write can delay the command.
+		if (extendedSettings.glycol) updateOutputs();
 		TempControl::storeSettings();
 	}
 }
@@ -541,6 +557,7 @@ void TempControl::setBeerTemp(temperature newTemp){
 	}
 	updatePID();
 	updateState();
+	if (extendedSettings.glycol) updateOutputs();
 	if(cs.mode != Modes::beerProfile || abs(storedBeerSetting - newTemp) > intToTempDiff(1)/4){
 		// more than 1/4 degree C difference with EEPROM
 		// Do not store settings every time in profile mode, because EEPROM has limited number of write cycles.
@@ -597,6 +614,59 @@ void TempControl::getControlVariablesDoc(JsonDocument& doc) {
   doc["posPeakEst"] = tempToDouble(cv.posPeakEstimate, Config::TempFormat::tempDecimals);
   doc["negPeak"] = tempToDouble(cv.negPeak, Config::TempFormat::tempDecimals);
   doc["posPeak"] = tempToDouble(cv.posPeak, Config::TempFormat::tempDecimals);
+#ifdef BREWPI_CHILLSIM_TEST
+  if (true) { // Identify the dedicated test image before enabling glycol mode.
+#else
+  if (extendedSettings.glycol) {
+#endif
+    // Explicit units: display format never changes these internal quantities.
+    JsonObject adaptive = doc["adaptiveCooling"].to<JsonObject>();
+    const auto& output = glycolRuntime.adaptive_output;
+    const auto& config = glycolRuntime.adaptive.configuration();
+    adaptive["algorithm"] = "adaptive-pulse-dose-v1";
+    adaptive["phase"] = AdaptiveCooling::Controller::phaseName(output.phase);
+    adaptive["pumpOn"] = output.pump_on;
+    adaptive["fullCooling"] = output.full_cooling;
+    adaptive["temperatureC"] = output.temperature_c;
+    adaptive["setpointC"] = cs.beerSetting == INVALID_TEMP ? 0.0 :
+        (static_cast<int32_t>(cs.beerSetting) - C_OFFSET) / 512.0;
+    adaptive["setpointValid"] = cs.beerSetting != INVALID_TEMP;
+    temperature raw = beerSensor->readRawCached();
+    adaptive["sensorValid"] = raw != INVALID_TEMP && beerSensor->isConnected();
+    adaptive["sensorConnected"] = beerSensor->isConnected();
+    adaptive["sensorFailedReads"] = beerSensor->getFailedReadCount();
+    if (raw == INVALID_TEMP) adaptive["rawC"] = nullptr;
+    else adaptive["rawC"] = (static_cast<int32_t>(raw) - C_OFFSET) / 512.0;
+    temperature glycolRaw = fridgeSensor->readRawCached();
+    adaptive["glycolSensorValid"] = glycolRaw != INVALID_TEMP && fridgeSensor->isConnected();
+    if (glycolRaw == INVALID_TEMP) adaptive["glycolRawC"] = nullptr;
+    else adaptive["glycolRawC"] = (static_cast<int32_t>(glycolRaw) - C_OFFSET) / 512.0;
+    adaptive["uptimeMillis"] = glycolRuntime.clock_elapsed_ms;
+    adaptive["coastAgeSeconds"] = output.phase == AdaptiveCooling::Phase::Coast
+        ? static_cast<uint32_t>(ticks.millis() - glycolRuntime.t_pump_off) / 1000.0 : 0.0;
+    adaptive["coolerActive"] = cooler->isActive();
+    adaptive["heaterActive"] = heater->isActive();
+    adaptive["lightActive"] = light->isActive();
+#ifdef BREWPI_CHILLSIM_TEST
+    adaptive["coolingOnlyBuild"] = true;
+#else
+    adaptive["coolingOnlyBuild"] = false;
+#endif
+    adaptive["rateCPerSecond"] = output.rate_c_per_s;
+    adaptive["gainCPerPumpSecond"] = output.gain_c_per_on_s;
+    adaptive["learningUpdates"] = output.learning_updates;
+    // Null pulse budget means continuous demand (JSON has no Infinity).
+    if (!std::isfinite(output.pulse_budget_s)) adaptive["pulseBudgetSeconds"] = nullptr;
+    else adaptive["pulseBudgetSeconds"] = output.pulse_budget_s;
+    adaptive["actualOnSeconds"] = output.pump_on
+        ? glycolRuntime.clock_elapsed_ms / 1000.0 - glycolRuntime.pump_started_s : 0.0;
+    adaptive["lastCompletedOnSeconds"] = output.actual_on_s;
+    adaptive["predictedEndpointC"] = output.predicted_endpoint_c;
+    adaptive["minOnSeconds"] = config.min_on_s;
+    adaptive["minOffSeconds"] = config.min_off_s;
+    adaptive["learningPersistence"] = "RAM only";
+    adaptive["legacyCoolingSettingsIgnored"] = true;
+  }
 }
 
 /**
@@ -636,6 +706,34 @@ void TempControl::getControlConstantsDoc(JsonDocument& doc) {
   doc["KiHeat"] = fixedPointToDouble(cc.Ki_heat, Config::TempFormat::fixedPointDecimals);
   doc["KdHeat"] = fixedPointToDouble(cc.Kd_heat, Config::TempFormat::fixedPointDecimals);
   doc["pidMaxHeat"] = tempDiffToDouble(cc.pidMax_heat, Config::TempFormat::tempDiffDecimals);
+#ifdef BREWPI_CHILLSIM_TEST
+  if (true) {
+#else
+  if (extendedSettings.glycol) {
+#endif
+    const auto& config = glycolRuntime.adaptive.configuration();
+    JsonObject dose = doc["adaptiveCoolingConfig"].to<JsonObject>();
+    dose["algorithm"] = "adaptive-pulse-dose-v1";
+    dose["min_on_s"] = config.min_on_s;
+    dose["min_off_s"] = config.min_off_s;
+    dose["rate_window_s"] = config.rate_window_s;
+    dose["measurement_window_s"] = config.measurement_window_s;
+    dose["deadband_c"] = config.deadband_c;
+    dose["initial_gain_c_per_on_s"] = config.initial_gain_c_per_on_s;
+    dose["minimum_gain_c_per_on_s"] = config.minimum_gain_c_per_on_s;
+    dose["maximum_gain_c_per_on_s"] = config.maximum_gain_c_per_on_s;
+    dose["dose_fraction"] = config.dose_fraction;
+    dose["learning_fraction"] = config.learning_fraction;
+    dose["observe_coast_s"] = config.observe_coast_s;
+    dose["max_observe_coast_s"] = config.max_observe_coast_s;
+    dose["initial_probe_s"] = config.initial_probe_s;
+    dose["far_probe_s"] = config.far_probe_s;
+    dose["far_error_c"] = config.far_error_c;
+    dose["saturation_dose_s"] = config.saturation_dose_s;
+    dose["unresolved_error_c"] = config.unresolved_error_c;
+    dose["stop_horizon_s"] = config.stop_horizon_s;
+    dose["settled_rate_c_per_s"] = config.settled_rate_c_per_s;
+  }
 }
 
 
@@ -651,6 +749,7 @@ void TempControl::getControlSettingsDoc(JsonDocument& doc) {
   doc["fridgeSet"] = tempToDouble(cs.fridgeSetting, Config::TempFormat::tempDecimals);
   doc["heatEst"] = fixedPointToDouble(cs.heatEstimator, Config::TempFormat::fixedPointDecimals);
   doc["coolEst"] = fixedPointToDouble(cs.coolEstimator, Config::TempFormat::fixedPointDecimals);
+
 }
 
 
@@ -782,8 +881,8 @@ void MinTimes::toJson(JsonDocument &doc) {
 }
 
 // ============================================================================
-// GLYCOL MODE: Predictive Bang-Bang Control Implementation
-// See GLYCOL_COOLING_ALGORITHM.md for design documentation
+// GLYCOL MODE: Adaptive pulse-dose runtime
+// See docs/ADAPTIVE_GLYCOL_COOLING.md for design documentation
 // ============================================================================
 
 
@@ -791,6 +890,18 @@ void MinTimes::toJson(JsonDocument &doc) {
 // ----- GlycolRuntimeState -----
 
 void GlycolRuntimeState::reset() {
+    adaptive.reset();
+    adaptive_output = adaptive.output();
+    clock_initialized = false;
+    clock_last_ms = 0;
+    clock_elapsed_ms = 0;
+    adaptive_step_initialized = false;
+    adaptive_last_step_ms = 0;
+    pid_step_initialized = false;
+    pid_last_step_ms = 0;
+    last_heater_active_s = 0;
+    last_pump_active_s = 0;
+    pump_started_s = 0;
     state = GLYCOL_IDLE;
     t_pump_on = 0;
     t_pump_off = 0;

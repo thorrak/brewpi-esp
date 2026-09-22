@@ -37,11 +37,14 @@ class DigitalPinActuator ACTUATOR_BASE_CLASS_DECL
 	private:
 	bool invert;
 	uint8_t pin;
-	bool active;
+	bool active = false;
 	public:
 	DigitalPinActuator(uint8_t pin, bool invert) {
 		this->invert = invert;
 		this->pin = pin;
+#ifdef BREWPI_CHILLSIM_TEST
+        if (pin == 25 || pin == 26) this->invert = true;
+#endif
 		setActive(false);
 		gpio_set_direction((gpio_num_t)pin, GPIO_MODE_OUTPUT);
 	}

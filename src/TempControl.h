@@ -29,6 +29,7 @@
 #include "ActuatorAutoOff.h"
 #include "EepromStructs.h"
 #include "GlycolParams.h"
+#include "AdaptiveDoseController.h"
 #include <ArduinoJson.h>
 
 struct ControlContext;
@@ -42,17 +43,17 @@ struct ControlContext;
  * @{
  */
 
-// ===== GLYCOL MODE: Predictive Bang-Bang Control =====
-// See GLYCOL_COOLING_ALGORITHM.md for full design documentation
+// ===== GLYCOL MODE: Adaptive pulse-dose cooling / time-proportional heating =====
+// See docs/ADAPTIVE_GLYCOL_COOLING.md for the active cooling algorithm.
 
 /**
- * Glycol controller states for predictive bang-bang control
+ * Legacy public state labels retained for adaptive cooling diagnostics
  */
 enum GlycolState : uint8_t {
     GLYCOL_IDLE = 0,              //!< Monitoring temperature, waiting to cool
     GLYCOL_COOLING = 1,           //!< Pump on, actively cooling
     GLYCOL_COASTING = 2,          //!< Pump off, temperature still dropping, measuring coast
-    GLYCOL_EMERGENCY_COOLING = 3, //!< Can't keep up - running pump continuously
+    GLYCOL_EMERGENCY_COOLING = 3, //!< Adaptive full cooling; same stop rules, no forced dwell
     GLYCOL_HEATING = 4            //!< Beer-only heating via time-proportional duty cycle
 };
 
@@ -106,6 +107,21 @@ constexpr uint8_t RATE_BUFFER_SIZE = 30;
  * Runtime state for glycol controller (not persisted)
  */
 struct GlycolRuntimeState {
+    // These parameters/state are deliberately independent of legacy k/C_off/L files.
+    AdaptiveCooling::Controller adaptive{};
+    AdaptiveCooling::Output adaptive_output{};
+    bool clock_initialized = false;
+    uint32_t clock_last_ms = 0;
+    uint64_t clock_elapsed_ms = 0;
+    bool adaptive_step_initialized = false;
+    uint64_t adaptive_last_step_ms = 0;
+    bool pid_step_initialized = false;
+    uint64_t pid_last_step_ms = 0;
+    // Real active-interval ends on the extended monotonic clock. Boot starts at 0.
+    double last_heater_active_s = 0;
+    double last_pump_active_s = 0;
+    double pump_started_s = 0;
+
     GlycolState state;                    //!< Current glycol state machine state
     uint32_t t_pump_on;                   //!< Timestamp when pump turned on (ms)
     uint32_t t_pump_off;                  //!< Timestamp when pump turned off (ms)
@@ -181,7 +197,7 @@ public:
 
     // Glycol mode time-proportional control settings
     uint16_t GLYCOL_WINDOW_PERIOD;  //! Window period for time-proportional control in seconds (default: 1000s)
-    uint16_t GLYCOL_MIN_ON_TIME;    //! Minimum on-time for glycol pump in seconds (default: 10s)
+    uint16_t GLYCOL_MIN_ON_TIME;    //! Minimum heating duty slice; cooling uses AdaptiveCooling::Config (2s)
 
 	void toJson(JsonDocument &doc);
     void storeToFilesystem();

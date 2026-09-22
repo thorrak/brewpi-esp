@@ -204,6 +204,12 @@ void setup()
 
 	settingsManager.loadSettings();  // Also fully loads devices
 
+#ifdef BREWPI_CHILLSIM_TEST
+    // A reboot never silently resumes an unattended hardware experiment.
+    tempControl.setMode(Modes::off, true);
+    tempControl.updateOutputs();
+#endif
+
 #if BREWPI_SIMULATE
 	simulator.step();
 	// initialize the filters with the assigned initial temp value
@@ -332,6 +338,14 @@ void loop() {
 }
 
 extern "C" void app_main(void) {
+#ifdef BREWPI_CHILLSIM_TEST
+    // Establish OFF before NVS recovery, filesystem or network initialization.
+    // The known shield is active-low even without persisted device settings.
+    gpio_set_level(GPIO_NUM_25, 1);
+    gpio_set_level(GPIO_NUM_26, 1);
+    gpio_set_direction(GPIO_NUM_25, GPIO_MODE_OUTPUT);
+    gpio_set_direction(GPIO_NUM_26, GPIO_MODE_OUTPUT);
+#endif
     // Initialize NVS (required for WiFi credential storage)
     esp_err_t nvs_ret = nvs_flash_init();
     if (nvs_ret == ESP_ERR_NVS_NO_FREE_PAGES || nvs_ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -361,4 +375,3 @@ extern "C" void app_main(void) {
         1  // Core 1 = app core
     );
 }
-

@@ -22,7 +22,10 @@ struct Context : ControlContext {
 };
 
 void updatePID(Context& ctx, unsigned char& integralUpdateCounter);
-// Returns true when learned glycol parameters should be persisted by the caller.
+// Immediate fault/mode inhibition: preserves learned dose gain and actual OFF time.
+void suspend(Context& ctx);
+
+// Always false: adaptive learning is intentionally RAM-only; no legacy file writes.
 bool updateState(Context& ctx);
 
 } // namespace GlycolMode

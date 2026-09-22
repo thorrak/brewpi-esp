@@ -1204,6 +1204,15 @@ void DeviceManager::preloadActuatorPins() {
 	for (uint8_t i = 0; i < Config::EepromFormat::MAX_DEVICES; i++) {
 		DeviceConfig dev;
 		dev = eepromManager.fetchDevice(i);
+#ifdef BREWPI_CHILLSIM_TEST
+        // The known shield is active-low regardless of stale saved polarity.
+        if (dev.deviceHardware == DEVICE_HARDWARE_PIN &&
+            (dev.hw.pinNr == 25 || dev.hw.pinNr == 26)) {
+            gpio_set_level((gpio_num_t)dev.hw.pinNr, HIGH);
+            gpio_set_direction((gpio_num_t)dev.hw.pinNr, GPIO_MODE_OUTPUT);
+            continue;
+        }
+#endif
 		if (dev.deviceHardware == DEVICE_HARDWARE_PIN) {
 			if (deviceType(dev.deviceFunction) == DEVICETYPE_SWITCH_ACTUATOR) {
 				gpio_set_level((gpio_num_t)dev.hw.pinNr, dev.hw.invert ? HIGH : LOW);
