@@ -14,8 +14,6 @@
 // Scratchpad byte indices
 #define SCRATCHPAD_TH_USER1  2  // HIGH_ALARM_TEMP - used for reset detection
 
-static const char *TAG = "esp_ds18b20";
-
 typedef struct  {
   uint8_t temp_lsb;
   uint8_t temp_msb;
