@@ -231,8 +231,8 @@ void transitionToIdle(GlycolMode::Context& ctx) {
 void transitionToHeating(GlycolMode::Context& ctx) {
     // Discard any incomplete cooling observation. Heating must never be learned
     // as passive drift or as a weak cooling dose.
-    ctx.runtime.adaptive_output = ctx.runtime.adaptive.inhibit(monotonicSeconds(ctx));
-    ctx.runtime.adaptive_step_initialized = false;
+    ctx.runtime.predictive_output = ctx.runtime.predictive.inhibit(monotonicSeconds(ctx));
+    ctx.runtime.predictive_step_initialized = false;
     ctx.runtime.state = GLYCOL_HEATING;
     resetHeatingWindow(ctx);
     ctx.runtime.heating_wait_reason = GLYCOL_HEATING_WAIT_NONE;
@@ -265,7 +265,7 @@ void updateHeatingState(GlycolMode::Context& ctx) {
 
 void applyCoolingOutput(GlycolMode::Context& ctx, bool wasCooling) {
     auto& runtime = ctx.runtime;
-    const auto& output = runtime.adaptive_output;
+    const auto& output = runtime.predictive_output;
     runtime.current_cooling_rate = output.rate_c_per_s * 60.0; // always C/min
     runtime.cooling_confirmed = output.rate_c_per_s < 0;
     runtime.force_minimum_cooling = false;
@@ -283,7 +283,7 @@ void applyCoolingOutput(GlycolMode::Context& ctx, bool wasCooling) {
         runtime.cooling_duration_s = static_cast<uint16_t>(std::min(65535.0, activeSeconds));
         runtime.state = output.full_cooling ? GLYCOL_EMERGENCY_COOLING : GLYCOL_COOLING;
         // Full cooling is a diagnostic label, not an overriding emergency mode.
-        ctx.state = activeSeconds < runtime.adaptive.configuration().min_on_s
+        ctx.state = activeSeconds < runtime.predictive.configuration().min_on_s
             ? COOLING_MIN_TIME : COOLING;
         runtime.last_pump_active_s = runtime.clock_elapsed_ms / 1000.0;
         ctx.lastCoolTime = ticks.seconds();
@@ -296,7 +296,7 @@ void applyCoolingOutput(GlycolMode::Context& ctx, bool wasCooling) {
             runtime.cooling_duration_s = static_cast<uint16_t>(std::min(65535.0,
                 static_cast<uint32_t>(runtime.t_pump_off - runtime.t_pump_on) / 1000.0));
         }
-        runtime.state = output.phase == AdaptiveCooling::Phase::Coast
+        runtime.state = output.phase == PredictiveCooling::Phase::Coast
             ? GLYCOL_COASTING : GLYCOL_IDLE;
         if (runtime.state == GLYCOL_COASTING) {
             runtime.min_temp_reached = std::min(runtime.min_temp_reached,
@@ -383,8 +383,8 @@ void suspend(Context& ctx) {
     double now = monotonicSeconds(ctx);
     bool wasCooling = stateIsCooling(ctx);
     trackActiveIntervalEnds(ctx, now);
-    ctx.runtime.adaptive_output = ctx.runtime.adaptive.inhibit(now);
-    ctx.runtime.adaptive_step_initialized = false;
+    ctx.runtime.predictive_output = ctx.runtime.predictive.inhibit(now);
+    ctx.runtime.predictive_step_initialized = false;
     if (wasCooling) ctx.runtime.t_pump_off = ticks.millis();
     ctx.runtime.current_cooling_rate = 0;
     ctx.runtime.cooling_confirmed = false;
@@ -409,8 +409,8 @@ bool updateState(Context& ctx) {
     }
 
     if (ctx.runtime.state == GLYCOL_HEATING) {
-        ctx.runtime.adaptive_output = ctx.runtime.adaptive.inhibit(now);
-        ctx.runtime.adaptive_step_initialized = false;
+        ctx.runtime.predictive_output = ctx.runtime.predictive.inhibit(now);
+        ctx.runtime.predictive_step_initialized = false;
         updateHeatingState(ctx);
         return false;
     }
@@ -423,8 +423,8 @@ bool updateState(Context& ctx) {
     // blocked command must never become a fictitious pulse or learning sample.
     uint16_t sinceHeating = timeSinceHeating(ctx);
     if (sinceHeating < ctx.minTimes.MIN_SWITCH_TIME) {
-        ctx.runtime.adaptive_output = ctx.runtime.adaptive.inhibit(now);
-        ctx.runtime.adaptive_step_initialized = false;
+        ctx.runtime.predictive_output = ctx.runtime.predictive.inhibit(now);
+        ctx.runtime.predictive_step_initialized = false;
         ctx.runtime.state = GLYCOL_IDLE;
         if (raw > ctx.cs.beerSetting) {
             ctx.state = WAITING_TO_COOL;
@@ -440,16 +440,16 @@ bool updateState(Context& ctx) {
     // The raw sensor is already sampled/cached by updateTemperatures. Do not
     // perform another OneWire read or consume the old cascaded fast filter.
     // Repeated UI calls hold the last command until the next 1 Hz decision.
-    if (ctx.runtime.adaptive_step_initialized &&
-        ctx.runtime.clock_elapsed_ms - ctx.runtime.adaptive_last_step_ms < 1000) {
+    if (ctx.runtime.predictive_step_initialized &&
+        ctx.runtime.clock_elapsed_ms - ctx.runtime.predictive_last_step_ms < 1000) {
         return false;
     }
-    ctx.runtime.adaptive_step_initialized = true;
-    ctx.runtime.adaptive_last_step_ms = ctx.runtime.clock_elapsed_ms;
-    ctx.runtime.adaptive_output = ctx.runtime.adaptive.step(
+    ctx.runtime.predictive_step_initialized = true;
+    ctx.runtime.predictive_last_step_ms = ctx.runtime.clock_elapsed_ms;
+    ctx.runtime.predictive_output = ctx.runtime.predictive.step(
         now, rawCelsius(raw), rawCelsius(ctx.cs.beerSetting));
     applyCoolingOutput(ctx, wasCooling);
-    // Legacy persisted k/C_off/L are neither read nor written by adaptive dose.
+    // Legacy persisted k/C_off/L are neither read nor written by predictive cooling.
     return false;
 }
 

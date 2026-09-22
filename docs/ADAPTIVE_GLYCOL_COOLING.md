@@ -1,5 +1,10 @@
 # Adaptive pulse-dose glycol cooling
 
+This document describes the parent `codex/adaptive-glycol-cooling` branch. On
+`predictive-glycol-cooling`, the active glycol cooling policy is described in
+[Predictive glycol cooling](PREDICTIVE_GLYCOL_COOLING.md). The portable adaptive
+core remains as a comparison reference; it is not the active cooling policy here.
+
 This branch replaces the predictive bang-bang cooling path from
 `codex/glycol-heating-v17` (`aafe224`) with the frozen adaptive pulse-dose candidate
 benchmarked in the chillsim simulator. It retains the normal BrewPi heating PID,

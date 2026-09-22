@@ -237,7 +237,7 @@ void TempControl::updatePID(){
 
         if(useGlycolBeerMode(cs)) {
             // ===== GLYCOL MODE =====
-            // Cooling is adaptive pulse dose; heating is beer-only time-proportional PID.
+            // Cooling is predictive coast; heating is beer-only time-proportional PID.
 
             // Set fridgeSetting to INVALID_TEMP since it's not used in glycol mode
             cs.fridgeSetting = INVALID_TEMP;
@@ -314,7 +314,7 @@ void TempControl::updateState(){
     ControlContext controlCtx = makeControlContext();
 
     // ===== GLYCOL MODE STATE MACHINE =====
-    // Uses adaptive pulse dose (see docs/ADAPTIVE_GLYCOL_COOLING.md)
+    // Uses predictive coast (see docs/PREDICTIVE_GLYCOL_COOLING.md)
     if(useGlycolBeerMode(cs) && !stayIdle) {
         GlycolMode::Context glycolCtx(controlCtx, glycolLearned, glycolConfig, glycolRuntime);
         if (GlycolMode::updateState(glycolCtx)) {
@@ -620,52 +620,54 @@ void TempControl::getControlVariablesDoc(JsonDocument& doc) {
   if (extendedSettings.glycol) {
 #endif
     // Explicit units: display format never changes these internal quantities.
-    JsonObject adaptive = doc["adaptiveCooling"].to<JsonObject>();
-    const auto& output = glycolRuntime.adaptive_output;
-    const auto& config = glycolRuntime.adaptive.configuration();
-    adaptive["algorithm"] = "adaptive-pulse-dose-v1";
-    adaptive["phase"] = AdaptiveCooling::Controller::phaseName(output.phase);
-    adaptive["pumpOn"] = output.pump_on;
-    adaptive["fullCooling"] = output.full_cooling;
-    adaptive["temperatureC"] = output.temperature_c;
-    adaptive["setpointC"] = cs.beerSetting == INVALID_TEMP ? 0.0 :
+    JsonObject predictive = doc["predictiveCooling"].to<JsonObject>();
+    const auto& output = glycolRuntime.predictive_output;
+    const auto& config = glycolRuntime.predictive.configuration();
+    predictive["algorithm"] = "predictive-coast-v1";
+    predictive["phase"] = PredictiveCooling::Controller::phaseName(output.phase);
+    predictive["pumpOn"] = output.pump_on;
+    predictive["fullCooling"] = output.full_cooling;
+    predictive["temperatureC"] = output.temperature_c;
+    predictive["setpointC"] = cs.beerSetting == INVALID_TEMP ? 0.0 :
         (static_cast<int32_t>(cs.beerSetting) - C_OFFSET) / 512.0;
-    adaptive["setpointValid"] = cs.beerSetting != INVALID_TEMP;
+    predictive["setpointValid"] = cs.beerSetting != INVALID_TEMP;
     temperature raw = beerSensor->readRawCached();
-    adaptive["sensorValid"] = raw != INVALID_TEMP && beerSensor->isConnected();
-    adaptive["sensorConnected"] = beerSensor->isConnected();
-    adaptive["sensorFailedReads"] = beerSensor->getFailedReadCount();
-    if (raw == INVALID_TEMP) adaptive["rawC"] = nullptr;
-    else adaptive["rawC"] = (static_cast<int32_t>(raw) - C_OFFSET) / 512.0;
+    predictive["sensorValid"] = raw != INVALID_TEMP && beerSensor->isConnected();
+    predictive["sensorConnected"] = beerSensor->isConnected();
+    predictive["sensorFailedReads"] = beerSensor->getFailedReadCount();
+    if (raw == INVALID_TEMP) predictive["rawC"] = nullptr;
+    else predictive["rawC"] = (static_cast<int32_t>(raw) - C_OFFSET) / 512.0;
     temperature glycolRaw = fridgeSensor->readRawCached();
-    adaptive["glycolSensorValid"] = glycolRaw != INVALID_TEMP && fridgeSensor->isConnected();
-    if (glycolRaw == INVALID_TEMP) adaptive["glycolRawC"] = nullptr;
-    else adaptive["glycolRawC"] = (static_cast<int32_t>(glycolRaw) - C_OFFSET) / 512.0;
-    adaptive["uptimeMillis"] = glycolRuntime.clock_elapsed_ms;
-    adaptive["coastAgeSeconds"] = output.phase == AdaptiveCooling::Phase::Coast
+    predictive["glycolSensorValid"] = glycolRaw != INVALID_TEMP && fridgeSensor->isConnected();
+    if (glycolRaw == INVALID_TEMP) predictive["glycolRawC"] = nullptr;
+    else predictive["glycolRawC"] = (static_cast<int32_t>(glycolRaw) - C_OFFSET) / 512.0;
+    predictive["uptimeMillis"] = glycolRuntime.clock_elapsed_ms;
+    predictive["coastAgeSeconds"] = output.phase == PredictiveCooling::Phase::Coast
         ? static_cast<uint32_t>(ticks.millis() - glycolRuntime.t_pump_off) / 1000.0 : 0.0;
-    adaptive["coolerActive"] = cooler->isActive();
-    adaptive["heaterActive"] = heater->isActive();
-    adaptive["lightActive"] = light->isActive();
+    predictive["coolerActive"] = cooler->isActive();
+    predictive["heaterActive"] = heater->isActive();
+    predictive["lightActive"] = light->isActive();
 #ifdef BREWPI_CHILLSIM_TEST
-    adaptive["coolingOnlyBuild"] = true;
+    predictive["coolingOnlyBuild"] = true;
 #else
-    adaptive["coolingOnlyBuild"] = false;
+    predictive["coolingOnlyBuild"] = false;
 #endif
-    adaptive["rateCPerSecond"] = output.rate_c_per_s;
-    adaptive["gainCPerPumpSecond"] = output.gain_c_per_on_s;
-    adaptive["learningUpdates"] = output.learning_updates;
+    predictive["rateCPerSecond"] = output.rate_c_per_s;
+    predictive["coastSeconds"] = output.coast_s;
+    predictive["budgetGainCPerPumpSecond"] = output.budget_gain_c_per_s;
+    predictive["responseUpdates"] = output.response_updates;
+    predictive["learningUpdates"] = output.learning_updates;
     // Null pulse budget means continuous demand (JSON has no Infinity).
-    if (!std::isfinite(output.pulse_budget_s)) adaptive["pulseBudgetSeconds"] = nullptr;
-    else adaptive["pulseBudgetSeconds"] = output.pulse_budget_s;
-    adaptive["actualOnSeconds"] = output.pump_on
+    if (!std::isfinite(output.pulse_budget_s)) predictive["pulseBudgetSeconds"] = nullptr;
+    else predictive["pulseBudgetSeconds"] = output.pulse_budget_s;
+    predictive["actualOnSeconds"] = output.pump_on
         ? glycolRuntime.clock_elapsed_ms / 1000.0 - glycolRuntime.pump_started_s : 0.0;
-    adaptive["lastCompletedOnSeconds"] = output.actual_on_s;
-    adaptive["predictedEndpointC"] = output.predicted_endpoint_c;
-    adaptive["minOnSeconds"] = config.min_on_s;
-    adaptive["minOffSeconds"] = config.min_off_s;
-    adaptive["learningPersistence"] = "RAM only";
-    adaptive["legacyCoolingSettingsIgnored"] = true;
+    predictive["lastCompletedOnSeconds"] = output.actual_on_s;
+    predictive["predictedEndpointC"] = output.predicted_endpoint_c;
+    predictive["minOnSeconds"] = config.min_on_s;
+    predictive["minOffSeconds"] = config.min_off_s;
+    predictive["learningPersistence"] = "RAM only";
+    predictive["legacyCoolingSettingsIgnored"] = true;
   }
 }
 
@@ -711,28 +713,28 @@ void TempControl::getControlConstantsDoc(JsonDocument& doc) {
 #else
   if (extendedSettings.glycol) {
 #endif
-    const auto& config = glycolRuntime.adaptive.configuration();
-    JsonObject dose = doc["adaptiveCoolingConfig"].to<JsonObject>();
-    dose["algorithm"] = "adaptive-pulse-dose-v1";
-    dose["min_on_s"] = config.min_on_s;
-    dose["min_off_s"] = config.min_off_s;
-    dose["rate_window_s"] = config.rate_window_s;
-    dose["measurement_window_s"] = config.measurement_window_s;
-    dose["deadband_c"] = config.deadband_c;
-    dose["initial_gain_c_per_on_s"] = config.initial_gain_c_per_on_s;
-    dose["minimum_gain_c_per_on_s"] = config.minimum_gain_c_per_on_s;
-    dose["maximum_gain_c_per_on_s"] = config.maximum_gain_c_per_on_s;
-    dose["dose_fraction"] = config.dose_fraction;
-    dose["learning_fraction"] = config.learning_fraction;
-    dose["observe_coast_s"] = config.observe_coast_s;
-    dose["max_observe_coast_s"] = config.max_observe_coast_s;
-    dose["initial_probe_s"] = config.initial_probe_s;
-    dose["far_probe_s"] = config.far_probe_s;
-    dose["far_error_c"] = config.far_error_c;
-    dose["saturation_dose_s"] = config.saturation_dose_s;
-    dose["unresolved_error_c"] = config.unresolved_error_c;
-    dose["stop_horizon_s"] = config.stop_horizon_s;
-    dose["settled_rate_c_per_s"] = config.settled_rate_c_per_s;
+    const auto& config = glycolRuntime.predictive.configuration();
+    JsonObject predictive = doc["predictiveCoolingConfig"].to<JsonObject>();
+    predictive["algorithm"] = "predictive-coast-v1";
+    predictive["min_on_s"] = config.min_on_s;
+    predictive["min_off_s"] = config.min_off_s;
+    predictive["rate_window_s"] = config.rate_window_s;
+    predictive["measurement_window_s"] = config.measurement_window_s;
+    predictive["deadband_c"] = config.deadband_c;
+    predictive["initial_coast_s"] = config.initial_coast_s;
+    predictive["min_coast_estimate_s"] = config.min_coast_estimate_s;
+    predictive["max_coast_estimate_s"] = config.max_coast_estimate_s;
+    predictive["learning_fraction"] = config.learning_fraction;
+    predictive["rate_floor_c_per_s"] = config.rate_floor_c_per_s;
+    predictive["observe_coast_s"] = config.observe_coast_s;
+    predictive["max_observe_coast_s"] = config.max_observe_coast_s;
+    predictive["near_target_c"] = config.near_target_c;
+    predictive["startup_pulse_s"] = config.startup_pulse_s;
+    predictive["startup_budget_c_per_s"] = config.startup_budget_c_per_s;
+    predictive["restart_margin_c"] = config.restart_margin_c;
+    predictive["budget_learning_fraction"] = config.budget_learning_fraction;
+    predictive["minimum_budget_gain_c_per_s"] = config.minimum_budget_gain_c_per_s;
+    predictive["maximum_blind_budget_s"] = config.maximum_blind_budget_s;
   }
 }
 
@@ -881,8 +883,8 @@ void MinTimes::toJson(JsonDocument &doc) {
 }
 
 // ============================================================================
-// GLYCOL MODE: Adaptive pulse-dose runtime
-// See docs/ADAPTIVE_GLYCOL_COOLING.md for design documentation
+// GLYCOL MODE: Predictive coast runtime
+// See docs/PREDICTIVE_GLYCOL_COOLING.md for design documentation
 // ============================================================================
 
 
@@ -890,13 +892,13 @@ void MinTimes::toJson(JsonDocument &doc) {
 // ----- GlycolRuntimeState -----
 
 void GlycolRuntimeState::reset() {
-    adaptive.reset();
-    adaptive_output = adaptive.output();
+    predictive.reset();
+    predictive_output = predictive.output();
     clock_initialized = false;
     clock_last_ms = 0;
     clock_elapsed_ms = 0;
-    adaptive_step_initialized = false;
-    adaptive_last_step_ms = 0;
+    predictive_step_initialized = false;
+    predictive_last_step_ms = 0;
     pid_step_initialized = false;
     pid_last_step_ms = 0;
     last_heater_active_s = 0;

@@ -1,0 +1,143 @@
+/*
+ * Predictive coast cooling, ported from chillsim's frozen controller.
+ * Copyright (C) 2026 BrewPi contributors
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *
+ * This core uses only time, beer temperature, setpoint and pump history.
+ * All temperatures are Celsius, rates Celsius/second, and times seconds.
+ * Feed cached raw sensor readings at 1 Hz; do not prefilter the input.
+ */
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+
+namespace PredictiveCooling {
+
+struct Config {
+    double min_on_s = 2.0;
+    double min_off_s = 2.0;
+    double rate_window_s = 90.0;
+    double measurement_window_s = 12.0;
+    double deadband_c = 0.04;
+    double initial_coast_s = 300.0;
+    double min_coast_estimate_s = 90.0;
+    double max_coast_estimate_s = 1800.0;
+    double learning_fraction = 0.3;
+    double rate_floor_c_per_s = 0.00005;
+    double observe_coast_s = 450.0;
+    double max_observe_coast_s = 2400.0;
+    double near_target_c = 1.0;
+    double startup_pulse_s = 2.0;
+    double startup_budget_c_per_s = 0.03;
+    double restart_margin_c = 0.04;
+    double budget_learning_fraction = 0.5;
+    double minimum_budget_gain_c_per_s = 0.00005;
+    double maximum_blind_budget_s = 120.0;
+};
+
+enum class Phase : uint8_t {
+    Idle,
+    Cool,
+    Coast,
+    DisabledOrSensorFault,
+    SetpointChangeWait
+};
+
+struct Output {
+    Phase phase;
+    bool pump_on;
+    bool full_cooling;
+    double temperature_c;
+    double rate_c_per_s;
+    double setpoint_c;
+    uint32_t learning_updates;
+    double coast_s;
+    double budget_gain_c_per_s;
+    uint32_t response_updates;
+    // Infinity means continuous cooling; stop prediction still remains active.
+    double pulse_budget_s;
+    double predicted_endpoint_c;
+    double actual_on_s;
+};
+
+class Controller {
+public:
+    explicit Controller(const Config& config = Config());
+
+    // An identical tick returns the cached result; an invalid sample on any
+    // tick (including a duplicate) overrides that cache and immediately stops.
+    // A backwards/invalid clock also fails OFF. No clock wrap is inferred here:
+    // the caller must provide a monotonically increasing 64-bit-derived clock.
+    Output step(double time_s, double sensor_c, double setpoint_c,
+                bool sensor_connected = true);
+
+    // Abort the current response and clear measurements, retaining learned coast, gain and
+    // learning counts. Repeated calls preserve the actual previous OFF edge.
+    // Used for faults, mode changes, heater/switch gates and explicit disable.
+    Output inhibit(double time_s);
+    void resetRuntime(double time_s) { inhibit(time_s); }
+
+    // Full reset is only for initialization/reconfiguration with outputs OFF.
+    // Runtime inhibition must use inhibit() so relay timing is not forgotten.
+    void reset();
+    bool configurationValid() const { return config_valid_; }
+    const Config& configuration() const { return config_; }
+    const Output& output() const { return output_; }
+    static const char* phaseName(Phase phase);
+
+private:
+    struct Sample { double time_s; double value_c; };
+    // Append precedes expiry, exactly as in the Python reference. Spare space
+    // accommodates 91 rate samples + one append and 13 short samples + append.
+    static constexpr std::size_t kRateCapacity = 128;
+    static constexpr std::size_t kShortCapacity = 32;
+    template <std::size_t N> struct Samples {
+        Sample values[N];
+        std::size_t begin = 0;
+        std::size_t size = 0;
+        void clear() { begin = 0; size = 0; }
+        const Sample& at(std::size_t i) const { return values[(begin + i) % N]; }
+        bool append(Sample sample) {
+            if (size == N) return false;
+            values[(begin + size) % N] = sample;
+            ++size;
+            return true;
+        }
+        Sample pop() {
+            Sample sample = values[begin];
+            begin = (begin + 1) % N;
+            --size;
+            return sample;
+        }
+    };
+
+    Config config_;
+    bool config_valid_;
+    bool pump_on_;
+    bool restart_required_;
+    double last_edge_s_;
+    double last_time_s_;
+    double setpoint_c_;
+    Samples<kRateCapacity> samples_;
+    Samples<kShortCapacity> short_samples_;
+    double sum_y_, sum_ty_, sum_t_, sum_tt_, time_origin_, short_sum_;
+    double temperature_c_, raw_c_, rate_c_per_s_;
+    uint32_t learning_updates_;
+    double coast_s_, budget_gain_;
+    uint32_t response_updates_;
+    Phase phase_;
+    double start_c_, off_c_, off_rate_, start_s_, off_s_;
+    double pulse_budget_s_, actual_on_s_;
+    Output output_;
+
+    static bool validate(const Config& config);
+    void clearMeasurements();
+    void resetTransient();
+    bool observe(double time_s, double value_c);
+    bool switchPump(double time_s, bool desired, bool fail_off = false);
+    Output emit(Phase phase, double predicted_endpoint_c);
+    Output control(double time_s);
+};
+
+} // namespace PredictiveCooling
