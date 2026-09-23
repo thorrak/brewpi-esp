@@ -421,6 +421,12 @@ void CommandProcessor::processExtendedSettingsJson() {
   JsonDocument doc;
   piLink.receiveJsonMessage(doc);
 
+  if (!ExtendedSettings::validateSettingsJson(doc)) {
+    // Report the unchanged settings; do not partly apply an invalid request.
+    sendExtendedSettings();
+    return;
+  }
+
   // Process
   JsonObject root = doc.as<JsonObject>();
   for (JsonPair kv : root) {

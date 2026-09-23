@@ -311,6 +311,7 @@ ExtendedSettings::ExtendedSettings() {
 void ExtendedSettings::setDefaults() {
     invertTFT = false;
     glycol = false;
+    glycolCoolingAlgorithm = GlycolCooling::Algorithm::PredictiveCoast;
     largeTFT = false;
     resetScreenOnPin = false;
 #ifdef HAS_BLUETOOTH
@@ -327,6 +328,7 @@ void ExtendedSettings::toJson(JsonDocument &doc) {
     // Load the settings into the JSON Doc
     doc[ExtendedSettingsKeys::invertTFT] = invertTFT;
     doc[ExtendedSettingsKeys::glycol] = glycol;
+    doc[ExtendedSettingsKeys::glycolCoolingAlgorithm] = GlycolCooling::selectionName(glycolCoolingAlgorithm);
     doc[ExtendedSettingsKeys::largeTFT] = largeTFT;
     doc[ExtendedSettingsKeys::resetScreenOnPin] = resetScreenOnPin;
 #ifdef HAS_BLUETOOTH
@@ -358,12 +360,42 @@ void ExtendedSettings::loadFromFilesystem() {
     // Load the constants from the JSON Doc
     if(json_doc[ExtendedSettingsKeys::invertTFT].is<bool>()) invertTFT = json_doc[ExtendedSettingsKeys::invertTFT];
     if(json_doc[ExtendedSettingsKeys::glycol].is<bool>()) glycol = json_doc[ExtendedSettingsKeys::glycol];
+    if(json_doc[ExtendedSettingsKeys::glycolCoolingAlgorithm].is<const char *>()) {
+        // Missing or invalid values keep the predictive default used by older firmware.
+        GlycolCooling::parseAlgorithm(json_doc[ExtendedSettingsKeys::glycolCoolingAlgorithm].as<const char *>(), glycolCoolingAlgorithm);
+    }
     if(json_doc[ExtendedSettingsKeys::largeTFT].is<bool>()) largeTFT = json_doc[ExtendedSettingsKeys::largeTFT];
     if(json_doc[ExtendedSettingsKeys::resetScreenOnPin].is<bool>()) resetScreenOnPin = json_doc[ExtendedSettingsKeys::resetScreenOnPin];
 #ifdef HAS_BLUETOOTH
     // Tilts use address type 1 ("random", which (correctly!) indicates they didn't buy a MAC block)
     if(json_doc[ExtendedSettingsKeys::tiltGravSensor].is<std::string>()) tiltGravSensor = NimBLEAddress(json_doc[ExtendedSettingsKeys::tiltGravSensor].as<std::string>(), 1);
 #endif
+}
+
+/**
+ * Validate all supplied extended settings before any setter can have side effects.
+ * Omitted keys are unchanged, allowing old clients and selector-only updates.
+ */
+bool ExtendedSettings::validateSettingsJson(const JsonDocument &doc) {
+    if (!doc.is<JsonObjectConst>()) return false;
+    const char *boolKeys[] = {
+        ExtendedSettingsKeys::invertTFT, ExtendedSettingsKeys::glycol,
+        ExtendedSettingsKeys::largeTFT, ExtendedSettingsKeys::resetScreenOnPin
+    };
+    for (const char *key : boolKeys) {
+        if (!doc[key].isUnbound() && !doc[key].is<bool>()) return false;
+    }
+    const JsonVariantConst selection = doc[ExtendedSettingsKeys::glycolCoolingAlgorithm];
+    if (!selection.isUnbound()) {
+        GlycolCooling::Algorithm parsed;
+        if (!selection.is<const char *>() ||
+            !GlycolCooling::parseAlgorithm(selection.as<const char *>(), parsed)) return false;
+    }
+#ifdef HAS_BLUETOOTH
+    const JsonVariantConst tilt = doc[ExtendedSettingsKeys::tiltGravSensor];
+    if (!tilt.isUnbound() && !tilt.is<std::string>()) return false;
+#endif
+    return true;
 }
 
 /**
@@ -387,6 +419,12 @@ void ExtendedSettings::processSettingKeypair(JsonPair kv) {
     setInvertTFT(kv.value().as<bool>());
   } else if (kv.key() == ExtendedSettingsKeys::glycol) {
     setGlycol(kv.value().as<bool>());
+  } else if (kv.key() == ExtendedSettingsKeys::glycolCoolingAlgorithm) {
+    GlycolCooling::Algorithm parsed;
+    if (kv.value().is<const char *>() &&
+        GlycolCooling::parseAlgorithm(kv.value().as<const char *>(), parsed)) {
+      setGlycolCoolingAlgorithm(parsed);
+    }
   } else if (kv.key() == ExtendedSettingsKeys::largeTFT) {
     setLargeTFT(kv.value().as<bool>());
   } else if (kv.key() == ExtendedSettingsKeys::resetScreenOnPin) {
@@ -420,6 +458,15 @@ void ExtendedSettings::setGlycol(bool setting) {
     glycol = setting;
     minTimes.setDefaults();
     storeToFilesystem();
+}
+
+bool ExtendedSettings::setGlycolCoolingAlgorithm(GlycolCooling::Algorithm setting) {
+    if (setting != GlycolCooling::Algorithm::PredictiveCoast &&
+        setting != GlycolCooling::Algorithm::PulseDose) return false;
+    // Queue the selection only. GlycolMode handles relay timing and discards
+    // interrupted observations when it switches controllers on its next tick.
+    glycolCoolingAlgorithm = setting;
+    return true;
 }
 
 

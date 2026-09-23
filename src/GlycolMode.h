@@ -9,23 +9,26 @@ struct Context : ControlContext {
         ControlContext& controlContext,
         GlycolLearnedParams& learnedParams,
         GlycolConfig& glycolConfig,
-        GlycolRuntimeState& runtimeState
+        GlycolRuntimeState& runtimeState,
+        GlycolCooling::Algorithm requestedAlgorithm
     )
         : ControlContext(controlContext),
           learned(learnedParams),
           config(glycolConfig),
-          runtime(runtimeState) {}
+          runtime(runtimeState),
+          requestedAlgorithm(requestedAlgorithm) {}
 
     GlycolLearnedParams& learned;
     GlycolConfig& config;
     GlycolRuntimeState& runtime;
+    GlycolCooling::Algorithm requestedAlgorithm;
 };
 
 void updatePID(Context& ctx, unsigned char& integralUpdateCounter);
-// Immediate fault/mode inhibition: preserves learned coast and response gain and actual OFF time.
+// Immediate fault/mode inhibition: preserves each algorithm's learned values and actual OFF time.
 void suspend(Context& ctx);
 
-// Always false: predictive learning is intentionally RAM-only; no legacy file writes.
+// Always false: cooling learning is intentionally RAM-only; no legacy file writes.
 bool updateState(Context& ctx);
 
 } // namespace GlycolMode

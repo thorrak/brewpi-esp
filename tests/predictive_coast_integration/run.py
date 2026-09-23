@@ -39,12 +39,12 @@ with tempfile.TemporaryDirectory(prefix='brewpi-integration-') as temp:
     build = Path(temp)
     for file in (HERE / 'shim').iterdir():
         shutil.copyfile(file, build / file.name)
-    names = ['PredictiveCoastController', 'GlycolMode', 'GlycolParams', 'TempSensor',
+    names = ['PredictiveCoastController', 'AdaptiveDoseController', 'GlycolCoolingController', 'GlycolMode', 'GlycolParams', 'TempSensor',
              'FilterFixed', 'FilterCascaded', 'TemperatureFormats']
     for name in names:
         for suffix in ['.cpp', '.h']:
             shutil.copyfile(ROOT / 'src' / (name + suffix), build / (name + suffix))
-    for name in ['ControlContext.h', 'TempSensorBasic.h', 'Actuator.h', 'GlycolLog.h', 'JsonKeys.h']:
+    for name in ['CoolingAlgorithm.h', 'ControlContext.h', 'TempSensorBasic.h', 'Actuator.h', 'GlycolLog.h', 'JsonKeys.h']:
         shutil.copyfile(ROOT / 'src' / name, build / name)
     header = (ROOT / 'src/TempControl.h').read_text()
     (build / 'ControlTypes.h').write_text('#pragma once\n' + header[

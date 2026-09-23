@@ -1,5 +1,11 @@
 # Predictive glycol cooling
 
+Predictive coast is now one of two selectable cooling algorithms on this branch
+and remains the default for existing installations. See
+[Selecting the glycol cooling algorithm](GLYCOL_COOLING_SELECTION.md) for the
+saved setting, safe switching, and current firmware revision. Both original
+controller cores retain the behavior verified below.
+
 `predictive-glycol-cooling` starts from `codex/adaptive-glycol-cooling` at
 `f2f72322e166963199fd8ae257a6746faab941ab` and replaces its active glycol cooling
 policy with the frozen `PredictiveCoastController` tested in Chillsim. The
@@ -82,11 +88,11 @@ Predictive defaults are explicit fields in `PredictiveCooling::Config`.
 ## Fermentrack and diagnostics
 
 Normal Fermentrack setup, setpoints, temperature reports, and actuator states
-continue to work. Enable glycol mode to select this policy. Assign the beer
+continue to work. Enable glycol mode and select Predictive coast to use this policy. Assign the beer
 sensor and cooling relay as usual, including the correct relay polarity.
 
-The `v`/`V:` response and HTTP `GET /api/cv/` expose `predictiveCooling` with
-`algorithm: "predictive-coast-v1"`. The object includes the common temperature,
+The `v`/`V:` response and HTTP `GET /api/cv/` expose `glycolCooling` with
+`algorithm: "predictive-coast-v1"` when predictive is active. The object includes the common temperature,
 sensor validity, pump, relay timing, and actuator fields plus:
 
 - `predictedEndpointC`, `coastSeconds`, and coast `learningUpdates`;
@@ -94,16 +100,16 @@ sensor validity, pump, relay timing, and actuator fields plus:
 - `pulseBudgetSeconds` (null for continuous demand);
 - `actualOnSeconds`, `lastCompletedOnSeconds`, and `coastAgeSeconds`.
 
-The `c`/`C:` response exposes all defaults under `predictiveCoolingConfig`.
+The `c`/`C:` response exposes the active algorithm's defaults under `glycolCoolingConfig`.
 The optional chamber/glycol probe is diagnostic only. Learning is RAM-only.
 The test build exposes these objects even before glycol mode is enabled.
-Clients that consume the parent branch's `adaptiveCooling` object must use the
-new name and fields. Fermentrack's normal temperature/control interface is
+Clients that consume earlier `adaptiveCooling` or `predictiveCooling` objects
+must use the common name and check its algorithm identifier. Fermentrack's normal temperature/control interface is
 unchanged; 30-second graph samples still cannot show every short pump pulse.
 
 ## Build and verify
 
-Firmware revision: `v17-predictive1`. Build a normal board image or the inherited
+Firmware revision: `v17-glycol-select1`. Build a normal board image or the inherited
 cooling-only D32 Pro image:
 
 ```sh

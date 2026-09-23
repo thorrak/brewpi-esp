@@ -130,6 +130,7 @@ namespace ExtendedSettingsKeys {
 constexpr auto eepromReset = "confirmReset";
 constexpr auto invertTFT = "invertTFT";
 constexpr auto glycol = "glycol";
+constexpr auto glycolCoolingAlgorithm = "glycolCoolingAlgorithm";
 constexpr auto largeTFT = "largeTFT";
 constexpr auto resetScreenOnPin = "resetScreenOnPin";
 constexpr auto tiltGravSensor = "tiltGravSensor";
@@ -194,5 +195,4 @@ constexpr auto emergency_detection_time_s = "emergency_detection_time_s";
 constexpr auto min_emergency_dwell_time_s = "min_emergency_dwell_time_s";
 constexpr auto hot_glycol_threshold_s = "hot_glycol_threshold_s";
 }; // namespace GlycolKeys
-
 

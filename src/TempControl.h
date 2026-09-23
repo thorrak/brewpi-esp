@@ -29,7 +29,7 @@
 #include "ActuatorAutoOff.h"
 #include "EepromStructs.h"
 #include "GlycolParams.h"
-#include "PredictiveCoastController.h"
+#include "GlycolCoolingController.h"
 #include <ArduinoJson.h>
 
 struct ControlContext;
@@ -43,17 +43,17 @@ struct ControlContext;
  * @{
  */
 
-// ===== GLYCOL MODE: Predictive coast cooling / time-proportional heating =====
-// See docs/PREDICTIVE_GLYCOL_COOLING.md for the active cooling algorithm.
+// ===== GLYCOL MODE: Selectable cooling / time-proportional heating =====
+// See docs/GLYCOL_COOLING_SELECTION.md for the cooling algorithm selection.
 
 /**
- * Legacy public state labels retained for predictive cooling diagnostics
+ * Legacy public state labels retained for cooling diagnostics
  */
 enum GlycolState : uint8_t {
     GLYCOL_IDLE = 0,              //!< Monitoring temperature, waiting to cool
     GLYCOL_COOLING = 1,           //!< Pump on, actively cooling
     GLYCOL_COASTING = 2,          //!< Pump off, temperature still dropping, measuring coast
-    GLYCOL_EMERGENCY_COOLING = 3, //!< Predictive full cooling; same stop rules, no forced dwell
+    GLYCOL_EMERGENCY_COOLING = 3, //!< Continuous cooling demand; same stop rules, no forced dwell
     GLYCOL_HEATING = 4            //!< Beer-only heating via time-proportional duty cycle
 };
 
@@ -108,13 +108,13 @@ constexpr uint8_t RATE_BUFFER_SIZE = 30;
  */
 struct GlycolRuntimeState {
     // These parameters/state are deliberately independent of legacy k/C_off/L files.
-    PredictiveCooling::Controller predictive{};
-    PredictiveCooling::Output predictive_output{};
+    GlycolCooling::Controller cooling{};
+    GlycolCooling::Output cooling_output{};
     bool clock_initialized = false;
     uint32_t clock_last_ms = 0;
     uint64_t clock_elapsed_ms = 0;
-    bool predictive_step_initialized = false;
-    uint64_t predictive_last_step_ms = 0;
+    bool cooling_step_initialized = false;
+    uint64_t cooling_last_step_ms = 0;
     bool pid_step_initialized = false;
     uint64_t pid_last_step_ms = 0;
     // Real active-interval ends on the extended monotonic clock. Boot starts at 0.
@@ -197,7 +197,7 @@ public:
 
     // Glycol mode time-proportional control settings
     uint16_t GLYCOL_WINDOW_PERIOD;  //! Window period for time-proportional control in seconds (default: 1000s)
-    uint16_t GLYCOL_MIN_ON_TIME;    //! Minimum heating duty slice; cooling uses PredictiveCooling::Config (2s)
+    uint16_t GLYCOL_MIN_ON_TIME;    //! Minimum heating duty slice; cooling uses the selected cooling configuration (2s)
 
 	void toJson(JsonDocument &doc);
     void storeToFilesystem();
@@ -424,7 +424,7 @@ public:
 	TEMP_CONTROL_FIELD ControlSettings cs;
 	TEMP_CONTROL_FIELD ControlVariables cv;
 
-	// Glycol mode: Predictive bang-bang control
+	// Glycol mode: Selectable beer-only cooling
 	TEMP_CONTROL_FIELD GlycolLearnedParams glycolLearned;   //!< Learned parameters (persisted)
 	TEMP_CONTROL_FIELD GlycolConfig glycolConfig;           //!< Configuration (persisted)
 	TEMP_CONTROL_FIELD GlycolRuntimeState glycolRuntime;    //!< Runtime state (not persisted)

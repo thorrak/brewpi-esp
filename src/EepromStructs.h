@@ -1,6 +1,7 @@
 #pragma once
 
 #include "TemperatureFormats.h"
+#include "CoolingAlgorithm.h"
 typedef uint8_t DeviceAddress[8];
 
 #ifdef HAS_BLUETOOTH
@@ -201,6 +202,7 @@ public:
     bool invertTFT;  //<! Whether or not to invert the TFT
     bool largeTFT;  //<! Whether or not to use a large TFT
     bool glycol;  //<! Whether or not to use glycol mode
+    GlycolCooling::Algorithm glycolCoolingAlgorithm; //!< Requested cooling controller; applied at a safe pump-OFF boundary
     bool resetScreenOnPin;  //<! Whether or not to reset the screen when an ActuatorArduinoPin toggles
 
     #ifdef HAS_BLUETOOTH
@@ -214,8 +216,10 @@ public:
     void loadFromFilesystem();
     void setDefaults();
     void processSettingKeypair(JsonPair kv);
+    static bool validateSettingsJson(const JsonDocument &doc);
 
     void setGlycol(bool setting);
+    bool setGlycolCoolingAlgorithm(GlycolCooling::Algorithm setting);
     void setInvertTFT(bool setting);
     void setLargeTFT(bool setting);
     void setResetScreenOnPin(bool setting);

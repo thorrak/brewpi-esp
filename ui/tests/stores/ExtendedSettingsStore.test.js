@@ -1,170 +1,162 @@
-import { createTestingPinia } from '@pinia/testing';
 import { setActivePinia, createPinia } from 'pinia';
 import { useExtendedSettingsStore } from '@/stores/ExtendedSettingsStore.js';
 import { mande } from 'mande';
 import { jest } from '@jest/globals';
-import fs from 'fs';
-import path from 'path';
+import fixture from './fixtures/api.extended.json';
 
 jest.mock('mande');
 
+const inputs = [true, false, true, false, 2, 100, 200, 300, 400, 500, 600, 700, 800];
+const expectedSettings = {
+    glycol: true,
+    largeTFT: false,
+    invertTFT: true,
+    resetScreenOnPin: false,
+    SETTINGS_CHOICE: 2,
+    MIN_COOL_OFF_TIME: 100,
+    MIN_HEAT_OFF_TIME: 200,
+    MIN_COOL_ON_TIME: 300,
+    MIN_HEAT_ON_TIME: 400,
+    MIN_COOL_OFF_TIME_FRIDGE_CONSTANT: 500,
+    MIN_SWITCH_TIME: 600,
+    COOL_PEAK_DETECT_TIME: 700,
+    HEAT_PEAK_DETECT_TIME: 800,
+};
+
+function responseWithAlgorithm(algorithm) {
+    return {
+        ...fixture,
+        extendedSettings: { ...fixture.extendedSettings, resetScreenOnPin: false, glycolCoolingAlgorithm: algorithm },
+    };
+}
+
 describe('ExtendedSettingsStore', () => {
+    let store;
+    let mockGet;
+    let mockPut;
+
     beforeEach(() => {
+        jest.clearAllMocks();
         setActivePinia(createPinia());
+        store = useExtendedSettingsStore();
+        mockGet = jest.fn().mockResolvedValue(responseWithAlgorithm('predictive_coast'));
+        mockPut = jest.fn().mockResolvedValue({ status: 'ok' });
+        mande.mockImplementation(() => ({ get: mockGet, put: mockPut }));
     });
 
-    it('has correct initial state', () => {
-        const store = useExtendedSettingsStore();
+    it('does not advertise a selectable algorithm before loading capabilities', () => {
         expect(store.hasExtendedSettings).toBe(false);
+        expect(store.hasGlycolCoolingAlgorithm).toBe(false);
+        expect(store.glycolCoolingAlgorithm).toBeNull();
         expect(store.extendedSettingsError).toBe(false);
         expect(store.extendedSettingsUpdateError).toBe(false);
         expect(store.glycol).toBe(false);
-        expect(store.largeTFT).toBe(false);
-        expect(store.invertTFT).toBe(false);
-        expect(store.SETTINGS_CHOICE).toBe(0);
-        expect(store.MIN_COOL_OFF_TIME).toBe(0);
-        expect(store.MIN_HEAT_OFF_TIME).toBe(0);
-        expect(store.MIN_COOL_ON_TIME).toBe(0);
-        expect(store.MIN_HEAT_ON_TIME).toBe(0);
-        expect(store.MIN_COOL_OFF_TIME_FRIDGE_CONSTANT).toBe(0);
-        expect(store.MIN_SWITCH_TIME).toBe(0);
-        expect(store.COOL_PEAK_DETECT_TIME).toBe(0);
-        expect(store.HEAT_PEAK_DETECT_TIME).toBe(0);
     });
 
-    it('clears the extended settings correctly', async () => {
-        const store = useExtendedSettingsStore();
-        store.hasExtendedSettings = true;
-        store.glycol = true;
-        store.largeTFT = true;
-
-        await store.clearExtendedSettings();
-
-        expect(store.hasExtendedSettings).toBe(false);
-        expect(store.glycol).toBe(false);
-        expect(store.largeTFT).toBe(false);
-        expect(store.invertTFT).toBe(false);
-        expect(store.SETTINGS_CHOICE).toBe(0);
-        expect(store.MIN_COOL_OFF_TIME).toBe(0);
-        expect(store.MIN_HEAT_OFF_TIME).toBe(0);
-        expect(store.MIN_COOL_ON_TIME).toBe(0);
-        expect(store.MIN_HEAT_ON_TIME).toBe(0);
-        expect(store.MIN_COOL_OFF_TIME_FRIDGE_CONSTANT).toBe(0);
-        expect(store.MIN_SWITCH_TIME).toBe(0);
-        expect(store.COOL_PEAK_DETECT_TIME).toBe(0);
-        expect(store.HEAT_PEAK_DETECT_TIME).toBe(0);
-    });
-
-    it('gets extended settings correctly', async () => {
-        const fixturePath = path.join(__dirname, 'fixtures', 'api.extended.json');
-        const fixture = JSON.parse(fs.readFileSync(fixturePath, 'utf-8'));
-
-        const mockGet = jest.fn().mockResolvedValue(fixture);
-        mande.mockImplementation(() => {
-            return {
-                get: mockGet,
-            };
-        });
-
-        const store = useExtendedSettingsStore();
-
+    it.each(['predictive_coast', 'pulse_dose'])('loads the saved %s selection and existing settings', async (algorithm) => {
+        mockGet.mockResolvedValue(responseWithAlgorithm(algorithm));
         await store.getExtendedSettings();
-
+        expect(store.hasExtendedSettings).toBe(true);
+        expect(store.hasGlycolCoolingAlgorithm).toBe(true);
+        expect(store.glycolCoolingAlgorithm).toBe(algorithm);
+        for (const [key, value] of Object.entries(fixture.minTimes)) expect(store[key]).toBe(value);
         expect(store.glycol).toBe(fixture.extendedSettings.glycol);
-        expect(store.largeTFT).toBe(fixture.extendedSettings.largeTFT);
-        expect(store.invertTFT).toBe(fixture.extendedSettings.invertTFT);
-        expect(store.SETTINGS_CHOICE).toBe(fixture.minTimes.SETTINGS_CHOICE);
-        expect(store.MIN_COOL_OFF_TIME).toBe(fixture.minTimes.MIN_COOL_OFF_TIME);
-        expect(store.MIN_HEAT_OFF_TIME).toBe(fixture.minTimes.MIN_HEAT_OFF_TIME);
-        expect(store.MIN_COOL_ON_TIME).toBe(fixture.minTimes.MIN_COOL_ON_TIME);
-        expect(store.MIN_HEAT_ON_TIME).toBe(fixture.minTimes.MIN_HEAT_ON_TIME);
-        expect(store.MIN_COOL_OFF_TIME_FRIDGE_CONSTANT).toBe(fixture.minTimes.MIN_COOL_OFF_TIME_FRIDGE_CONSTANT);
-        expect(store.MIN_SWITCH_TIME).toBe(fixture.minTimes.MIN_SWITCH_TIME);
-        expect(store.COOL_PEAK_DETECT_TIME).toBe(fixture.minTimes.COOL_PEAK_DETECT_TIME);
-        expect(store.HEAT_PEAK_DETECT_TIME).toBe(fixture.minTimes.HEAT_PEAK_DETECT_TIME);
     });
 
-    it('sets extended settings correctly', async () => {
-        // Prepare the fixture data
-        const fixturePath = path.join(__dirname, 'fixtures', 'api.extended.json');
-        const fixture = JSON.parse(fs.readFileSync(fixturePath, 'utf-8'));
-
-        // Mock the mande library and the HTTP response
-        const mockPut = jest.fn().mockResolvedValue({ message: "Settings updated" });
-        mande.mockImplementation(() => {
-            return {
-                put: mockPut,
-            };
-        });
-
-        const store = useExtendedSettingsStore();
-
-        // Call the action
-        await store.setExtendedSettings(true, true, true, 1, 100, 200, 300, 400, 500, 600, 700, 800);
-
-        // Check the state properties after the action
-        expect(store.glycol).toBe(true);
-        expect(store.largeTFT).toBe(true);
-        expect(store.invertTFT).toBe(true);
-        expect(store.SETTINGS_CHOICE).toBe(1);
-        expect(store.MIN_COOL_OFF_TIME).toBe(100);
-        expect(store.MIN_HEAT_OFF_TIME).toBe(200);
-        expect(store.MIN_COOL_ON_TIME).toBe(300);
-        expect(store.MIN_HEAT_ON_TIME).toBe(400);
-        expect(store.MIN_COOL_OFF_TIME_FRIDGE_CONSTANT).toBe(500);
-        expect(store.MIN_SWITCH_TIME).toBe(600);
-        expect(store.COOL_PEAK_DETECT_TIME).toBe(700);
-        expect(store.HEAT_PEAK_DETECT_TIME).toBe(800);
-
-        // Check that the API was called with the correct parameters
-        expect(mockPut).toHaveBeenCalledWith({
-            glycol: true,
-            largeTFT: true,
-            invertTFT: true,
-            SETTINGS_CHOICE: 1,
-            MIN_COOL_OFF_TIME: 100,
-            MIN_HEAT_OFF_TIME: 200,
-            MIN_COOL_ON_TIME: 300,
-            MIN_HEAT_ON_TIME: 400,
-            MIN_COOL_OFF_TIME_FRIDGE_CONSTANT: 500,
-            MIN_SWITCH_TIME: 600,
-            COOL_PEAK_DETECT_TIME: 700,
-            HEAT_PEAK_DETECT_TIME: 800,
-        });
+    it.each([undefined, 'future_algorithm'])('hides unsupported selection (%s) without inventing a default', async (algorithm) => {
+        mockGet.mockResolvedValue(responseWithAlgorithm(algorithm));
+        await store.getExtendedSettings();
+        expect(store.hasExtendedSettings).toBe(true);
+        expect(store.hasGlycolCoolingAlgorithm).toBe(false);
+        expect(store.glycolCoolingAlgorithm).toBeNull();
+        await store.setExtendedSettings(...inputs);
+        expect(mockPut).toHaveBeenCalledWith(expectedSettings);
     });
 
-    it('handles errors in setExtendedSettings', async () => {
-        // Mock the mande library to throw an error
-        const mockPut = jest.fn().mockRejectedValue(new Error('API error'));
-        mande.mockImplementation(() => {
-            return {
-                put: mockPut,
-            };
-        });
+    it('does not overwrite the last choice when an older response omits the field', async () => {
+        mockGet.mockResolvedValueOnce(responseWithAlgorithm('pulse_dose')).mockResolvedValueOnce(fixture);
+        await store.getExtendedSettings();
+        await store.getExtendedSettings();
+        expect(store.glycolCoolingAlgorithm).toBe('pulse_dose');
+        expect(store.hasGlycolCoolingAlgorithm).toBe(false);
+        await store.setExtendedSettings(...inputs);
+        expect(mockPut).toHaveBeenCalledWith(expectedSettings);
+    });
 
-        const store = useExtendedSettingsStore();
+    it('clears capabilities and settings on reset', async () => {
+        await store.getExtendedSettings();
+        await store.clearExtendedSettings();
+        expect(store.hasExtendedSettings).toBe(false);
+        expect(store.hasGlycolCoolingAlgorithm).toBe(false);
+        expect(store.glycolCoolingAlgorithm).toBeNull();
+        expect(store.glycol).toBe(false);
+        expect(store.MIN_COOL_OFF_TIME).toBe(0);
+    });
 
-        // Call the action
-        await store.setExtendedSettings(true, true, true, 1, 100, 200, 300, 400, 500, 600, 700, 800);
+    it('handles an unreadable response', async () => {
+        mockGet.mockResolvedValue({});
+        await store.getExtendedSettings();
+        expect(store.hasExtendedSettings).toBe(false);
+        expect(store.extendedSettingsError).toBe(true);
+        expect(store.hasGlycolCoolingAlgorithm).toBe(false);
+    });
 
-        // Check that the error state is set correctly
+    it('handles a failed GET', async () => {
+        mockGet.mockRejectedValue(new Error('network error'));
+        await store.getExtendedSettings();
+        expect(store.extendedSettingsError).toBe(true);
+        expect(store.hasGlycolCoolingAlgorithm).toBe(false);
+    });
+
+    it.each(['predictive_coast', 'pulse_dose'])('saves %s with the existing settings and positional argument order', async (algorithm) => {
+        await store.getExtendedSettings();
+        const result = await store.setExtendedSettings(...inputs, algorithm);
+        expect(result).toBe(true);
+        expect(mockPut).toHaveBeenCalledWith({ ...expectedSettings, glycolCoolingAlgorithm: algorithm });
+        for (const [key, value] of Object.entries(expectedSettings)) expect(store[key]).toBe(value);
+        expect(store.glycolCoolingAlgorithm).toBe(algorithm);
+        expect(store.extendedSettingsUpdateError).toBe(false);
+    });
+
+    it('preserves pulse-dose on unrelated saves by older callers', async () => {
+        mockGet.mockResolvedValue(responseWithAlgorithm('pulse_dose'));
+        await store.getExtendedSettings();
+        await store.setExtendedSettings(...inputs);
+        expect(mockPut).toHaveBeenCalledWith({ ...expectedSettings, glycolCoolingAlgorithm: 'pulse_dose' });
+    });
+
+    it.each(['unsupported', '', null])('rejects an invalid algorithm (%s) before sending settings', async (algorithm) => {
+        await store.getExtendedSettings();
+        expect(await store.setExtendedSettings(...inputs, algorithm)).toBe(false);
+        expect(mockPut).not.toHaveBeenCalled();
+        expect(store.glycolCoolingAlgorithm).toBe('predictive_coast');
         expect(store.extendedSettingsUpdateError).toBe(true);
-
-        // Check that the API was called with the correct parameters
-        expect(mockPut).toHaveBeenCalledWith({
-            glycol: true,
-            largeTFT: true,
-            invertTFT: true,
-            SETTINGS_CHOICE: 1,
-            MIN_COOL_OFF_TIME: 100,
-            MIN_HEAT_OFF_TIME: 200,
-            MIN_COOL_ON_TIME: 300,
-            MIN_HEAT_ON_TIME: 400,
-            MIN_COOL_OFF_TIME_FRIDGE_CONSTANT: 500,
-            MIN_SWITCH_TIME: 600,
-            COOL_PEAK_DETECT_TIME: 700,
-            HEAT_PEAK_DETECT_TIME: 800,
-        });
     });
 
+    it('rejects explicit selection when firmware has not advertised support', async () => {
+        expect(await store.setExtendedSettings(...inputs, 'pulse_dose')).toBe(false);
+        expect(mockPut).not.toHaveBeenCalled();
+    });
+
+    it.each([{ status: 'failed' }, { status: true }, {}, null])('does not accept a failed or malformed PUT response: %j', async (response) => {
+        await store.getExtendedSettings();
+        mockPut.mockResolvedValue(response);
+        expect(await store.setExtendedSettings(...inputs, 'pulse_dose')).toBe(false);
+        expect(store.glycolCoolingAlgorithm).toBe('predictive_coast');
+        expect(store.hasExtendedSettings).toBe(true);
+        expect(store.glycol).toBe(fixture.extendedSettings.glycol);
+        expect(store.extendedSettingsUpdateError).toBe(true);
+    });
+
+    it('keeps confirmed settings after network failure and allows retry', async () => {
+        await store.getExtendedSettings();
+        mockPut.mockRejectedValueOnce(new Error('network error'));
+        expect(await store.setExtendedSettings(...inputs, 'pulse_dose')).toBe(false);
+        expect(store.glycolCoolingAlgorithm).toBe('predictive_coast');
+        expect(store.hasExtendedSettings).toBe(true);
+        expect(store.extendedSettingsUpdateError).toBe(true);
+        expect(await store.setExtendedSettings(...inputs, 'pulse_dose')).toBe(true);
+        expect(store.glycolCoolingAlgorithm).toBe('pulse_dose');
+        expect(store.extendedSettingsUpdateError).toBe(false);
+    });
 });

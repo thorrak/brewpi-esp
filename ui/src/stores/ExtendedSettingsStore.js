@@ -9,6 +9,8 @@ export const useExtendedSettingsStore = defineStore("ExtendedSettingsStore", () 
     const extendedSettingsUpdateError = ref(false);
 
     const glycol = ref(false);
+    const hasGlycolCoolingAlgorithm = ref(false);
+    const glycolCoolingAlgorithm = ref(null);
     const largeTFT = ref(false);
     const invertTFT = ref(false);
     const resetScreenOnPin = ref(false);
@@ -32,6 +34,11 @@ export const useExtendedSettingsStore = defineStore("ExtendedSettingsStore", () 
                 extendedSettingsError.value = false;
 
                 glycol.value = response.extendedSettings.glycol;
+                const algorithm = response.extendedSettings.glycolCoolingAlgorithm;
+                hasGlycolCoolingAlgorithm.value = isCoolingAlgorithm(algorithm);
+                if (hasGlycolCoolingAlgorithm.value) {
+                    glycolCoolingAlgorithm.value = algorithm;
+                }
                 largeTFT.value = response.extendedSettings.largeTFT;
                 invertTFT.value = response.extendedSettings.invertTFT;
                 resetScreenOnPin.value = response.extendedSettings.resetScreenOnPin;
@@ -58,6 +65,8 @@ export const useExtendedSettingsStore = defineStore("ExtendedSettingsStore", () 
     async function clearExtendedSettings() {
         hasExtendedSettings.value = false;
         glycol.value = false;
+        hasGlycolCoolingAlgorithm.value = false;
+        glycolCoolingAlgorithm.value = null;
         largeTFT.value = false;
         invertTFT.value = false;
         resetScreenOnPin.value = false;
@@ -73,10 +82,20 @@ export const useExtendedSettingsStore = defineStore("ExtendedSettingsStore", () 
         HEAT_PEAK_DETECT_TIME.value = 0;
     }
 
-    async function setExtendedSettings(glycolInput, largeTFTInput, invertTFTInput, resetScreenOnPinInput, SETTINGS_CHOICEInput, MIN_COOL_OFF_TIMEInput, MIN_HEAT_OFF_TIMEInput, MIN_COOL_ON_TIMEInput, MIN_HEAT_ON_TIMEInput, MIN_COOL_OFF_TIME_FRIDGE_CONSTANTInput, MIN_SWITCH_TIMEInput, COOL_PEAK_DETECT_TIMEInput, HEAT_PEAK_DETECT_TIMEInput) {
+    function isCoolingAlgorithm(value) {
+        return value === 'predictive_coast' || value === 'pulse_dose';
+    }
+
+    async function setExtendedSettings(glycolInput, largeTFTInput, invertTFTInput, resetScreenOnPinInput, SETTINGS_CHOICEInput, MIN_COOL_OFF_TIMEInput, MIN_HEAT_OFF_TIMEInput, MIN_COOL_ON_TIMEInput, MIN_HEAT_ON_TIMEInput, MIN_COOL_OFF_TIME_FRIDGE_CONSTANTInput, MIN_SWITCH_TIMEInput, COOL_PEAK_DETECT_TIMEInput, HEAT_PEAK_DETECT_TIMEInput, glycolCoolingAlgorithmInput = undefined) {
         try {
+            const algorithm = glycolCoolingAlgorithmInput === undefined ? glycolCoolingAlgorithm.value : glycolCoolingAlgorithmInput;
+            if ((hasGlycolCoolingAlgorithm.value && !isCoolingAlgorithm(algorithm)) ||
+                (!hasGlycolCoolingAlgorithm.value && glycolCoolingAlgorithmInput !== undefined)) {
+                extendedSettingsUpdateError.value = true;
+                return false;
+            }
             const remote_api = mande("/api/extended/", genCSRFOptions());
-            const response = await remote_api.put({
+            const settings = {
                 glycol: glycolInput,
                 largeTFT: largeTFTInput,
                 invertTFT: invertTFTInput,
@@ -90,9 +109,16 @@ export const useExtendedSettingsStore = defineStore("ExtendedSettingsStore", () 
                 MIN_SWITCH_TIME: MIN_SWITCH_TIMEInput,
                 COOL_PEAK_DETECT_TIME: COOL_PEAK_DETECT_TIMEInput,
                 HEAT_PEAK_DETECT_TIME: HEAT_PEAK_DETECT_TIMEInput,
-            });
-            if (response && response.status) {
+            };
+            if (hasGlycolCoolingAlgorithm.value) {
+                settings.glycolCoolingAlgorithm = algorithm;
+            }
+            const response = await remote_api.put(settings);
+            if (response && response.status === 'ok') {
                 glycol.value = glycolInput;
+                if (hasGlycolCoolingAlgorithm.value) {
+                    glycolCoolingAlgorithm.value = algorithm;
+                }
                 largeTFT.value = largeTFTInput;
                 invertTFT.value = invertTFTInput;
                 resetScreenOnPin.value = resetScreenOnPinInput;
@@ -106,15 +132,16 @@ export const useExtendedSettingsStore = defineStore("ExtendedSettingsStore", () 
                 COOL_PEAK_DETECT_TIME.value = COOL_PEAK_DETECT_TIMEInput;
                 HEAT_PEAK_DETECT_TIME.value = HEAT_PEAK_DETECT_TIMEInput;
                 extendedSettingsUpdateError.value = false;
+                return true;
             } else {
-                await clearExtendedSettings();
                 extendedSettingsUpdateError.value = true;
+                return false;
             }
         } catch (error) {
-            await clearExtendedSettings();
             extendedSettingsUpdateError.value = true;
+            return false;
         }
     }
 
-    return { hasExtendedSettings, extendedSettingsError, extendedSettingsUpdateError, glycol, largeTFT, invertTFT, resetScreenOnPin, SETTINGS_CHOICE, MIN_COOL_OFF_TIME, MIN_HEAT_OFF_TIME, MIN_COOL_ON_TIME, MIN_HEAT_ON_TIME, MIN_COOL_OFF_TIME_FRIDGE_CONSTANT, MIN_SWITCH_TIME, COOL_PEAK_DETECT_TIME, HEAT_PEAK_DETECT_TIME, getExtendedSettings, clearExtendedSettings, setExtendedSettings };
+    return { hasExtendedSettings, extendedSettingsError, extendedSettingsUpdateError, glycol, hasGlycolCoolingAlgorithm, glycolCoolingAlgorithm, largeTFT, invertTFT, resetScreenOnPin, SETTINGS_CHOICE, MIN_COOL_OFF_TIME, MIN_HEAT_OFF_TIME, MIN_COOL_ON_TIME, MIN_HEAT_ON_TIME, MIN_COOL_OFF_TIME_FRIDGE_CONSTANT, MIN_SWITCH_TIME, COOL_PEAK_DETECT_TIME, HEAT_PEAK_DETECT_TIME, getExtendedSettings, clearExtendedSettings, setExtendedSettings };
 });

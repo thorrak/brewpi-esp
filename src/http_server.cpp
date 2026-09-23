@@ -379,9 +379,36 @@ bool processUpdateModeJson(const JsonDocument& json, bool triggerUpstreamUpdate)
 
 
 bool processExtendedSettingsJson(const JsonDocument& json, bool triggerUpstreamUpdate) {
-    uint8_t failCount = 0;
+    // Validate the whole partial update before setters can change mode, relay
+    // timing, displays, or flash. Older clients need not send the new selector.
+    if (!ExtendedSettings::validateSettingsJson(json)) {
+        Log.error("Error: Invalid extended settings configuration.\r\n");
+        return false;
+    }
+    const JsonVariantConst choice = json[MinTimesKeys::SETTINGS_CHOICE];
+    if (!choice.isUnbound() &&
+        (!choice.is<uint8_t>() || choice.as<uint8_t>() > MIN_TIMES_CUSTOM)) return false;
+    const char *timeKeys[] = {
+        MinTimesKeys::MIN_COOL_OFF_TIME, MinTimesKeys::MIN_HEAT_OFF_TIME,
+        MinTimesKeys::MIN_COOL_ON_TIME, MinTimesKeys::MIN_HEAT_ON_TIME,
+        MinTimesKeys::MIN_COOL_OFF_TIME_FRIDGE_CONSTANT, MinTimesKeys::MIN_SWITCH_TIME,
+        MinTimesKeys::COOL_PEAK_DETECT_TIME, MinTimesKeys::HEAT_PEAK_DETECT_TIME
+    };
+    for (const char *key : timeKeys) {
+        if (!json[key].isUnbound() && !json[key].is<uint16_t>()) return false;
+    }
     bool saveSettings = false;
     bool saveMinTimes = false;
+
+    // The runtime applies this requested selection at a safe pump-OFF boundary.
+    if (json[ExtendedSettingsKeys::glycolCoolingAlgorithm].is<const char *>()) {
+        GlycolCooling::Algorithm requested = extendedSettings.glycolCoolingAlgorithm;
+        GlycolCooling::parseAlgorithm(json[ExtendedSettingsKeys::glycolCoolingAlgorithm].as<const char *>(), requested);
+        if (extendedSettings.glycolCoolingAlgorithm != requested) {
+            extendedSettings.setGlycolCoolingAlgorithm(requested);
+            saveSettings = true;
+        }
+    }
 
     // Glycol Mode
     if(json[ExtendedSettingsKeys::glycol].is<bool>()) {
@@ -389,9 +416,6 @@ bool processExtendedSettingsJson(const JsonDocument& json, bool triggerUpstreamU
             extendedSettings.setGlycol(json[ExtendedSettingsKeys::glycol].as<bool>());
             saveSettings = true;
         }
-    } else {
-        Log.warning("Invalid [glycol]:(%s) received (wrong type).\r\n", json[ExtendedSettingsKeys::glycol]);
-        failCount++;
     }
 
     // Large TFT flag
@@ -400,9 +424,6 @@ bool processExtendedSettingsJson(const JsonDocument& json, bool triggerUpstreamU
             extendedSettings.setLargeTFT(json[ExtendedSettingsKeys::largeTFT].as<bool>());
             saveSettings = true;
         }
-    } else {
-        Log.warning("Invalid [largeTFT]:(%s) received (wrong type).\r\n", json[ExtendedSettingsKeys::largeTFT]);
-        failCount++;
     }
 
     // Invert TFT Flag
@@ -411,9 +432,6 @@ bool processExtendedSettingsJson(const JsonDocument& json, bool triggerUpstreamU
             extendedSettings.setInvertTFT(json[ExtendedSettingsKeys::invertTFT].as<bool>());
             saveSettings = true;
         }
-    } else {
-        Log.warning("Invalid [invertTFT]:(%s) received (wrong type).\r\n", json[ExtendedSettingsKeys::invertTFT]);
-        failCount++;
     }
 
     // Reset Screen on Pin Toggle Flag
@@ -422,9 +440,6 @@ bool processExtendedSettingsJson(const JsonDocument& json, bool triggerUpstreamU
             extendedSettings.setResetScreenOnPin(json[ExtendedSettingsKeys::resetScreenOnPin].as<bool>());
             saveSettings = true;
         }
-    } else {
-        Log.warning("Invalid [resetScreenOnPin]:(%s) received (wrong type).\r\n", json[ExtendedSettingsKeys::resetScreenOnPin]);
-        failCount++;
     }
 
 
@@ -506,18 +521,14 @@ bool processExtendedSettingsJson(const JsonDocument& json, bool triggerUpstreamU
     }
 
     // Save
-    if (failCount) {
-        Log.error("Error: Invalid extended settings configuration.\r\n");
-    } else {
-        if(saveSettings == true) {
-            extendedSettings.storeToFilesystem();
-        }
-        if(saveMinTimes == true) {
-            minTimes.setDefaults();
-            minTimes.storeToFilesystem();
-        }
+    if(saveSettings == true) {
+        extendedSettings.storeToFilesystem();
     }
-    return failCount == 0;
+    if(saveMinTimes == true) {
+        minTimes.setDefaults();
+        minTimes.storeToFilesystem();
+    }
+    return true;
 }
 
 

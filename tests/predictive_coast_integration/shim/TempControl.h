@@ -4,7 +4,7 @@
 #include "Actuator.h"
 #include "EepromStructs.h"
 #include "GlycolParams.h"
-#include "PredictiveCoastController.h"
+#include "GlycolCoolingController.h"
 #include "ControlTypes.h"
 
 // The methods under test are copied from TempControl.cpp at build time. This
@@ -23,5 +23,9 @@ struct TempControl {
     void getControlConstantsDoc(JsonDocument& doc);
 };
 extern TempControl tempControl;
-struct HostExtendedSettings { bool glycol = true; };
+struct HostExtendedSettings {
+    bool glycol = true;
+    GlycolCooling::Algorithm glycolCoolingAlgorithm = GlycolCooling::Algorithm::PredictiveCoast;
+};
+extern ValueActuator defaultActuator;
 extern HostExtendedSettings extendedSettings;

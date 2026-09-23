@@ -41,6 +41,7 @@ struct Fixture {
     uint16_t idle_time = 0, heat_time = 0, cool_time = 0, wait_time = 0;
     unsigned char integral_counter = 0;
     bool heater_present = false;
+    GlycolCooling::Algorithm selection = GlycolCooling::Algorithm::PredictiveCoast;
     Fixture() {
         runtime.reset();
         cs.beerSetting = q9((70.5-32)/1.8);
@@ -60,9 +61,10 @@ struct Fixture {
     void update(uint64_t ms, bool sample = true) {
         ticks.now_ms = ms;
         tempControl.cc = cc;
+        extendedSettings.glycolCoolingAlgorithm = selection;
         if (sample) sensor.update();
         auto c = context();
-        GlycolMode::Context ctx(c, learned, config, runtime);
+        GlycolMode::Context ctx(c, learned, config, runtime, selection);
         cv.beerDiff = cs.beerSetting - sensor.readSlowFiltered();
         cv.beerSlope = sensor.readSlope();
         GlycolMode::updatePID(ctx, integral_counter);
@@ -72,7 +74,7 @@ struct Fixture {
     void suspend(uint64_t ms) {
         ticks.now_ms = ms;
         auto c = context();
-        GlycolMode::Context ctx(c, learned, config, runtime);
+        GlycolMode::Context ctx(c, learned, config, runtime, selection);
         GlycolMode::suspend(ctx);
         cooler.setActive(false); heater.setActive(false);
     }
@@ -103,34 +105,34 @@ int main() {
         for (unsigned s = 0; s < 60; ++s) {
             f.update(s*1000);
             assert(!f.pump());
-            assert(f.runtime.predictive_output.learning_updates == 0);
-            assert(f.runtime.predictive_output.actual_on_s == 0);
+            assert(f.runtime.cooling_output.learning_updates == 0);
+            assert(f.runtime.cooling_output.actual_on_s == 0);
         }
         f.update(60000);
         assert(f.pump() && f.state == COOLING_MIN_TIME);
-        assert(std::abs(f.runtime.predictive_output.temperature_c - 21.5) < 1e-12);
+        assert(std::abs(f.runtime.cooling_output.temperature_c - 21.5) < 1e-12);
         assert(f.runtime.t_pump_on == 60000);
-        auto gain = f.runtime.predictive_output.budget_gain_c_per_s;
+        auto gain = f.runtime.cooling_output.budget_gain_c_per_s;
         f.update(60500, false); // UI duplicate cannot consume another sample/second
-        assert(f.runtime.predictive_last_step_ms == 60000);
+        assert(f.runtime.cooling_last_step_ms == 60000);
         f.update(61000);
         assert(f.pump() && f.state == COOLING_MIN_TIME);
         f.update(62000);
         assert(!f.pump()); // small error produces the predictive minimum 2-second pulse
-        assert(f.runtime.predictive_output.actual_on_s == 2);
+        assert(f.runtime.cooling_output.actual_on_s == 2);
         assert(f.runtime.cooling_duration_s == 2);
-        assert(f.runtime.predictive_output.budget_gain_c_per_s == gain);
+        assert(f.runtime.cooling_output.budget_gain_c_per_s == gain);
     }
     // Near-target blind cooling uses half the error divided by the response gain.
     {
         Fixture f; f.input.value = q9(21.6875);
         f.update(60000); assert(f.pump());
-        assert(!f.runtime.predictive_output.full_cooling);
+        assert(!f.runtime.cooling_output.full_cooling);
         const auto expected = 0.5 * (21.6875 - (f.cs.beerSetting - C_OFFSET) / 512.0) / 0.03;
-        assert(std::abs(f.runtime.predictive_output.pulse_budget_s - expected) < 1e-12);
+        assert(std::abs(f.runtime.cooling_output.pulse_budget_s - expected) < 1e-12);
         for (unsigned s=61;s<65;++s) { f.update(s*1000); assert(f.pump()); }
         f.update(65000); assert(!f.pump());
-        assert(f.runtime.predictive_output.actual_on_s == 5);
+        assert(f.runtime.cooling_output.actual_on_s == 5);
     }
     // Far targets allow sustained demand immediately. There is no exploratory
     // pulse, fixed emergency dwell or legacy maximum-run cutoff.
@@ -138,12 +140,12 @@ int main() {
         Fixture f; f.input.value = q9(25);
         for (unsigned s=60;s<2800;++s) {
             f.update(s*1000);
-            assert(f.pump() && f.runtime.predictive_output.full_cooling);
-            assert(std::isinf(f.runtime.predictive_output.pulse_budget_s));
+            assert(f.pump() && f.runtime.cooling_output.full_cooling);
+            assert(std::isinf(f.runtime.cooling_output.pulse_budget_s));
         }
         f.input.value = q9(21);
         f.update(2800000); assert(!f.pump()); // raw-temperature stop remains effective
-        assert(f.runtime.predictive_output.phase == PredictiveCooling::Phase::Coast);
+        assert(f.runtime.cooling_output.phase == GlycolCooling::Phase::Coast);
     }
     // The measured cooling trend stops sustained demand above the target when
     // its projected coast endpoint reaches the setpoint.
@@ -155,8 +157,8 @@ int main() {
             f.input.value = q9(24 - (s-60)*0.003);
             f.update(s*1000);
             if (!f.pump()) {
-                assert(f.runtime.predictive_output.temperature_c > (f.cs.beerSetting-C_OFFSET)/512.0);
-                assert(f.runtime.predictive_output.predicted_endpoint_c <= (f.cs.beerSetting-C_OFFSET)/512.0);
+                assert(f.runtime.cooling_output.temperature_c > (f.cs.beerSetting-C_OFFSET)/512.0);
+                assert(f.runtime.cooling_output.predicted_endpoint_c <= (f.cs.beerSetting-C_OFFSET)/512.0);
                 stopped = true;
                 break;
             }
@@ -173,8 +175,8 @@ int main() {
             a.input.value=b.input.value=q9(21.6875 - std::min(0.2, s*0.00025));
             a.update(s*1000); b.update(s*1000);
             assert(a.pump()==b.pump());
-            assert(a.runtime.predictive_output.phase==b.runtime.predictive_output.phase);
-            assert(a.runtime.predictive_output.budget_gain_c_per_s==b.runtime.predictive_output.budget_gain_c_per_s);
+            assert(a.runtime.cooling_output.phase==b.runtime.cooling_output.phase);
+            assert(a.runtime.cooling_output.budget_gain_c_per_s==b.runtime.cooling_output.budget_gain_c_per_s);
         }
     }
     // Immediate faults/mode OFF preserve the actual OFF edge through repeated resets.
@@ -195,7 +197,7 @@ int main() {
         f.update(60500,false); assert(f.pump());
         f.update(61000); assert(f.pump());
         f.update(62000); assert(!f.pump());
-        assert(f.runtime.predictive_output.learning_updates==0);
+        assert(f.runtime.cooling_output.learning_updates==0);
     }
     // Both hardware counter wraps preserve real elapsed timing, without a new boot guard.
     for (uint64_t origin : {uint64_t(65535000), uint64_t(0xfffffc18)}) {
@@ -204,7 +206,7 @@ int main() {
             f.update(origin+offset);
             assert(f.runtime.clock_elapsed_ms==origin+offset);
         }
-        assert(f.runtime.predictive_output.actual_on_s==2);
+        assert(f.runtime.cooling_output.actual_on_s==2);
         assert(!f.pump());
     }
     // Heater direction interlock occurs before core; input history excludes heating.
@@ -230,6 +232,45 @@ int main() {
         f.update(61500,false); assert(f.integral_counter==count);
 #endif
     }
+    // Runtime selection waits for the actual ON minimum, then observes OFF
+    // timing even when UI callbacks, mode inhibition or clock wrap intervene.
+    for (uint64_t origin : {uint64_t(60000), uint64_t(0xfffffc18)}) {
+        Fixture f; f.input.value=q9(25);
+        f.update(origin); assert(f.pump());
+        f.selection=GlycolCooling::Algorithm::PulseDose;
+        f.update(origin+500,false); assert(f.pump());
+        f.update(origin+1000); assert(f.pump());
+        assert(f.runtime.cooling.switchPending());
+        f.update(origin+2000); assert(!f.pump());
+        assert(f.runtime.cooling.selection()==GlycolCooling::Algorithm::PulseDose);
+        f.update(origin+3000); assert(!f.pump());
+        f.update(origin+4000); assert(f.pump());
+        assert(f.runtime.cooling_output.pulse_budget_s==30);
+        assert(!f.runtime.cooling.switchPending());
+        assert(f.runtime.cooling_output.learning_updates==0);
+        f.suspend(origin+4500); assert(!f.pump());
+        f.selection=GlycolCooling::Algorithm::PredictiveCoast;
+        f.suspend(origin+4600); // mode/chamber inhibition applies the request OFF
+        f.update(origin+5500); assert(!f.pump());
+        f.update(origin+6500); assert(f.pump());
+        assert(f.runtime.cooling_output.full_cooling);
+    }
+    // Both algorithms share immediate fault handling and the heating/boot gate.
+    for (auto algorithm : {GlycolCooling::Algorithm::PredictiveCoast,
+                           GlycolCooling::Algorithm::PulseDose}) {
+        Fixture f; f.selection=algorithm; f.input.value=q9(25);
+        f.update(60000); assert(f.pump());
+        f.input.fail_read=true; f.update(60500); assert(!f.pump());
+        f.input.fail_read=false; f.update(61500); assert(!f.pump());
+        f.update(62500); assert(f.pump());
+        f.suspend(63000);
+        f.state=HEATING; f.runtime.state=GLYCOL_HEATING;
+        f.update(70000); assert(!f.pump());
+        f.update(129000); assert(!f.pump());
+        f.update(130000); assert(f.pump());
+        assert(f.runtime.cooling_output.learning_updates==0);
+        assert(f.runtime.cooling_output.response_updates==0);
+    }
     // Compile the actual diagnostic methods with real ArduinoJson. Both
     // profiles expose the predictive identity and parameters in Celsius,
     // preserve null continuous budgets, and fit the Telnet response buffer.
@@ -246,8 +287,11 @@ int main() {
         JsonDocument variables, constants;
         tempControl.getControlVariablesDoc(variables);
         tempControl.getControlConstantsDoc(constants);
-        JsonObject p=variables["predictiveCooling"];
+        JsonObject p=variables["glycolCooling"];
         assert(std::strcmp(p["algorithm"].as<const char*>(), "predictive-coast-v1")==0);
+        assert(std::strcmp(p["selection"].as<const char*>(), "predictive_coast")==0);
+        assert(std::strcmp(p["requestedSelection"].as<const char*>(), "predictive_coast")==0);
+        assert(!p["switchPending"].as<bool>());
         assert(p["pumpOn"].as<bool>() && p["coolerActive"].as<bool>());
         assert(!p["heaterActive"].as<bool>() && !p["lightActive"].as<bool>());
         assert(p["fullCooling"].as<bool>() && p["pulseBudgetSeconds"].isNull());
@@ -259,8 +303,8 @@ int main() {
         assert(p["responseUpdates"].as<unsigned>()==0 && p["learningUpdates"].as<unsigned>()==0);
         assert(p["minOnSeconds"].as<double>()==2 && p["minOffSeconds"].as<double>()==2);
         assert(p["gainCPerPumpSecond"].isNull() && variables["adaptiveCooling"].isNull());
-        JsonObject config=constants["predictiveCoolingConfig"];
-        assert(config.size()==20); // algorithm identity + all 19 frozen parameters
+        JsonObject config=constants["glycolCoolingConfig"];
+        assert(config.size()==21); // identity + selection + all 19 frozen parameters
         assert(config["near_target_c"].as<double>()==1);
         assert(config["startup_pulse_s"].as<double>()==2);
         assert(config["maximum_blind_budget_s"].as<double>()==120);
@@ -270,7 +314,7 @@ int main() {
         assert(config["max_observe_coast_s"].as<double>()==2400);
         assert(config["initial_gain_c_per_on_s"].isNull());
         // Also check learned values with long fractional/large integer output.
-        auto& output=tempControl.glycolRuntime.predictive_output;
+        auto& output=tempControl.glycolRuntime.cooling_output;
         output.coast_s=1234.56789012345;
         output.budget_gain_c_per_s=0.000123456789012345;
         output.rate_c_per_s=-0.00123456789012345;
@@ -283,27 +327,62 @@ int main() {
         const auto variablesSize=measureJson(variables);
         const auto constantsSize=measureJson(constants);
         assert(variablesSize+1<=2048 && constantsSize+1<=2048);
-        std::printf("predictive JSON: variables %zu bytes, constants %zu bytes (2048-byte buffer)\n",
+        std::printf("selectable cooling JSON: variables %zu bytes, constants %zu bytes (2048-byte buffer)\n",
                     variablesSize, constantsSize);
         f.input.fail_read=true; f.update(61000);
         tempControl.glycolRuntime=f.runtime;
         variables.clear(); tempControl.getControlVariablesDoc(variables);
-        assert(!variables["predictiveCooling"]["sensorValid"].as<bool>());
-        assert(variables["predictiveCooling"]["rawC"].isNull());
-        assert(!variables["predictiveCooling"]["pumpOn"].as<bool>());
-        assert(variables["predictiveCooling"]["sensorConnected"].as<bool>());
+        assert(!variables["glycolCooling"]["sensorValid"].as<bool>());
+        assert(variables["glycolCooling"]["rawC"].isNull());
+        assert(!variables["glycolCooling"]["pumpOn"].as<bool>());
+        assert(variables["glycolCooling"]["sensorConnected"].as<bool>());
         extendedSettings.glycol=false;
         variables.clear(); constants.clear();
         tempControl.getControlVariablesDoc(variables);
         tempControl.getControlConstantsDoc(constants);
 #ifdef BREWPI_CHILLSIM_TEST
-        assert(variables["predictiveCooling"]["coolingOnlyBuild"].as<bool>());
-        assert(!constants["predictiveCoolingConfig"].isNull());
+        assert(variables["glycolCooling"]["coolingOnlyBuild"].as<bool>());
+        assert(!constants["glycolCoolingConfig"].isNull());
 #else
-        assert(variables["predictiveCooling"].isNull());
-        assert(constants["predictiveCoolingConfig"].isNull());
+        assert(variables["glycolCooling"].isNull());
+        assert(constants["glycolCoolingConfig"].isNull());
 #endif
         extendedSettings.glycol=true;
     }
-    std::puts("predictive BrewPi integration checks passed");
+    // Pulse-dose uses the same envelope but reports only its own configuration
+    // and learned gain. Unassigned outputs do not report the shared fan dummy.
+    {
+        Fixture f; f.selection=GlycolCooling::Algorithm::PulseDose;
+        f.input.value=q9(25); f.update(60000);
+        tempControl.cs=f.cs; tempControl.cv=f.cv; tempControl.glycolRuntime=f.runtime;
+        tempControl.beerSensor=&f.sensor; tempControl.fridgeSensor=&f.glycol_sensor;
+        tempControl.cooler=&f.cooler;
+        tempControl.heater=tempControl.light=&defaultActuator;
+        defaultActuator.setActive(true);
+        JsonDocument variables, constants;
+        tempControl.getControlVariablesDoc(variables); tempControl.getControlConstantsDoc(constants);
+        JsonObject cooling=variables["glycolCooling"];
+        assert(std::strcmp(cooling["algorithm"].as<const char*>(), "adaptive-pulse-dose-v1")==0);
+        assert(std::strcmp(cooling["selection"].as<const char*>(), "pulse_dose")==0);
+        assert(cooling["pumpOn"].as<bool>() && cooling["coolerActive"].as<bool>());
+        assert(!cooling["heaterActive"].as<bool>() && !cooling["lightActive"].as<bool>());
+        assert(cooling["coastSeconds"].isNull() && cooling["budgetGainCPerPumpSecond"].isNull());
+        assert(cooling["responseUpdates"].isNull());
+        assert(cooling["gainCPerPumpSecond"].as<double>()==0.03);
+        JsonObject config=constants["glycolCoolingConfig"];
+        assert(config.size()==21);
+        assert(config["initial_probe_s"].as<double>()==4);
+        assert(config["far_probe_s"].as<double>()==30);
+        assert(config["saturation_dose_s"].as<double>()==900);
+        assert(config["initial_coast_s"].isNull() && config["maximum_blind_budget_s"].isNull());
+        assert(measureJson(variables)+1<=2048 && measureJson(constants)+1<=2048);
+        // A newly saved request is visible before the next control tick.
+        extendedSettings.glycolCoolingAlgorithm=GlycolCooling::Algorithm::PredictiveCoast;
+        variables.clear(); tempControl.getControlVariablesDoc(variables);
+        assert(variables["glycolCooling"]["switchPending"].as<bool>());
+        assert(std::strcmp(variables["glycolCooling"]["requestedSelection"].as<const char*>(),
+                           "predictive_coast")==0);
+        defaultActuator.setActive(false);
+    }
+    std::puts("selectable cooling BrewPi integration checks passed");
 }

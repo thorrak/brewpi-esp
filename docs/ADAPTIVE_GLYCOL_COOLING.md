@@ -1,9 +1,11 @@
 # Adaptive pulse-dose glycol cooling
 
-This document describes the parent `codex/adaptive-glycol-cooling` branch. On
-`predictive-glycol-cooling`, the active glycol cooling policy is described in
-[Predictive glycol cooling](PREDICTIVE_GLYCOL_COOLING.md). The portable adaptive
-core remains as a comparison reference; it is not the active cooling policy here.
+This document describes the original `codex/adaptive-glycol-cooling` port.
+On `predictive-glycol-cooling`, pulse-dose is now selectable alongside predictive
+coast. See [Selecting the glycol cooling algorithm](GLYCOL_COOLING_SELECTION.md)
+for the current setting, switching behavior, and shared diagnostics. The
+algorithm described below is unchanged; the historical branch-specific
+diagnostic names and firmware revision below do not describe the selector build.
 
 This branch replaces the predictive bang-bang cooling path from
 `codex/glycol-heating-v17` (`aafe224`) with the frozen adaptive pulse-dose candidate
