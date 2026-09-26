@@ -166,7 +166,7 @@
 
 <script setup>
 import { ref, computed } from 'vue'
-import { i18n } from "@/main.js";
+import { i18n } from "@/i18n";
 import {
   Dialog,
   DialogOverlay,

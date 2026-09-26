@@ -5,6 +5,7 @@ module.exports = {
         "^@/(.*)$": "<rootDir>/src/$1"
     },
     transform: {
+        "^.+\\.vue$": "<rootDir>/tests/helpers/vueTransform.js",
         '^.+\\.(ts|tsx)?$': 'ts-jest',
         "^.+\\.(js|jsx)$": "babel-jest",
     },

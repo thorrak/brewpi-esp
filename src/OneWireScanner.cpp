@@ -2,6 +2,7 @@
 
 #include "EspDS18B20.h"
 #include "NumberFormats.h"
+#include "WaterTest.h"
 #include "onewire_device.h"
 #include "onewire_bus_impl_rmt.h"
 
@@ -48,7 +49,7 @@ std::list<onewire_device_record> lOneWireDevices;
 bool onewire_device_record::isConnected() const {
     if (!hasData) return false;
     uint64_t now = esp_timer_get_time();
-    return now <= m_lastUpdate + ONEWIRE_CONNECTED_TIMEOUT_US;
+    return now <= m_lastUpdate + OneWireSensorPolicy::connectedTimeoutUs;
 }
 
 long_temperature onewire_device_record::getTempFixedPoint() const {
@@ -294,10 +295,18 @@ esp_err_t OneWireScanner::trigger_broadcast_conversion() {
 bool OneWireScanner::read_all_devices() {
     bool any_ok = false;
     for (auto& rec : lOneWireDevices) {
-        if (!rec.handle || !rec.initialized) continue;
+        if (!rec.handle || !rec.initialized) {
+            WaterTest::onSample(rec.deviceAddress, 0, false,
+                                m_conversion_start_us, esp_timer_get_time());
+            continue;
+        }
 
         int16_t temp = 0;
         esp_err_t rc = ds18b20_get_temperature_raw(rec.handle, &temp);
+        const uint64_t read_us = esp_timer_get_time();
+        const bool valid = rc == ESP_OK && temp != DEVICE_POWERON_RAW &&
+                           temp != DEVICE_DISCONNECTED_RAW && temp >= -880 && temp <= 2000;
+        WaterTest::onSample(rec.deviceAddress, temp, valid, m_conversion_start_us, read_us);
         if (rc == ESP_ERR_INVALID_STATE) {
             // TH marker read back as 0 — sensor was reset since init_connection.
             // Drop the initialized flag so the next enumeration pass re-seeds it.
@@ -338,7 +347,7 @@ bool OneWireScanner::read_all_devices() {
         }
 
         rec.rawTemp = temp;
-        rec.m_lastUpdate = esp_timer_get_time();
+        rec.m_lastUpdate = read_us;
         rec.hasData = true;
         any_ok = true;
     }
@@ -377,6 +386,7 @@ void OneWireScanner::task_loop() {
         }
 
         // Broadcast a conversion trigger, wait, read everyone.
+        m_conversion_start_us = esp_timer_get_time();
         esp_err_t rc = trigger_broadcast_conversion();
         if (rc == ESP_OK) {
             vTaskDelay(pdMS_TO_TICKS(CONVERSION_WAIT_MS));
@@ -385,6 +395,10 @@ void OneWireScanner::task_loop() {
             }
         } else {
             ESP_LOGW(TAG, "broadcast convert failed, rc=0x%x", (unsigned)rc);
+            for (const auto& rec : lOneWireDevices) {
+                WaterTest::onSample(rec.deviceAddress, 0, false,
+                                    m_conversion_start_us, esp_timer_get_time());
+            }
         }
 
         // Log connection-state transitions so a silent dropout becomes visible.

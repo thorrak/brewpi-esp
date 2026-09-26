@@ -130,6 +130,7 @@ namespace ExtendedSettingsKeys {
 constexpr auto eepromReset = "confirmReset";
 constexpr auto invertTFT = "invertTFT";
 constexpr auto glycol = "glycol";
+constexpr auto glycolCoolingAlgorithm = "glycolCoolingAlgorithm";
 constexpr auto largeTFT = "largeTFT";
 constexpr auto resetScreenOnPin = "resetScreenOnPin";
 constexpr auto tiltGravSensor = "tiltGravSensor";
@@ -170,29 +171,8 @@ constexpr auto setpoint = "setPoint";
 
 /**
  * \brief Strings used for JSON keys
- * \see GlycolLearnedParams, GlycolConfig
+ * \see GlycolConfig
  */
 namespace GlycolKeys {
-// Learned parameters
-constexpr auto k = "k";
-constexpr auto C_off = "C_off";
-constexpr auto L = "L";
-constexpr auto drift_rate = "drift_rate";
-
-// Config parameters
-constexpr auto min_on_time_s = "min_on_time_s";
-constexpr auto min_off_time_s = "min_off_time_s";
-constexpr auto max_continuous_on_time_min = "max_continuous_on_time_min";
-constexpr auto min_training_rate = "min_training_rate";
-constexpr auto min_training_duration_s = "min_training_duration_s";
-constexpr auto min_training_drop = "min_training_drop";
-constexpr auto safety_margin_low = "safety_margin_low";
-constexpr auto min_rate_for_k_model = "min_rate_for_k_model";
 constexpr auto trigger_margin = "trigger_margin";
-constexpr auto emergency_horizon_min = "emergency_horizon_min";
-constexpr auto emergency_detection_time_s = "emergency_detection_time_s";
-constexpr auto min_emergency_dwell_time_s = "min_emergency_dwell_time_s";
-constexpr auto hot_glycol_threshold_s = "hot_glycol_threshold_s";
 }; // namespace GlycolKeys
-
-

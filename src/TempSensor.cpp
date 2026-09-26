@@ -30,6 +30,7 @@ using std::min;
  * \brief Initialize the temperature filters
  */
 void TempSensor::initialize_filters(temperature temp){
+	rawTemperature = temp;
 	fastFilter.init(temp);
 	slowFilter.init(temp);
 	slopeFilter.init(0);
@@ -43,6 +44,7 @@ void TempSensor::initialize_filters(temperature temp){
  */
 void TempSensor::init()
 {
+	rawTemperature = TEMP_SENSOR_DISCONNECTED;
 	logDebug("tempsensor::init - begin %d", failedReadCount);
 	if (_sensor && _sensor->init() && (failedReadCount<0 || failedReadCount>60)) {
 		temperature temp = _sensor->read();
@@ -60,11 +62,14 @@ void TempSensor::update()
 {
 	temperature temp;
 	if (!_sensor || (temp=_sensor->read())==TEMP_SENSOR_DISCONNECTED) {
+		rawTemperature = TEMP_SENSOR_DISCONNECTED;
 		if(failedReadCount >= 0)  // Don't increment if we haven't had a successful read yet (meaning failedReadCount is -1, and the filters are uninitialized)
 			failedReadCount++;
 		failedReadCount = min(failedReadCount,int8_t(120));	// limit
 		return;
 	}
+
+	rawTemperature = temp;
 
 	// We successfully read the temp. If this is the initial read (-1), initialize the filters.
 	// Also reinitialize the filters if we had more than 60 failed reads. 

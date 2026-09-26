@@ -35,7 +35,9 @@
 #include "RotaryEncoder.h"
 #include "ChamberMode.h"
 #include "GlycolMode.h"
+#include <cmath>
 #include "GlycolLog.h"
+#include "WaterTest.h"
 
 TempControl tempControl;
 MinTimes minTimes;
@@ -70,8 +72,8 @@ ControlSettings TempControl::cs;
 ControlVariables TempControl::cv;
 
 // Glycol mode
-GlycolLearnedParams TempControl::glycolLearned;
 GlycolConfig TempControl::glycolConfig;
+GlycolTuningStore TempControl::glycolTuning;
 GlycolRuntimeState TempControl::glycolRuntime;
 	
 	// State variables
@@ -205,6 +207,7 @@ void TempControl::updateTemperatures(){
 }
 
 void TempControl::updatePID(){
+    if (WaterTest::controlOwned()) return;
     static unsigned char integralUpdateCounter = 0;
     if(isBeerMode(cs)){
         if(cs.beerSetting == INVALID_TEMP){
@@ -217,7 +220,8 @@ void TempControl::updatePID(){
         // Allow PID to continue using cached filter values for up to 60 seconds during temporary disconnections.
         // The filters retain their last valid values, providing resilience against brief sensor dropouts.
         // After 60 failed reads (~60 seconds), the cached data is too stale to be reliable.
-        if(beerSensor->getFailedReadCount() > 60) {
+        if(beerSensor->getFailedReadCount() > 60 ||
+           (useGlycolBeerMode(cs) && beerSensor->readRawCached() == INVALID_TEMP)) {
             return;
         }
 
@@ -235,13 +239,13 @@ void TempControl::updatePID(){
 
         if(useGlycolBeerMode(cs)) {
             // ===== GLYCOL MODE =====
-            // Cooling is predictive bang-bang; heating is beer-only time-proportional PID.
+            // Cooling uses the selected beer-only controller; heating is beer-only time-proportional PID.
 
             // Set fridgeSetting to INVALID_TEMP since it's not used in glycol mode
             cs.fridgeSetting = INVALID_TEMP;
 
-            GlycolMode::Context glycolCtx(controlCtx, glycolLearned, glycolConfig, glycolRuntime);
-            GlycolMode::updatePID(glycolCtx, integralUpdateCounter);
+            GlycolMode::Context glycolCtx(controlCtx, glycolConfig, glycolRuntime, extendedSettings.glycolCoolingAlgorithm);
+            GlycolMode::updateHeatingPID(glycolCtx, integralUpdateCounter);
 
         } else {
             ChamberMode::Context chamberCtx(controlCtx, doPosPeakDetect, doNegPeakDetect);
@@ -257,16 +261,30 @@ void TempControl::updatePID(){
 // Discard interrupted cycles, but preserve the actual output-off times so a
 // reconnect or mode change cannot bypass actuator protection.
 void TempControl::resetGlycolControl() {
-    uint32_t pumpOff = glycolRuntime.t_pump_off;
-    if (stateIsCooling()) {
-        lastCoolTime = ticks.seconds();
-        pumpOff = ticks.millis();
+    ControlContext controlCtx = makeControlContext();
+    GlycolMode::Context glycolCtx(controlCtx, glycolConfig, glycolRuntime, extendedSettings.glycolCoolingAlgorithm);
+    GlycolMode::suspend(glycolCtx);
+    // A mode transition into/out of manual test mode cannot rely on
+    // updateOutputs(), which normally bypasses commands in that mode.
+    // Apply the OFF edge now so the retained timing is the real command edge.
+    cooler->setActive(false);
+    heater->setActive(false);
+    if (cc.lightAsHeater) light->setActive(false);
+    fan->setActive(false);
+    if (cs.mode == Modes::test) {
+        // Manual commands bypass the cooling cores, including OFF commands
+        // immediately before this handoff. Start conservative protection
+        // intervals for both directions without discarding learned values.
+        const double now = glycolRuntime.clock_elapsed_ms / 1000.0;
+        glycolRuntime.cooling.externalOff(now);
+        glycolRuntime.cooling_output = glycolRuntime.cooling.output();
+        glycolRuntime.last_pump_active_s = glycolRuntime.last_heater_active_s = now;
+        glycolRuntime.t_pump_off = ticks.millis();
+        lastCoolTime = lastHeatTime = ticks.seconds();
     }
-    if (stateIsHeating()) {
-        lastHeatTime = ticks.seconds();
-    }
-    glycolRuntime.reset();
-    glycolRuntime.t_pump_off = pumpOff;
+#ifdef ENABLE_GLYCOL_LOGGING
+    glycolLog.logTransition(glycolRuntime, beerSensor->readRawCached(), cs.beerSetting);
+#endif
     cv.p = cv.i = cv.d = 0;
     cv.diffIntegral = 0;
     waitTime = 0;
@@ -274,6 +292,10 @@ void TempControl::resetGlycolControl() {
 }
 
 void TempControl::updateState(){
+    if (WaterTest::controlOwned()) {
+        state = cooler->isActive() ? COOLING : STATE_OFF;
+        return;
+    }
     //update state
     bool stayIdle = false;
     bool newDoorOpen = door->sense();
@@ -285,6 +307,10 @@ void TempControl::updateState(){
         piLink.printTemperatures(0, annotation);
     }
 
+    // Manual commands own the relays until an explicit mode transition. Test
+    // mode does not require temperature sensors or an automatic setpoint.
+    if (cs.mode == Modes::test) return;
+
     if(cs.mode == Modes::off){
         if (extendedSettings.glycol) resetGlycolControl();
         state = STATE_OFF;
@@ -295,7 +321,8 @@ void TempControl::updateState(){
         bool fridgeRequired = !useGlycolBeerMode(cs);
         bool fridgeInvalid = (fridgeRequired && (!fridgeSensor->isConnected() || cs.fridgeSetting == INVALID_TEMP));
         bool beerInvalid = isBeerMode(cs) &&
-            (!beerSensor->isConnected() || cs.beerSetting == INVALID_TEMP);
+            (!beerSensor->isConnected() || cs.beerSetting == INVALID_TEMP ||
+             (useGlycolBeerMode(cs) && beerSensor->readRawCached() == INVALID_TEMP));
 
         if(fridgeInvalid || beerInvalid) {
             // Stay idle when a required sensor is disconnected or settings are invalid
@@ -308,12 +335,10 @@ void TempControl::updateState(){
     ControlContext controlCtx = makeControlContext();
 
     // ===== GLYCOL MODE STATE MACHINE =====
-    // Uses predictive bang-bang control (see GLYCOL_COOLING_ALGORITHM.md)
+    // Uses selectable cooling (see docs/GLYCOL_COOLING_SELECTION.md)
     if(useGlycolBeerMode(cs) && !stayIdle) {
-        GlycolMode::Context glycolCtx(controlCtx, glycolLearned, glycolConfig, glycolRuntime);
-        if (GlycolMode::updateState(glycolCtx)) {
-            storeGlycolParams();
-        }
+        GlycolMode::Context glycolCtx(controlCtx, glycolConfig, glycolRuntime, extendedSettings.glycolCoolingAlgorithm);
+        GlycolMode::updateState(glycolCtx);
         // Glycol mode uses its own state machine - skip compressor mode logic
         return;
     }
@@ -325,6 +350,7 @@ void TempControl::updateState(){
 
 
 void TempControl::updateOutputs() {
+    if (WaterTest::controlOwned()) return;
 	if (cs.mode==Modes::test)
 		return;
 		
@@ -339,10 +365,20 @@ void TempControl::updateOutputs() {
 		: isDoorOpen() || (cc.lightAsHeater && heating) || cameraLightState.isActive();
 	light->setActive(lightActive);
 	fan->setActive(heating || cooling);
+    if (extendedSettings.glycol && !cooler->isActive() && !heater->isActive() &&
+        !(cc.lightAsHeater && light->isActive())) {
+        glycolTuning.saveIfChanged(glycolRuntime.cooling, ticks.millis());
+    }
+#ifdef ENABLE_GLYCOL_LOGGING
+    if (extendedSettings.glycol) {
+        glycolLog.logTransition(glycolRuntime, beerSensor->readRawCached(), cs.beerSetting);
+    }
+#endif
 }
 
 
 void TempControl::detectPeaks(){
+    if (WaterTest::controlOwned()) return;
     // Peak detection auto-tuning is designed for compressor mode
     // In glycol mode, use overshoot prediction instead
     if(extendedSettings.glycol) {
@@ -413,6 +449,7 @@ void TempControl::loadConstants(){
  * The update functions only write to EEPROM if the value has changed
  */
 void TempControl::storeSettings(){
+	if (WaterTest::controlOwned()) return;
 	cs.storeToFilesystem();
 	storedBeerSetting = cs.beerSetting;
 }
@@ -484,8 +521,39 @@ void TempControl::setMode(char newMode, bool force){
 			cs.beerSetting = INVALID_TEMP;
 			cs.fridgeSetting = INVALID_TEMP;
 		}
+		// Apply the OFF edge before a filesystem write can delay the command.
+		if (extendedSettings.glycol) updateOutputs();
 		TempControl::storeSettings();
 	}
+}
+
+void TempControl::resumeAfterWaterTest(const ControlSettings& saved) {
+    // Keep learned tuning while clearing measurements and starting fresh relay
+    // protection intervals at the handoff.
+    const auto tuning = glycolRuntime.cooling.tuning();
+    cooler->setActive(false);
+    heater->setActive(false);
+    light->setActive(false);
+    fan->setActive(false);
+    cs = saved;
+    state = STATE_OFF;
+    cv.p = cv.i = cv.d = 0;
+    cv.diffIntegral = 0;
+    waitTime = 0;
+    reset();
+    glycolRuntime.reset();
+    const uint32_t nowMs = ticks.millis();
+    glycolRuntime.clock_initialized = true;
+    glycolRuntime.clock_last_ms = nowMs;
+    glycolRuntime.clock_elapsed_ms = nowMs;
+    glycolRuntime.last_pump_active_s = nowMs / 1000.0;
+    glycolRuntime.last_heater_active_s = nowMs / 1000.0;
+    glycolRuntime.cooling.reset(extendedSettings.glycolCoolingAlgorithm);
+    glycolRuntime.cooling.restoreTuning(tuning);
+    glycolRuntime.cooling.externalOff(nowMs / 1000.0);
+    glycolRuntime.cooling_output = glycolRuntime.cooling.output();
+    lastCoolTime = lastHeatTime = lastIdleTime = ticks.seconds();
+    initFilters();
 }
 
 
@@ -541,6 +609,7 @@ void TempControl::setBeerTemp(temperature newTemp){
 	}
 	updatePID();
 	updateState();
+	if (extendedSettings.glycol) updateOutputs();
 	if(cs.mode != Modes::beerProfile || abs(storedBeerSetting - newTemp) > intToTempDiff(1)/4){
 		// more than 1/4 degree C difference with EEPROM
 		// Do not store settings every time in profile mode, because EEPROM has limited number of write cycles.
@@ -597,6 +666,58 @@ void TempControl::getControlVariablesDoc(JsonDocument& doc) {
   doc["posPeakEst"] = tempToDouble(cv.posPeakEstimate, Config::TempFormat::tempDecimals);
   doc["negPeak"] = tempToDouble(cv.negPeak, Config::TempFormat::tempDecimals);
   doc["posPeak"] = tempToDouble(cv.posPeak, Config::TempFormat::tempDecimals);
+  if (extendedSettings.glycol) {
+    // Explicit units: display format never changes these internal quantities.
+    JsonObject cooling = doc["glycolCooling"].to<JsonObject>();
+    const auto& output = glycolRuntime.cooling_output;
+    cooling["algorithm"] = glycolRuntime.cooling.algorithmVersion();
+    cooling["selection"] = GlycolCooling::selectionName(glycolRuntime.cooling.selection());
+    cooling["requestedSelection"] = GlycolCooling::selectionName(extendedSettings.glycolCoolingAlgorithm);
+    cooling["switchPending"] = glycolRuntime.cooling.switchPending() ||
+        glycolRuntime.cooling.selection() != extendedSettings.glycolCoolingAlgorithm;
+    cooling["phase"] = GlycolCooling::Controller::phaseName(output.phase);
+    cooling["pumpOn"] = output.pump_on;
+    cooling["fullCooling"] = output.full_cooling;
+    cooling["temperatureC"] = output.temperature_c;
+    cooling["setpointC"] = cs.beerSetting == INVALID_TEMP ? 0.0 :
+        (static_cast<int32_t>(cs.beerSetting) - C_OFFSET) / 512.0;
+    cooling["setpointValid"] = cs.beerSetting != INVALID_TEMP;
+    temperature raw = beerSensor->readRawCached();
+    cooling["sensorValid"] = raw != INVALID_TEMP && beerSensor->isConnected();
+    cooling["sensorConnected"] = beerSensor->isConnected();
+    cooling["sensorFailedReads"] = beerSensor->getFailedReadCount();
+    if (raw == INVALID_TEMP) cooling["rawC"] = nullptr;
+    else cooling["rawC"] = (static_cast<int32_t>(raw) - C_OFFSET) / 512.0;
+    temperature glycolRaw = fridgeSensor->readRawCached();
+    cooling["glycolSensorValid"] = glycolRaw != INVALID_TEMP && fridgeSensor->isConnected();
+    if (glycolRaw == INVALID_TEMP) cooling["glycolRawC"] = nullptr;
+    else cooling["glycolRawC"] = (static_cast<int32_t>(glycolRaw) - C_OFFSET) / 512.0;
+    cooling["uptimeMillis"] = glycolRuntime.clock_elapsed_ms;
+    cooling["coastAgeSeconds"] = output.phase == GlycolCooling::Phase::Coast
+        ? static_cast<uint32_t>(ticks.millis() - glycolRuntime.t_pump_off) / 1000.0 : 0.0;
+    cooling["coolerActive"] = cooler != &defaultActuator && cooler->isActive();
+    cooling["heaterActive"] = heater != &defaultActuator && heater->isActive();
+    cooling["lightActive"] = light != &defaultActuator && light->isActive();
+    cooling["rateCPerSecond"] = output.rate_c_per_s;
+    if (glycolRuntime.cooling.selection() == GlycolCooling::Algorithm::PredictiveCoast) {
+        cooling["coastSeconds"] = output.coast_s;
+        cooling["budgetGainCPerPumpSecond"] = output.budget_gain_c_per_s;
+        cooling["responseUpdates"] = output.response_updates;
+    } else {
+        cooling["gainCPerPumpSecond"] = output.gain_c_per_on_s;
+    }
+    cooling["learningUpdates"] = output.learning_updates;
+    // Null pulse budget means continuous demand (JSON has no Infinity).
+    if (!std::isfinite(output.pulse_budget_s)) cooling["pulseBudgetSeconds"] = nullptr;
+    else cooling["pulseBudgetSeconds"] = output.pulse_budget_s;
+    cooling["actualOnSeconds"] = output.pump_on
+        ? glycolRuntime.clock_elapsed_ms / 1000.0 - glycolRuntime.pump_started_s : 0.0;
+    cooling["lastCompletedOnSeconds"] = output.actual_on_s;
+    cooling["predictedEndpointC"] = output.predicted_endpoint_c;
+    cooling["minOnSeconds"] = glycolRuntime.cooling.minOnSeconds();
+    cooling["minOffSeconds"] = glycolRuntime.cooling.minOffSeconds();
+    cooling["learningPersistence"] = "flash";
+  }
 }
 
 /**
@@ -636,6 +757,54 @@ void TempControl::getControlConstantsDoc(JsonDocument& doc) {
   doc["KiHeat"] = fixedPointToDouble(cc.Ki_heat, Config::TempFormat::fixedPointDecimals);
   doc["KdHeat"] = fixedPointToDouble(cc.Kd_heat, Config::TempFormat::fixedPointDecimals);
   doc["pidMaxHeat"] = tempDiffToDouble(cc.pidMax_heat, Config::TempFormat::tempDiffDecimals);
+  if (extendedSettings.glycol) {
+    JsonObject cooling = doc["glycolCoolingConfig"].to<JsonObject>();
+    cooling["algorithm"] = glycolRuntime.cooling.algorithmVersion();
+    cooling["selection"] = GlycolCooling::selectionName(glycolRuntime.cooling.selection());
+    if (glycolRuntime.cooling.selection() == GlycolCooling::Algorithm::PredictiveCoast) {
+        const auto& config = glycolRuntime.cooling.predictiveConfiguration();
+        cooling["min_on_s"] = config.min_on_s;
+        cooling["min_off_s"] = config.min_off_s;
+        cooling["rate_window_s"] = config.rate_window_s;
+        cooling["measurement_window_s"] = config.measurement_window_s;
+        cooling["deadband_c"] = config.deadband_c;
+        cooling["learning_fraction"] = config.learning_fraction;
+        cooling["observe_coast_s"] = config.observe_coast_s;
+        cooling["max_observe_coast_s"] = config.max_observe_coast_s;
+        cooling["initial_coast_s"] = config.initial_coast_s;
+        cooling["min_coast_estimate_s"] = config.min_coast_estimate_s;
+        cooling["max_coast_estimate_s"] = config.max_coast_estimate_s;
+        cooling["rate_floor_c_per_s"] = config.rate_floor_c_per_s;
+        cooling["near_target_c"] = config.near_target_c;
+        cooling["startup_pulse_s"] = config.startup_pulse_s;
+        cooling["startup_budget_c_per_s"] = config.startup_budget_c_per_s;
+        cooling["restart_margin_c"] = config.restart_margin_c;
+        cooling["budget_learning_fraction"] = config.budget_learning_fraction;
+        cooling["minimum_budget_gain_c_per_s"] = config.minimum_budget_gain_c_per_s;
+        cooling["maximum_blind_budget_s"] = config.maximum_blind_budget_s;
+    } else {
+        const auto& config = glycolRuntime.cooling.doseConfiguration();
+        cooling["min_on_s"] = config.min_on_s;
+        cooling["min_off_s"] = config.min_off_s;
+        cooling["rate_window_s"] = config.rate_window_s;
+        cooling["measurement_window_s"] = config.measurement_window_s;
+        cooling["deadband_c"] = config.deadband_c;
+        cooling["learning_fraction"] = config.learning_fraction;
+        cooling["observe_coast_s"] = config.observe_coast_s;
+        cooling["max_observe_coast_s"] = config.max_observe_coast_s;
+        cooling["initial_gain_c_per_on_s"] = config.initial_gain_c_per_on_s;
+        cooling["minimum_gain_c_per_on_s"] = config.minimum_gain_c_per_on_s;
+        cooling["maximum_gain_c_per_on_s"] = config.maximum_gain_c_per_on_s;
+        cooling["dose_fraction"] = config.dose_fraction;
+        cooling["initial_probe_s"] = config.initial_probe_s;
+        cooling["far_probe_s"] = config.far_probe_s;
+        cooling["far_error_c"] = config.far_error_c;
+        cooling["saturation_dose_s"] = config.saturation_dose_s;
+        cooling["unresolved_error_c"] = config.unresolved_error_c;
+        cooling["stop_horizon_s"] = config.stop_horizon_s;
+        cooling["settled_rate_c_per_s"] = config.settled_rate_c_per_s;
+    }
+  }
 }
 
 
@@ -651,6 +820,7 @@ void TempControl::getControlSettingsDoc(JsonDocument& doc) {
   doc["fridgeSet"] = tempToDouble(cs.fridgeSetting, Config::TempFormat::tempDecimals);
   doc["heatEst"] = fixedPointToDouble(cs.heatEstimator, Config::TempFormat::fixedPointDecimals);
   doc["coolEst"] = fixedPointToDouble(cs.coolEstimator, Config::TempFormat::fixedPointDecimals);
+
 }
 
 
@@ -677,7 +847,7 @@ void MinTimes::setDefaults() {
 
         // Time-proportional control settings
         GLYCOL_WINDOW_PERIOD = 1000;
-        GLYCOL_MIN_ON_TIME = 10;
+        GLYCOL_MIN_HEAT_ON_TIME = 10;
     } else if(settings_choice == MIN_TIMES_DEFAULT) {
 		// Compressor Mode - Normal Delay
 		MIN_COOL_OFF_TIME = 300;
@@ -691,7 +861,7 @@ void MinTimes::setDefaults() {
 		HEAT_PEAK_DETECT_TIME = 900;
 
         GLYCOL_WINDOW_PERIOD = 1000;
-        GLYCOL_MIN_ON_TIME = 10;
+        GLYCOL_MIN_HEAT_ON_TIME = 10;
 	} else if(settings_choice == MIN_TIMES_LOW_DELAY) {
 		// Compressor Mode - Low Delay
 		MIN_COOL_OFF_TIME = 60;
@@ -705,7 +875,7 @@ void MinTimes::setDefaults() {
 		HEAT_PEAK_DETECT_TIME = 900;
 
         GLYCOL_WINDOW_PERIOD = 1000;
-        GLYCOL_MIN_ON_TIME = 10;
+        GLYCOL_MIN_HEAT_ON_TIME = 10;
 	} else {
 		// Custom Delay -- Effectively a noop, as the defaults are set when the json gets loaded
 	}
@@ -754,7 +924,7 @@ void MinTimes::loadFromFilesystem() {
 
     // Glycol mode time-proportional control settings
     if(json_doc[MinTimesKeys::GLYCOL_WINDOW_PERIOD].is<uint16_t>()) GLYCOL_WINDOW_PERIOD = json_doc[MinTimesKeys::GLYCOL_WINDOW_PERIOD];
-    if(json_doc[MinTimesKeys::GLYCOL_MIN_ON_TIME].is<uint16_t>()) GLYCOL_MIN_ON_TIME = json_doc[MinTimesKeys::GLYCOL_MIN_ON_TIME];
+    if(json_doc[MinTimesKeys::GLYCOL_MIN_HEAT_ON_TIME].is<uint16_t>()) GLYCOL_MIN_HEAT_ON_TIME = json_doc[MinTimesKeys::GLYCOL_MIN_HEAT_ON_TIME];
 }
 
 
@@ -778,12 +948,12 @@ void MinTimes::toJson(JsonDocument &doc) {
 
     // Glycol mode time-proportional control settings
     doc[MinTimesKeys::GLYCOL_WINDOW_PERIOD] = GLYCOL_WINDOW_PERIOD;
-    doc[MinTimesKeys::GLYCOL_MIN_ON_TIME] = GLYCOL_MIN_ON_TIME;
+    doc[MinTimesKeys::GLYCOL_MIN_HEAT_ON_TIME] = GLYCOL_MIN_HEAT_ON_TIME;
 }
 
 // ============================================================================
-// GLYCOL MODE: Predictive Bang-Bang Control Implementation
-// See GLYCOL_COOLING_ALGORITHM.md for design documentation
+// GLYCOL MODE: Selectable cooling runtime
+// See docs/GLYCOL_COOLING_SELECTION.md for design documentation
 // ============================================================================
 
 
@@ -791,37 +961,33 @@ void MinTimes::toJson(JsonDocument &doc) {
 // ----- GlycolRuntimeState -----
 
 void GlycolRuntimeState::reset() {
+    cooling.reset();
+    cooling_output = cooling.output();
+    clock_initialized = false;
+    clock_last_ms = 0;
+    clock_elapsed_ms = 0;
+    cooling_step_initialized = false;
+    cooling_last_step_ms = 0;
+    pid_step_initialized = false;
+    pid_last_step_ms = 0;
+    last_heater_active_s = 0;
+    last_pump_active_s = 0;
+    pump_started_s = 0;
     state = GLYCOL_IDLE;
-    t_pump_on = 0;
     t_pump_off = 0;
-    emergency_entry_time = 0;
-    temp_at_pump_on = 0;
-    temp_at_pump_off = 0;
-    min_temp_reached = 0;
-    cooling_rate_at_pump_off = 0;
-    current_cooling_rate = 0;
-    cooling_confirmed = false;
-    negative_rate_count = 0;
-    setpoint_changed_this_cycle = false;
-    cooling_duration_s = 0;
     heating_output = 0;
     heating_window_active = false;
     heating_window_start_ms = 0;
     heating_window_on_time_s = 0;
     heating_wait_reason = GLYCOL_HEATING_WAIT_NONE;
-    force_minimum_cooling = false;
-    rate_buffer_head = 0;
-    rate_buffer_count = 0;
 }
 
 // ----- TempControl Glycol Methods -----
 
 void TempControl::loadGlycolParams() {
-    glycolLearned.loadFromFilesystem();
     glycolConfig.loadFromFilesystem();
     glycolRuntime.reset();
-}
-
-void TempControl::storeGlycolParams() {
-    glycolLearned.storeToFilesystem();
+    glycolRuntime.cooling.reset(extendedSettings.glycolCoolingAlgorithm);
+    glycolTuning.load(glycolRuntime.cooling, ticks.millis());
+    glycolRuntime.cooling_output = glycolRuntime.cooling.output();
 }

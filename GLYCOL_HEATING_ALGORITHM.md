@@ -32,7 +32,7 @@ internal range after conversion from Fahrenheit when applicable. Invalid numeric
 values or types are rejected before changing live settings.
 
 The timing values are persisted in `minTimes`: `GLYCOL_WINDOW_PERIOD` defaults to
-1000 seconds and `GLYCOL_MIN_ON_TIME` to 10 seconds. `MIN_HEAT_OFF_TIME` and
+1000 seconds and `GLYCOL_MIN_HEAT_ON_TIME` to 10 seconds. `MIN_HEAT_OFF_TIME` and
 `MIN_SWITCH_TIME` protect output transitions. The web API returns the glycol
 window settings through `GET /api/extended/`, but does not currently expose an
 update handler or UI fields for them.
@@ -66,7 +66,7 @@ A heating window converts output to a relay ON duration:
 on_time_seconds = floor(output / pidMaxHeat * GLYCOL_WINDOW_PERIOD)
 ```
 
-A positive duration is raised to `GLYCOL_MIN_ON_TIME` when necessary, then capped
+A positive duration is raised to `GLYCOL_MIN_HEAT_ON_TIME` when necessary, then capped
 at the window period. A duration that rounds to zero produces no pulse. Duty is
 latched at the start of each window so changing PID output cannot create several
 ON pulses inside one window. Reaching the setpoint or losing demand still turns

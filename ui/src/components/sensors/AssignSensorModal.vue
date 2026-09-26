@@ -62,7 +62,7 @@
                       <label for="device_function" class="block text-sm font-medium text-gray-700">{{ $t("sensors.assign_sensor_modal.device_function") }}</label>
                       <select id="device_function" name="device_function" v-model="new_function" class="mt-1 block w-full rounded-md border-gray-300 py-2 pl-3 pr-10 text-base focus:border-indigo-500 focus:outline-none focus:ring-indigo-500 sm:text-sm">
                         <option v-for="valid_function in sensor.valid_functions()" :key="valid_function.id" :value="valid_function.id">
-                          {{ $t("sitewide.brewpi_device_functions." + valid_function.function_name) }}
+                          {{ $t("sitewide.brewpi_device_functions." + deviceFunctionLabel(valid_function.function_name, ExtendedSettingsStore.glycol)) }}
                         </option>
                       </select>
                     </div>
@@ -201,6 +201,8 @@ import { CheckIcon, NoSymbolIcon, ChevronUpDownIcon, CogIcon, ExclamationTriangl
 import FormErrorMsg from "@/components/generic/FormErrorMsg.vue";
 import { useBrewPiSensorStore } from "@/stores/BrewPiSensorStore";
 import { useTempControlStore } from "@/stores/TempControlStore";
+import { useExtendedSettingsStore } from "@/stores/ExtendedSettingsStore";
+import { deviceFunctionLabel } from "@/mixins/BrewPiSensor";
 
 
 export default {
@@ -236,6 +238,8 @@ export default {
       isOpen,
       alertOpen,
       updateSuccessful,
+      ExtendedSettingsStore: useExtendedSettingsStore(),
+      deviceFunctionLabel,
       BrewPiSensorStore: useBrewPiSensorStore(),  // Updated in ConfigSensorsActuators.vue
       TempControlStore: useTempControlStore()  // Updated in App.vue
     }

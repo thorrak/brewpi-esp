@@ -7,22 +7,24 @@ namespace GlycolMode {
 struct Context : ControlContext {
     Context(
         ControlContext& controlContext,
-        GlycolLearnedParams& learnedParams,
         GlycolConfig& glycolConfig,
-        GlycolRuntimeState& runtimeState
+        GlycolRuntimeState& runtimeState,
+        GlycolCooling::Algorithm requestedAlgorithm
     )
         : ControlContext(controlContext),
-          learned(learnedParams),
           config(glycolConfig),
-          runtime(runtimeState) {}
+          runtime(runtimeState),
+          requestedAlgorithm(requestedAlgorithm) {}
 
-    GlycolLearnedParams& learned;
     GlycolConfig& config;
     GlycolRuntimeState& runtime;
+    GlycolCooling::Algorithm requestedAlgorithm;
 };
 
-void updatePID(Context& ctx, unsigned char& integralUpdateCounter);
-// Returns true when learned glycol parameters should be persisted by the caller.
-bool updateState(Context& ctx);
+void updateHeatingPID(Context& ctx, unsigned char& integralUpdateCounter);
+// Immediate fault/mode inhibition: preserves each algorithm's learned values and actual OFF time.
+void suspend(Context& ctx);
+
+void updateState(Context& ctx);
 
 } // namespace GlycolMode

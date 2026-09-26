@@ -4,6 +4,10 @@
 
 #include <esp_timer.h>
 #include <esp_littlefs.h>
+#include "WaterTest.h"
+#ifdef ENABLE_GLYCOL_LOGGING
+#include "ntp.h"
+#endif
 
 #include <thorlog.h>
 #include <thorlog_espidf.h>
@@ -158,6 +162,7 @@ void setup()
   // are NULL until TempControl::init() allocates default sensors, so a
   // browser auto-refresh during boot would otherwise crash the device.
   tempControl.init();
+  WaterTest::init();
 
   // Order matters: wifi_cfg's Network Provisioning backend (esp_wifi_config
   // 0.1.0+) uses Espressif's wifi_prov_scheme_ble, which unconditionally calls
@@ -167,6 +172,9 @@ void setup()
   // calls NimBLEDevice::init() afterwards and re-attaches to the controller,
   // which is kept resident by .prov_ble.memory_policy = KEEP_ALL.
   initialize_wifi();
+#ifdef ENABLE_GLYCOL_LOGGING
+  initNTP();
+#endif
 
 #ifdef HAS_BLUETOOTH
   bt_scanner.init();
@@ -203,6 +211,7 @@ void setup()
 	}
 
 	settingsManager.loadSettings();  // Also fully loads devices
+  WaterTest::tick();
 
 #if BREWPI_SIMULATE
 	simulator.step();
@@ -242,6 +251,7 @@ void setup()
  */
 void brewpiLoop()
 {
+  WaterTest::tick();
 	static unsigned long lastUpdate = 0;
 	uint8_t oldState;
 #ifdef BREWPI_IIC  // We only want to do this for the IIC displays
@@ -279,7 +289,7 @@ void brewpiLoop()
 		tempControl.updateOutputs();
 
 #if BREWPI_MENU
-		if (rotaryEncoder.pushed()) {
+		if (!WaterTest::controlOwned() && rotaryEncoder.pushed()) {
 			rotaryEncoder.resetPushed();
 			menu.pickSettingToChange();
 		}
@@ -305,13 +315,15 @@ if(bt_scanner.scanning_failed()) {
 #endif
 
 #ifdef EXTERN_SENSOR_ACTUATOR_SUPPORT
-  tp_link_scanner.scan_and_refresh();
+  if (!WaterTest::controlOwned()) tp_link_scanner.scan_and_refresh();
 #endif
 
 #ifdef ENABLE_HTTP_INTERFACE
   // The webserver is now handled asynchronously, so we don't need to call handleClient() here
   http_server.processQueuedDeviceDefinition();  // Do this in the main loop to avoid issues with blocking to read DS18b20s
-  rest_handler.process();
+  // The upstream client performs blocking HTTP. Experiment timing and immutable
+  // configuration must not depend on those requests or upstream commands.
+  if (!WaterTest::controlOwned()) rest_handler.process();
   http_server.processQueuedActions();
 #endif
 
@@ -361,4 +373,3 @@ extern "C" void app_main(void) {
         1  // Core 1 = app core
     );
 }
-

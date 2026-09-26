@@ -70,6 +70,7 @@ class TempSensor {
   void setSensor(BasicTempSensor* sensor) {
    _sensor = sensor;
    failedReadCount = -1;
+   rawTemperature = TEMP_SENSOR_DISCONNECTED;
   }
 
   /**
@@ -95,6 +96,13 @@ class TempSensor {
 	bool isConnected() { return _sensor != NULL && _sensor->isConnected(); }
 
 	void update();
+
+	// Returns the latest reading saved by init() or update(), before smoothing.
+	// Reads memory only; does not contact the sensor or request a new measurement.
+	// Convert a valid result to Celsius with: value / 512.0 + 48.
+	// Returns INVALID_TEMP if no valid reading is cached, including after a
+	// failed read or sensor replacement.
+	temperature readRawCached() const { return rawTemperature; }
 
 	temperature readFastFiltered();
 
@@ -124,6 +132,7 @@ class TempSensor {
 
 	private:
 	BasicTempSensor* _sensor; //!< Wrapped basic sensor
+	temperature rawTemperature;
 	TempSensorFilter fastFilter; //!< Fast reacting filter
 	TempSensorFilter slowFilter; //!< Slow reacting filter
 	TempSensorFilter slopeFilter; //!< Slope filter
@@ -145,4 +154,3 @@ class TempSensor {
 	friend class Chamber;
 	friend class DeviceManager;
 };
-
