@@ -37,7 +37,6 @@ export function buildWaterTestPayload(form) {
     if (!['jacket', 'immersion_coil', 'other', 'unknown'].includes(form.coolingType)) throw new Error(i18n.global.t('water_test.errors.select_cooling'));
     if (!['thermowell', 'immersed', 'outside', 'other', 'unknown'].includes(form.probeMounting)) throw new Error(i18n.global.t('water_test.errors.select_probe'));
     if (!['chamber_probe', 'reported_setpoint'].includes(form.glycolChoice)) throw new Error(i18n.global.t('water_test.errors.select_chamber'));
-    if (form.glycolChoice === 'chamber_probe' && !form.bathPlacementConfirmed) throw new Error(i18n.global.t('water_test.errors.confirm_probe'));
     const source = form.glycolChoice === 'chamber_probe' ? 'chamber_probe' : (form.unknownSetpoint ? 'unknown' : 'reported_setpoint');
     const setpoint = source === 'reported_setpoint' ? requiredNumber(form.glycolSetpoint, 'enter_setpoint') : null;
     const setpointC = setpoint === null ? null : convertTemperature(setpoint, form.temperatureUnit, 'C');
@@ -51,7 +50,6 @@ export function buildWaterTestPayload(form) {
         cooling_type: form.coolingType,
         probe_mounting: form.probeMounting,
         glycol_temperature_source: source,
-        bath_placement_confirmed: source === 'chamber_probe' && form.bathPlacementConfirmed === true,
         reported_chiller_setpoint_c: setpointC,
         follow_up: false,
         reported_input: {

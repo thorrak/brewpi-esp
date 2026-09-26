@@ -4,7 +4,7 @@ const form = (changes = {}) => ({
     model: 'Example fermenter', capacity: '7', waterVolume: '5', volumeUnit: 'us_gal',
     coolingType: 'immersion_coil', probeMounting: 'thermowell', glycolChoice: 'reported_setpoint',
     glycolSetpoint: '45', unknownSetpoint: false, temperatureUnit: 'F',
-    consent: true, waterConfirmed: true, bathPlacementConfirmed: false, ...changes,
+    consent: true, waterConfirmed: true, ...changes,
 });
 
 describe('water-test questionnaire', () => {
@@ -23,13 +23,21 @@ describe('water-test questionnaire', () => {
         expect(payload.reported_input.glycol_setpoint).toBeNull();
         expect(payload.fermenter_capacity_l).toBeNull();
     });
-    it('requires explicit bath placement and excludes stale static-setpoint inputs in measured mode', () => {
-        expect(() => buildWaterTestPayload(form({ glycolChoice: 'chamber_probe' }))).toThrow('now in the glycol bath');
-        const payload = buildWaterTestPayload(form({ glycolChoice: 'chamber_probe', bathPlacementConfirmed: true }));
+    it('uses the configured glycol probe and excludes static-setpoint inputs in measured mode', () => {
+        const payload = buildWaterTestPayload(form({ glycolChoice: 'chamber_probe' }));
         expect(payload.glycol_temperature_source).toBe('chamber_probe');
-        expect(payload.bath_placement_confirmed).toBe(true);
         expect(payload.reported_chiller_setpoint_c).toBeNull();
         expect(payload.reported_input.glycol_setpoint).toBeNull();
+    });
+    it.each(['l', 'us_gal'])('preserves decimal volumes entered in %s', (volumeUnit) => {
+        const payload = JSON.parse(JSON.stringify(buildWaterTestPayload(form({
+            capacity: '7.25', waterVolume: '5.5', volumeUnit,
+        }))));
+        const litersPerUnit = volumeUnit === 'us_gal' ? 3.785411784 : 1;
+        expect(payload.fermenter_capacity_l).toBeCloseTo(7.25 * litersPerUnit, 8);
+        expect(payload.water_volume_l).toBeCloseTo(5.5 * litersPerUnit, 8);
+        expect(payload.reported_input.fermenter_capacity).toBe(7.25);
+        expect(payload.reported_input.water_volume).toBe(5.5);
     });
     it.each(['', ' ', null, undefined, 'bad', Infinity, -1, 0])('rejects invalid water volume %p', (waterVolume) => {
         expect(() => buildWaterTestPayload(form({ waterVolume }))).toThrow();

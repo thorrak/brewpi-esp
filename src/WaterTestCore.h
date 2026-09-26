@@ -1,5 +1,7 @@
 #pragma once
 
+#include "OneWireSensorPolicy.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -13,7 +15,7 @@ constexpr uint32_t observationSeconds = 1200;
 constexpr uint32_t maximumSeconds = 5400;
 constexpr uint32_t maximumPulseSeconds = 60;
 constexpr uint32_t maximumPumpSeconds = 180;
-constexpr double freshnessSeconds = 10;
+constexpr double freshnessSeconds = OneWireSensorPolicy::connectedTimeoutUs / 1e6;
 constexpr double maximumDropC = 3;
 constexpr double minimumWaterC = 4;
 enum class Phase : uint8_t { Idle, Baseline, Pulse, Observe, Stopping, Finished };
@@ -73,9 +75,12 @@ struct Program {
   double initialC = 0, latestC = 0, lastSample = 0, beforePulseC = 0, minimumC = 0;
   double totalPump = 0;
   uint32_t minimumOn = 2, minimumOff = 2;
-  unsigned pulse = 0;
+  unsigned pulse = 0, completedPulses = 0;
   bool pump = false, stopping = false;
   bool active() const { return phase != Phase::Idle && phase != Phase::Finished; }
+  bool submissionEligible() const {
+    return completedPulses > 0 && (outcome == End::Completed || outcome == End::Stopped);
+  }
   bool start(double now, double beerC, uint32_t on, uint32_t off) {
     *this = Program{};
     minimumOn = std::max<uint32_t>(2U, on);
@@ -92,16 +97,31 @@ struct Program {
   void stop(double now) {
     if (!active())
       return;
+    if (now - lastSample > freshnessSeconds) {
+      finish(now, End::Failed, Reason::SensorStale);
+      return;
+    }
+    if (now - started >= maximumSeconds) {
+      finish(now, End::Inconclusive, Reason::RuntimeLimit);
+      return;
+    }
     stopping = true;
     phase = Phase::Stopping;
     reason = Reason::UserStop;
     if (!pump || now - switched >= minimumOn)
       finish(now, End::Stopped, Reason::UserStop);
   }
-  void finish(double now, End e, Reason r) {
-    if (pump)
-      totalPump += now - pulseStarted;
+  void endPulse(double now) {
+    if (!pump)
+      return;
+    totalPump += now - pulseStarted;
+    if (now >= deadline)
+      ++completedPulses;
     pump = false;
+    switched = now;
+  }
+  void finish(double now, End e, Reason r) {
+    endPulse(now);
     switched = now;
     phase = Phase::Finished;
     outcome = e;
@@ -111,7 +131,8 @@ struct Program {
     if (!active())
       return;
     if (!valid || !std::isfinite(beerC)) {
-      finish(now, End::Failed, Reason::SensorFault);
+      if (now - lastSample > freshnessSeconds)
+        finish(now, End::Failed, Reason::SensorStale);
       return;
     }
     latestC = beerC;
@@ -148,9 +169,7 @@ struct Program {
     if (now < deadline)
       return;
     if (phase == Phase::Pulse) {
-      totalPump += now - pulseStarted;
-      pump = false;
-      switched = now;
+      endPulse(now);
       phase = Phase::Observe;
       reason = Reason::Observation;
       deadline = now + observationSeconds;

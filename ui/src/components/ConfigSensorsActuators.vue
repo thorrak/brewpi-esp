@@ -142,7 +142,7 @@
                         <div class="text-gray-500" v-if="sensor.device_hardware === 'tplink_switch'">{{ sensor.address }}</div>
                       </td>
                       <td class="whitespace-nowrap px-3 py-4 text-sm text-gray-500">
-                        {{ $t("sitewide.brewpi_device_functions." + sensor.device_function) }}
+                        {{ $t("sitewide.brewpi_device_functions." + deviceFunctionLabel(sensor.device_function, ExtendedSettingsStore.glycol)) }}
                       </td>
                       <td class="relative whitespace-nowrap py-4 pl-3 pr-6 text-right text-sm font-medium">
                         <AssignSensorModal :sensor="sensor" v-on:device-updated="delayedRefreshDevices" />
@@ -168,6 +168,7 @@ import { useExtendedSettingsStore } from "@/stores/ExtendedSettingsStore";
 import AssignSensorModal from "@/components/sensors/AssignSensorModal.vue";
 import { ExclamationTriangleIcon, InformationCircleIcon } from '@heroicons/vue/24/outline'
 import { ref } from "vue";
+import { deviceFunctionLabel } from "@/mixins/BrewPiSensor";
 
 export default {
   name: "ConfigSensorsActuators",
@@ -193,6 +194,7 @@ export default {
     return {
       BrewPiSensorStore: useBrewPiSensorStore(),  // Updated in ConfigSensorsActuators.vue
       ExtendedSettingsStore: useExtendedSettingsStore(),
+      deviceFunctionLabel,
       hasFridgeSensor,
       hasBeerSensor,
       hasHeatActuator,

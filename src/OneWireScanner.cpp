@@ -49,7 +49,7 @@ std::list<onewire_device_record> lOneWireDevices;
 bool onewire_device_record::isConnected() const {
     if (!hasData) return false;
     uint64_t now = esp_timer_get_time();
-    return now <= m_lastUpdate + ONEWIRE_CONNECTED_TIMEOUT_US;
+    return now <= m_lastUpdate + OneWireSensorPolicy::connectedTimeoutUs;
 }
 
 long_temperature onewire_device_record::getTempFixedPoint() const {

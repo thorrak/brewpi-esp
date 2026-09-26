@@ -29,12 +29,15 @@ with tempfile.TemporaryDirectory(prefix='water-test-backend-') as temp:
                     '-I' + str(root / 'src'), '-I' + str(root / 'tests/water_test_backend'),
                     '-I' + str(headers),
                     str(translation), '-o', str(binary)], check=True)
-    for name in ['normal_stop', 'minimum_stop', 'sensor_fault', 'bath_fault', 'status_freshness',
+    for name in ['normal_stop', 'baseline_stop', 'minimum_stop', 'full_pulse_stop',
+                 'transient_sensor_errors', 'transient_bad_start', 'prolonged_invalid', 'silent_sensor',
+                 'minimum_water_limit', 'bath_fault', 'status_freshness',
                  'fsync_failure', 'edge_fsync_failure', 'start_failure', 'queue_overflow', 'unexpected_output',
-                 'upload_retry', 'all_pulses', 'slow_sensor_fault', 'slow_temperature_limit', 'slow_deadline', 'slow_on_edge',
+                 'upload_retry', 'all_pulses', 'completed', 'failure_after_full_pulse', 'stale_stop_after_full_pulse',
+                 'slow_sensor_fault', 'slow_temperature_limit', 'slow_deadline', 'slow_on_edge',
                  'slow_phase', 'slow_storage_repair',
                  'queue_snapshot', 'slow_queue_overflow', 'queued_unexpected_output', 'cleanup_failure',
-                 'resume_pending_upload']:
+                 'resume_pending_upload', 'independent_hardware_availability', 'configured_glycol_probe']:
         subprocess.run([str(binary), name, str(build / name)], check=True)
     for before in ['active', 'stopped', 'pending', 'partial_upload', 'resumed_pending', 'submitted', 'corrupt']:
         reboot = build / before

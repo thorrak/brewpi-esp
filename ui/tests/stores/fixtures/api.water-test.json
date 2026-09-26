@@ -19,6 +19,7 @@
   "preflight": {
     "ready": true,
     "reason": "",
+    "beer_configured": true,
     "beer_available": true,
     "chamber_available": true,
     "cooler_available": true,

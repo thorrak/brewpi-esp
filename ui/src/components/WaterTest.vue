@@ -46,24 +46,16 @@
         <div class="mt-5 border-t border-gray-200 pt-4">
           <h3 class="text-sm font-semibold text-gray-900">{{ t('water_test.submission_status', { status: uploadLabel }) }}</h3>
           <p v-if="['pending', 'uploading', 'error'].includes(status.upload_status)" class="mt-1 text-sm text-gray-600">{{ t('water_test.upload_help') }}</p>
+          <p v-if="status.upload_status === 'not_submitted'" class="mt-1 text-sm text-gray-600">{{ t('water_test.not_submitted_help') }}</p>
           <p v-if="status.upload_error" class="mt-2 text-sm text-red-700" role="status">{{ status.upload_error }}</p>
-          <a v-if="resultLink" :href="resultLink" target="_blank" rel="noopener noreferrer" class="inline-block mt-3 font-medium text-indigo-700 underline">{{ t('water_test.view_results') }}</a>
+          <a v-if="resultLink && status.upload_status !== 'not_submitted'" :href="resultLink" target="_blank" rel="noopener noreferrer" class="inline-block mt-3 font-medium text-indigo-700 underline">{{ t('water_test.view_results') }}</a>
           <p v-if="status.upload_status === 'submitted'" class="mt-1 text-sm text-gray-600">{{ t('water_test.processing') }}</p>
         </div>
         <div v-if="!status.active && status.control_owned" class="notice notice-info mt-5">
           <p class="font-medium">{{ t('water_test.control_off') }}</p>
-          <p class="mt-1">{{ t('water_test.restore_setup') }}</p>
-          <label v-if="status.moved_chamber_probe" class="check-row mt-3">
-            <input v-model="probeReturned" type="checkbox" class="checkbox" />
-            <span>{{ t('water_test.probe_returned') }}</span>
-          </label>
-          <button type="button" class="button button-primary mt-3" :disabled="busy !== '' || !status.can_resume || (status.moved_chamber_probe && !probeReturned)" @click="sendAction('resume')">{{ busy === 'resume' ? t('water_test.resuming') : t('water_test.resume') }}</button>
+          <button type="button" class="button button-primary mt-3" :disabled="busy !== '' || !status.can_resume" @click="sendAction('resume')">{{ busy === 'resume' ? t('water_test.resuming') : t('water_test.resume') }}</button>
         </div>
       </section>
-
-      <div v-if="status && !status.active && !status.control_owned && !status.can_start" class="notice notice-info">
-        {{ status.preflight?.reason || t('water_test.cannot_start') }}
-      </div>
 
       <form v-if="status && !status.active && !status.control_owned" @submit.prevent="startTest" class="space-y-6">
         <div class="card">
@@ -74,10 +66,13 @@
             <li>{{ t('water_test.prepare_nearby') }}</li>
           </ol>
           <p class="mt-3 text-sm text-gray-600">{{ t('water_test.sequence_help') }}</p>
-          <p v-if="status.preflight?.reason" class="notice notice-info mt-4">{{ status.preflight.reason }}</p>
+          <p class="mt-3 text-sm text-gray-600">{{ t('water_test.pump_timing') }}</p>
+          <p v-if="status.preflight && !status.preflight.beer_configured" class="notice notice-warning mt-4" role="alert">{{ t('water_test.configure_beer_probe') }}</p>
+          <p v-if="status.preflight && !status.preflight.cooler_available" class="notice notice-warning mt-4" role="alert">{{ t('water_test.configure_cooling_relay') }}</p>
+          <p v-if="(!status.preflight || requiredHardwareAvailable) && !status.can_start" class="notice notice-warning mt-4" role="alert">{{ status.preflight?.reason || t('water_test.cannot_start') }}</p>
         </div>
 
-        <fieldset class="card space-y-6" :disabled="busy !== '' || !status.can_start || !!store.connectionError">
+        <fieldset v-if="requiredHardwareAvailable" class="card space-y-6" :disabled="busy !== '' || !status.can_start || !!store.connectionError">
           <legend class="sr-only">{{ t('water_test.setup') }}</legend>
           <div>
             <h2 class="question">{{ t('water_test.fermenter_question') }}</h2>
@@ -105,11 +100,7 @@
             <label class="check-row mt-3"><input v-model="form.glycolChoice" type="radio" name="glycol-source" value="chamber_probe" :disabled="!status.preflight?.chamber_available" required class="radio" /><span>{{ t('water_test.use_chamber_probe') }}</span></label>
             <p v-if="!status.preflight?.chamber_available" class="hint">{{ t('water_test.chamber_unavailable') }}</p>
             <label class="check-row mt-3"><input v-model="form.glycolChoice" type="radio" name="glycol-source" value="reported_setpoint" required class="radio" /><span>{{ t('water_test.no_chamber_probe') }}</span></label>
-            <div v-if="form.glycolChoice === 'chamber_probe'" class="notice notice-info mt-4">
-              <p>{{ t('water_test.move_probe') }}</p>
-              <label class="check-row mt-3"><input v-model="form.bathPlacementConfirmed" type="checkbox" required class="checkbox" /><span>{{ t('water_test.probe_immersed') }}</span></label>
-            </div>
-            <div v-else-if="form.glycolChoice === 'reported_setpoint'" class="mt-4">
+            <div v-if="form.glycolChoice === 'reported_setpoint'" class="mt-4">
               <p class="text-sm text-gray-600">{{ form.unknownSetpoint ? t('water_test.unknown_temperature') : t('water_test.reported_setpoint') }}</p>
               <div class="grid grid-cols-2 gap-4 mt-3 max-w-md">
                 <div><label for="glycol-setpoint" class="field-label">{{ t('water_test.chiller_setpoint') }}</label><input id="glycol-setpoint" v-model="form.glycolSetpoint" type="number" step="any" inputmode="decimal" :required="!form.unknownSetpoint" :disabled="form.unknownSetpoint" class="input" /></div>
@@ -143,10 +134,10 @@ const { t, te } = i18n.global;
 const store = useWaterTestStore();
 const tempControl = useTempControlStore();
 const status = computed(() => store.status);
+const requiredHardwareAvailable = computed(() => status.value?.preflight?.beer_configured === true && status.value?.preflight?.cooler_available === true);
 const busy = ref('');
 const actionError = ref('');
-const probeReturned = ref(false);
-const form = reactive({ model: '', capacity: '', waterVolume: '', volumeUnit: 'us_gal', coolingType: '', probeMounting: '', glycolChoice: '', bathPlacementConfirmed: false, glycolSetpoint: '', unknownSetpoint: false, temperatureUnit: 'F', consent: false, waterConfirmed: false });
+const form = reactive({ model: '', capacity: '', waterVolume: '', volumeUnit: 'us_gal', coolingType: '', probeMounting: '', glycolChoice: '', glycolSetpoint: '', unknownSetpoint: false, temperatureUnit: 'F', consent: false, waterConfirmed: false });
 const volumeLabel = computed(() => t(`water_test.${form.volumeUnit === 'us_gal' ? 'us_gallons' : 'liters'}`));
 const resultLink = computed(() => resultsUrl(status.value?.device_guid, status.value?.result_url));
 
@@ -199,8 +190,7 @@ async function sendAction(action, payload = {}) {
   busy.value = action;
   actionError.value = '';
   try {
-    await requestWaterTest(`${action}/`, action === 'resume' ? { probe_returned: probeReturned.value } : payload);
-    if (action === 'start') probeReturned.value = false;
+    await requestWaterTest(`${action}/`, payload);
   } catch (error) {
     actionError.value = error.message || t('water_test.errors.command_unconfirmed');
   } finally {
@@ -235,6 +225,7 @@ onBeforeUnmount(() => {
 .card { @apply rounded-lg border border-gray-200 bg-white p-5 shadow-sm; }
 .notice { @apply rounded-md p-4 text-sm; }
 .notice-error { @apply bg-red-50 border border-red-200 text-red-800; }
+.notice-warning { @apply bg-amber-50 border border-amber-200 text-amber-900; }
 .notice-info { @apply bg-indigo-50 border border-indigo-100 text-indigo-900; }
 .question { @apply text-base font-semibold text-gray-900; }
 .field-label { @apply block text-sm font-medium text-gray-700; }

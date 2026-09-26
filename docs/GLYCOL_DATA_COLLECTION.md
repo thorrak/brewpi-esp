@@ -7,26 +7,30 @@ either controller.
 
 ## Participant flow
 
-1. Enable glycol mode and configure the usual beer DS18B20 probe and wired cooling relay. Use a fermenter
-   filled with water at the usual batch volume and run the glycol chiller normally.
-2. Open **Chill Test** in BrewPi's web UI. Enter fermenter model/capacity, water
-   volume, cooling arrangement and beer-probe placement.
-3. If an existing chamber DS18B20 can be moved into the glycol bath, select that
-   option and confirm its placement. Otherwise enter the chiller's setpoint or
-   explicitly mark it unknown. No additional probe is required.
+1. Enable glycol mode and configure the usual beer DS18B20 probe and local wired
+   cooling relay. Use a fermenter filled with water at the usual batch volume and
+   run the glycol chiller normally.
+2. Open **Contribute a Chill Test** in BrewPi's sidebar, which shows this option
+   when glycol mode is enabled. The survey appears when a beer probe and local
+   cooling relay are configured; otherwise the page shows setup warnings.
+   Enter fermenter model/capacity, water volume, cooling arrangement and
+   beer-probe placement.
+3. Select the configured **Glycol Temp** DS18B20 probe to measure the bath, if
+   available. Otherwise enter the chiller's setpoint or explicitly mark it unknown.
+   No additional probe is required.
 4. Confirm the water-only preparation and consent to submission, then start.
-   Stay nearby for the first pulse to confirm that the pump works.
+   Be sure the pump runs during the first test and glycol is circulating.
 5. The device runs and records the sequence without needing the browser open.
    The page shows progress, temperatures and a **Stop test** button.
-6. After completion, data uploads automatically over **HTTP** to
-   `http://chill.fermentrack.net`. Follow the results link on the page.
+6. Completed tests upload automatically over **HTTP** to
+   `http://chill.fermentrack.net`. A stopped test also uploads if at
+   least one planned pump pulse ran for its full duration. Follow the results
+   link on the page.
    Normal control stays OFF until **Resume saved temperature control** is selected.
-   Return a moved chamber probe to its normal location before resuming.
 
 Restarting the device cancels any test and discards its local results and pending
-uploads. The saved normal control mode and settings resume on startup. Return a
-moved chamber probe to its normal location before restarting. Closing the browser
-or losing WiFi does not cancel the test.
+uploads. The saved normal control mode and settings resume on startup. Closing the
+browser or losing WiFi does not cancel the test.
 
 Configuration changes and upstream/manual control are held during the experiment
 and until explicit resume. The existing Fermentrack connection does not carry this
@@ -35,7 +39,7 @@ background research telemetry is collected during ordinary brewing.
 
 ## Versioned test program
 
-`cooling-water-v1` uses a five-minute pump-OFF baseline, three cooling pulses and
+`cooling-water-v1` uses a five-minute pump-OFF baseline, up to three cooling pulses and
 20 minutes of pump-OFF observation after each pulse. Typical duration is about
 65–67 minutes, with a planned 90-minute ceiling. The heater is always OFF.
 
@@ -43,16 +47,17 @@ Start with water between 8 and 35°C, at least 2°C warmer than the glycol
 input when that input is available. Unknown glycol input remains explicitly
 unknown in the submission.
 
-The pilot is 10 seconds, extended if the configured minimum ON time requires it.
-Later pulses are selected from short, bounded durations according to the preceding
-observed response. Planned pulses are at most 60 seconds; the planned cumulative
-pump budget is 180 seconds. Ordinary transitions respect at least two seconds ON/OFF and
-the selected glycol controller’s effective minimum intervals. Unsupported minimum intervals block preflight.
+The pilot is 10 seconds. Later pulses last 5–60 seconds according to the preceding
+observed response. The configured relay minimum ON time may lengthen a pulse,
+up to 60 seconds. Total planned pump time is at most three minutes. Ordinary
+transitions respect at least two seconds ON/OFF and the selected glycol
+controller's effective minimum intervals. Unsupported minimum intervals block preflight.
 
 The test stops at a 3°C drop from its initial water reading or a 4°C water reading.
-Beer-probe failures, readings older than ten seconds, recording failures and
-unaccounted sample loss terminate the experiment. A detected fault or temperature
-limit switches outputs OFF before its sample or diagnostic records are written.
+As in normal OneWire control, a failed read can use the last good beer reading for
+up to 30 seconds. More than 30 seconds without a good beer reading, a recording
+failure or unaccounted sample loss terminates the experiment. A detected fault or
+temperature limit switches outputs OFF before diagnostic records are written.
 A normal user Stop may wait for the current minimum ON interval. These are limits
 on the measured probe, not guarantees of spatially uniform water.
 
@@ -65,17 +70,17 @@ the monotonic time when the command was actually applied, before storage work.
 
 There is no temperature reset between pulses and no assumption that a 20-minute
 observation proves every installation has reached equilibrium. Little or no
-observed cooling produces an inconclusive submission, not an indefinitely longer
-pump run. Stopped and failed tests can also be submitted while the device remains
-powered.
+observed cooling ends the test as inconclusive.
 
 ## Measurements and delivery
 
 The OneWire worker records each fresh conversion attempt at approximately two-second
 cadence. Raw Celsius/sixteenth-degree values, calibration offsets, validity and
-per-probe acquisition times remain separate. The optional chamber sensor is
-relabeled `glycol` only for this test, following explicit bath placement. A reported
-setpoint is metadata and never becomes a fabricated sensor sample.
+per-probe acquisition times remain separate. Failed reads are recorded as invalid;
+they are not replaced by the cached reading used for control. In glycol mode,
+sensor setup labels the firmware's chamber sensor role **Glycol Temp**. When
+selected, that configured probe supplies the test's `glycol` measurements. A
+reported setpoint is metadata and never becomes a fabricated sensor sample.
 
 Every actual logical pump/heater command transition has its own record, independent
 of temperature sampling. These commands do not prove relay contact state or flow.
@@ -92,6 +97,11 @@ Manifest, batch and finish identities remain stable across retries. The page sho
 **Test submitted** only after all records and the terminal declaration are accepted.
 An upload pending state is independent of whether the experiment completed.
 
+Only completed tests and stopped tests with at least one full planned pump
+pulse are submitted. Failed tests, inconclusive tests and tests stopped before a
+full pulse show `not_submitted`. After explicitly resuming normal control, another
+test can start without restarting the device.
+
 No test state is restored after reboot: active tests, local outcomes and pending
 submissions are discarded, and normal saved control resumes. Records already
 accepted by the remote service are not deleted. Within the same boot, uploads
@@ -105,8 +115,7 @@ occupies the same LittleFS partition as the web UI and device configuration.
 - `POST /api/water-test/start/`: consent and the normalized survey; accepted work
   is processed by the local sequencing loop.
 - `POST /api/water-test/stop/`: request an ordinary stop.
-- `POST /api/water-test/resume/`: restore saved normal control; a moved bath probe
-  requires `{"probe_returned": true}`.
+- `POST /api/water-test/resume/`: restore saved normal control.
 
 An accepted command returns HTTP 202. Rejected commands include a readable JSON
 error. Poll status for the resulting state; an HTTP timeout does not mean a start

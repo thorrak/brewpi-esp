@@ -1,15 +1,21 @@
 dependencies:
   espressif/ds18b20:
-    component_hash: 05745ed2a307aa3a1f67698a02713bec8da19537912bf7c58578694ff05ab3b8
+    component_hash: 38022d0c39c08b1df3e77f95a3f9544251549a1fd9b6263357bf714026f4bb6b
     dependencies:
     - name: espressif/onewire_bus
       registry_url: https://components.espressif.com
       require: private
       version: ^1.1.0
+    - matches:
+      - if: $CONFIG{DS18B20_SENSOR_HUB} == True
+      name: espressif/sensor_hub
+      registry_url: https://components.espressif.com
+      require: public
+      version: ^0.1.4
     source:
       registry_url: https://components.espressif.com/
       type: service
-    version: 0.3.1~1
+    version: 0.4.0
   espressif/mdns:
     component_hash: b679eafd0acae2066e2645bd91d073e33ca5be515e2545cd3c4e55a3e3bce3cb
     dependencies:
@@ -27,7 +33,7 @@ dependencies:
       require: private
       version: '>=5.0'
     source:
-      registry_url: https://components.espressif.com
+      registry_url: https://components.espressif.com/
       type: service
     version: 1.1.2
   h2zero/esp-nimble-cpp:
@@ -93,10 +99,11 @@ dependencies:
 direct_dependencies:
 - espressif/ds18b20
 - espressif/mdns
+- espressif/onewire_bus
 - h2zero/esp-nimble-cpp
 - idf
 - joltwallet/littlefs
 - thorrak/esp_wifi_config
-manifest_hash: 81bded89424252e460ad41036f2ec65d3487ab21e6f583c8bf6fa01efd8decc5
+manifest_hash: f9cd5e393970f504c3fe058cc0da6f5a518f8ee2080fa25bc007d444a2790a42
 target: esp32
 version: 2.0.0

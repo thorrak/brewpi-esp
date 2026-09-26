@@ -41,7 +41,7 @@ struct Sample {
   bool valid;
 };
 struct Cache {
-  Sample sample{};
+  Sample lastGood{};
   bool present = false;
 };
 SemaphoreHandle_t mutex = nullptr;
@@ -117,14 +117,15 @@ bool device(DeviceFunction function, DeviceConfig &result) {
 }
 Cache *cached(uint64_t address) {
   for (auto &c : cache)
-    if (c.present && c.sample.address == address)
+    if (c.present && c.lastGood.address == address)
       return &c;
   return nullptr;
 }
 bool fresh(const DeviceConfig &d) {
   auto c = cached(addressOf(d));
   uint64_t now = nowUs();
-  return c && c->sample.valid && now >= c->sample.read && now - c->sample.read <= uint64_t(freshnessSeconds * 1000000);
+  return c && c->lastGood.valid && now >= c->lastGood.read &&
+         now - c->lastGood.read <= OneWireSensorPolicy::connectedTimeoutUs;
 }
 bool movedProbe() { return manifest["installation"]["glycol_temperature_source"] == "chamber_probe"; }
 void recordFailure(uint32_t attempted) {
@@ -240,6 +241,7 @@ void finishRun() {
   terminal.clear();
   common(terminal);
   terminal["outcome"] = endName(program.outcome);
+  terminal["completed_pulses"] = program.completedPulses;
   terminal["reason"] = reasonName(program.reason);
   terminal["final_phase"] = "finished";
   terminal["t_us"] = nowUs();
@@ -258,7 +260,7 @@ void finishRun() {
     loss["first_seq"] = lostSequence;
     loss["last_seq"] = seq - 1;
   }
-  uploadState = "pending";
+  uploadState = program.submissionEligible() ? "pending" : "not_submitted";
   uploadError.clear();
   reason = reasonName(program.reason);
   running = false;
@@ -298,21 +300,24 @@ uint32_t minimumOff() {
                                    : minTimes.MIN_COOL_OFF_TIME);
 }
 std::string preflight(bool useGlycol, DeviceConfig &beer, DeviceConfig &glycol, DeviceConfig &cool) {
+  const bool hasBeer = device(DEVICE_BEER_TEMP, beer);
+  const bool hasCooler = device(DEVICE_CHAMBER_COOL, cool);
+  const bool hasGlycol = useGlycol && device(DEVICE_CHAMBER_TEMP, glycol);
   if (!extendedSettings.glycol)
     return "Enable glycol mode before running this glycol-pump water test.";
-  if (!device(DEVICE_BEER_TEMP, beer) || beer.deviceHardware != DEVICE_HARDWARE_ONEWIRE_TEMP ||
+  if (!hasBeer || beer.deviceHardware != DEVICE_HARDWARE_ONEWIRE_TEMP ||
       beer.hw.address[0] != 0x28)
     return "Configure a DS18B20 beer probe before starting.";
   if (!fresh(beer))
     return "Waiting for a fresh valid beer probe reading.";
-  if (!device(DEVICE_CHAMBER_COOL, cool) || cool.deviceHardware != DEVICE_HARDWARE_PIN || !tempControl.cooler)
+  if (!hasCooler || cool.deviceHardware != DEVICE_HARDWARE_PIN || !tempControl.cooler)
     return "Configure a local GPIO cooling relay before starting.";
   if (physicalPump() || physicalHeat())
     return "Wait until normal heating and cooling outputs are OFF, then start the water test.";
   if (useGlycol) {
-    if (!device(DEVICE_CHAMBER_TEMP, glycol) || glycol.deviceHardware != DEVICE_HARDWARE_ONEWIRE_TEMP ||
+    if (!hasGlycol || glycol.deviceHardware != DEVICE_HARDWARE_ONEWIRE_TEMP ||
         glycol.hw.address[0] != 0x28)
-      return "Configure a DS18B20 chamber probe and place it in the glycol bath.";
+      return "Configure a DS18B20 glycol probe before starting.";
     if (addressOf(beer) == addressOf(glycol))
       return "Beer and glycol probes must be distinct.";
     if (!fresh(glycol))
@@ -320,7 +325,7 @@ std::string preflight(bool useGlycol, DeviceConfig &beer, DeviceConfig &glycol, 
   }
   if (minimumOn() > maximumPulseSeconds || minimumOff() > observationSeconds)
     return "Configured cooling relay minimum times exceed this test's conservative pulse limits.";
-  float temperature = cached(addressOf(beer))->sample.raw / 16.0 + beer.hw.calibration / 16.0;
+  float temperature = cached(addressOf(beer))->lastGood.raw / 16.0 + beer.hw.calibration / 16.0;
   if (temperature < 8 || temperature > 35)
     return "Start with water between 8 and 35 C (46.4 to 95 F).";
   if (freeBytes() < requiredBytes)
@@ -347,9 +352,9 @@ void startRun(const std::string &payload) {
     owned = false;
     return;
   }
-  double bathC = bath ? cached(addressOf(glycol))->sample.raw / 16.0 + glycol.hw.calibration / 16.0
+  double bathC = bath ? cached(addressOf(glycol))->lastGood.raw / 16.0 + glycol.hw.calibration / 16.0
                       : input["reported_chiller_setpoint_c"].as<double>();
-  double waterC = cached(addressOf(beer))->sample.raw / 16.0 + beer.hw.calibration / 16.0;
+  double waterC = cached(addressOf(beer))->lastGood.raw / 16.0 + beer.hw.calibration / 16.0;
   if (input["glycol_temperature_source"] != "unknown" && waterC - bathC < 2) {
     reason = "Water must start at least 2 C (3.6 F) warmer than the declared glycol input.";
     owned = false;
@@ -432,7 +437,7 @@ void startRun(const std::string &payload) {
   forceOff();
   tempControl.cs.mode = Modes::off;
   program.start(recordStartUs / 1e6, waterC, minimumOn(), minimumOff());
-  program.lastSample = cached(beerAddress)->sample.read / 1e6;
+  program.lastSample = cached(beerAddress)->lastGood.read / 1e6;
   reason.clear();
   uploadState = "pending";
   uploadError.clear();
@@ -528,7 +533,9 @@ void processSample(const Sample &sample) {
         break;
       }
   if (slot) {
-    slot->sample = sample;
+    slot->lastGood.address = sample.address;
+    if (sample.valid && (!slot->lastGood.valid || sample.read > slot->lastGood.read))
+      slot->lastGood = sample;
     slot->present = true;
   }
   if (!running || sample.read < recordStartUs)
@@ -544,10 +551,11 @@ void processSample(const Sample &sample) {
   const Record r = sampleRecord(sample, beer);
   const auto phase = program.phase;
   if (beer) {
-    beerC = sample.valid ? sample.raw / 16.0 + beerOffset : NAN;
+    if (sample.valid)
+      beerC = sample.raw / 16.0 + beerOffset;
     program.sample(sample.read / 1e6, beerC, sample.valid, nowUs() / 1e6);
-  } else
-    glycolC = sample.valid ? sample.raw / 16.0 + glycolOffset : NAN;
+  } else if (sample.valid)
+    glycolC = sample.raw / 16.0 + glycolOffset;
   const bool changed = applyOutputs();
   append(r);
   persistProgram(phase, changed, r.t_us);
@@ -565,7 +573,8 @@ void uploader(void *) {
     JsonDocument request, response;
     {
       Guard lock;
-      if (running || !queuedStart.empty() || terminal.isNull() || uploadState == "submitted")
+      if (running || !queuedStart.empty() || terminal.isNull() || !program.submissionEligible() ||
+          uploadState == "submitted")
         continue;
       next = uploadedRecords;
       id = manifest["test_id"].as<std::string>();
@@ -681,8 +690,10 @@ bool requestStart(JsonVariantConst body, std::string &error) {
     return false;
   }
   Guard lock;
-  if (owned || running || uploaderBusy || (!manifest.isNull() && uploadState != "submitted")) {
-    error = "Finish submission and explicitly resume normal control before another test.";
+  if (owned || running || uploaderBusy ||
+      (!manifest.isNull() && uploadState != "submitted" && uploadState != "not_submitted")) {
+    error = owned || running ? "Finish or stop the current test and resume normal control before another test."
+                            : "Wait for the current test's submission to finish before another test.";
     return false;
   }
   if (!body.is<JsonObjectConst>() || body["consent"] != true || body["water_confirmed"] != true) {
@@ -716,10 +727,6 @@ bool requestStart(JsonVariantConst body, std::string &error) {
     error = "Select the cooling, probe, and glycol input configuration.";
     return false;
   }
-  if (strcmp(source, "chamber_probe") == 0 && body["bath_placement_confirmed"] != true) {
-    error = "Confirm the chamber probe is physically immersed in the glycol bath.";
-    return false;
-  }
   if (strcmp(source, "reported_setpoint") == 0 && !finiteNumber(body["reported_chiller_setpoint_c"], -60, 100)) {
     error = "Enter the reported glycol setpoint, or select unknown.";
     return false;
@@ -751,7 +758,7 @@ bool requestStop(std::string &error) {
   queuedStop = true;
   return true;
 }
-bool requestResume(JsonVariantConst body, std::string &error) {
+bool requestResume(JsonVariantConst, std::string &error) {
   if (!initialized) {
     error = "Water test service unavailable.";
     return false;
@@ -763,10 +770,6 @@ bool requestResume(JsonVariantConst body, std::string &error) {
   }
   if (!manifest["prior_control"]["mode"].is<const char *>()) {
     error = "Saved control metadata is unavailable; automatic resume is blocked.";
-    return false;
-  }
-  if (movedProbe() && body["probe_returned"] != true) {
-    error = "Return the chamber probe to its normal position and confirm before resuming.";
     return false;
   }
   queuedResume = true;
@@ -828,20 +831,21 @@ void status(JsonDocument &doc) {
   doc["control_owned"] = owned.load();
   doc["phase"] = !queuedStart.empty() ? "preflight" : phaseName(program.phase);
   doc["pulse_number"] = program.pulse;
+  doc["completed_pulses"] = program.completedPulses;
   doc["elapsed_s"] = running ? uint32_t(nowUs() / 1e6 - program.started) : (terminal["elapsed_s"] | 0U);
   doc["max_duration_s"] = maximumSeconds;
   doc["pump_on"] = physicalPump();
   doc["heater_on"] = physicalHeat();
   auto b = cached(addressOf(beer));
   if (b && fresh(beer))
-    doc["beer_c"] = b->sample.raw / 16.0 + beer.hw.calibration / 16.0;
+    doc["beer_c"] = b->lastGood.raw / 16.0 + beer.hw.calibration / 16.0;
   else
     doc["beer_c"] = nullptr;
   DeviceConfig chamber;
   bool hasChamber = device(DEVICE_CHAMBER_TEMP, chamber) && chamber.deviceHardware == DEVICE_HARDWARE_ONEWIRE_TEMP;
   auto g = hasChamber ? cached(addressOf(chamber)) : nullptr;
   if (movedProbe() && g && fresh(chamber))
-    doc["glycol_c"] = g->sample.raw / 16.0 + chamber.hw.calibration / 16.0;
+    doc["glycol_c"] = g->lastGood.raw / 16.0 + chamber.hw.calibration / 16.0;
   else
     doc["glycol_c"] = nullptr;
   doc["glycol_temperature_source"] = manifest["installation"]["glycol_temperature_source"];
@@ -854,14 +858,17 @@ void status(JsonDocument &doc) {
   doc["result_url"] = std::string(endpoint) + "/" + guid + "/";
   doc["moved_chamber_probe"] = movedProbe();
   doc["can_start"] =
-      !owned && !running && !uploaderBusy && (manifest.isNull() || uploadState == "submitted") && check.empty();
+      !owned && !running && !uploaderBusy &&
+      (manifest.isNull() || uploadState == "submitted" || uploadState == "not_submitted") && check.empty();
   doc["can_resume"] = owned && !running && queuedStart.empty();
   auto p = doc["preflight"].to<JsonObject>();
   p["ready"] = check.empty();
   p["reason"] = check;
-  p["beer_available"] = beer.deviceHardware == DEVICE_HARDWARE_ONEWIRE_TEMP && fresh(beer);
-  p["chamber_available"] = hasChamber && fresh(chamber);
-  p["cooler_available"] = cool.deviceHardware == DEVICE_HARDWARE_PIN;
+  const bool beerConfigured = beer.deviceHardware == DEVICE_HARDWARE_ONEWIRE_TEMP && beer.hw.address[0] == 0x28;
+  p["beer_configured"] = beerConfigured;
+  p["beer_available"] = beerConfigured && fresh(beer);
+  p["chamber_available"] = hasChamber && chamber.hw.address[0] == 0x28 && fresh(chamber);
+  p["cooler_available"] = cool.deviceHardware == DEVICE_HARDWARE_PIN && tempControl.cooler;
   p["free_bytes"] = freeBytes();
   p["required_bytes"] = requiredBytes;
 }
