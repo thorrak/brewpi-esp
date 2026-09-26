@@ -259,6 +259,32 @@ static void tuningLifecycleChecks() {
     assert(std::fabs(control.glycolRuntime.cooling.tuning().pulse_dose.gain_c_per_on_s - 0.065) < 1e-15);
     assert(!control.glycolRuntime.cooling_output.pump_on);
     assert(!control.glycolRuntime.clock_initialized && !control.glycolRuntime.cooling_step_initialized);
+
+    // Changed tuning waits for both the save interval and inactive outputs.
+    const uint32_t loadedAt = ticks.millis();
+    auto latest = control.glycolRuntime.cooling.tuning();
+    latest.predictive.coast_s = 900;
+    assert(control.glycolRuntime.cooling.restoreTuning(latest));
+    control.cs.mode = Modes::beerConstant;
+    control.state = IDLE;
+    ticks.now_ms = loadedAt + 1800000 - 1;
+    control.updateOutputs();
+    GlycolCooling::Controller persisted;
+    GlycolTuningStore reader;
+    assert(reader.load(persisted, 0));
+    assert(persisted.tuning().predictive.coast_s == 720);
+
+    ticks.now_ms = loadedAt + 1800000;
+    control.state = COOLING;
+    control.updateOutputs();
+    assert(fixture.cooler.isActive());
+    assert(reader.load(persisted, 0));
+    assert(persisted.tuning().predictive.coast_s == 720);
+
+    control.state = IDLE;
+    control.updateOutputs();
+    assert(reader.load(persisted, 0));
+    assert(persisted.tuning().predictive.coast_s == 900);
     std::remove("glycolTuning.json");
 }
 

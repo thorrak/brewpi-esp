@@ -83,11 +83,18 @@ minimum heating slices, and cool-to-heat guard retain their inherited behavior.
 0.1 degrees in the selected display unit. Predictive cooling defaults are explicit
 fields in `PredictiveCooling::Config`.
 
-Learned coast duration, cooling-response gain and their update counters are saved
-to flash after learning changes, once the heating and cooling outputs are OFF. Startup
-restores the latest saved tuning; missing, malformed or unsupported-version records
-use the initial defaults. Pump state, temperature history, incomplete observations
-and elapsed timers start fresh.
+Learned coast duration and cooling-response gain are saved with their update
+counters under the shared [tuning save policy](GLYCOL_COOLING_SELECTION.md#saving-learned-tuning):
+the first value change without a saved snapshot is eligible immediately;
+subsequent saves are at least 30 minutes apart. Counter changes alone do not
+trigger a save, and every write waits for heating and cooling to be OFF. Failed
+writes retry after 30 seconds. Loading a valid snapshot starts a new 30-minute
+wait based on uptime; no Internet clock is needed. Learning continues during the
+wait, but a reboot loses unsaved changes.
+
+Startup restores the latest saved tuning; missing, malformed or
+unsupported-version records use the initial defaults. Pump state, temperature
+history, incomplete observations and elapsed timers start fresh.
 
 ## Fermentrack and diagnostics
 

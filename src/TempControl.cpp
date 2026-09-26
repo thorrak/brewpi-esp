@@ -847,7 +847,7 @@ void MinTimes::setDefaults() {
 
         // Time-proportional control settings
         GLYCOL_WINDOW_PERIOD = 1000;
-        GLYCOL_MIN_ON_TIME = 10;
+        GLYCOL_MIN_HEAT_ON_TIME = 10;
     } else if(settings_choice == MIN_TIMES_DEFAULT) {
 		// Compressor Mode - Normal Delay
 		MIN_COOL_OFF_TIME = 300;
@@ -861,7 +861,7 @@ void MinTimes::setDefaults() {
 		HEAT_PEAK_DETECT_TIME = 900;
 
         GLYCOL_WINDOW_PERIOD = 1000;
-        GLYCOL_MIN_ON_TIME = 10;
+        GLYCOL_MIN_HEAT_ON_TIME = 10;
 	} else if(settings_choice == MIN_TIMES_LOW_DELAY) {
 		// Compressor Mode - Low Delay
 		MIN_COOL_OFF_TIME = 60;
@@ -875,7 +875,7 @@ void MinTimes::setDefaults() {
 		HEAT_PEAK_DETECT_TIME = 900;
 
         GLYCOL_WINDOW_PERIOD = 1000;
-        GLYCOL_MIN_ON_TIME = 10;
+        GLYCOL_MIN_HEAT_ON_TIME = 10;
 	} else {
 		// Custom Delay -- Effectively a noop, as the defaults are set when the json gets loaded
 	}
@@ -924,7 +924,7 @@ void MinTimes::loadFromFilesystem() {
 
     // Glycol mode time-proportional control settings
     if(json_doc[MinTimesKeys::GLYCOL_WINDOW_PERIOD].is<uint16_t>()) GLYCOL_WINDOW_PERIOD = json_doc[MinTimesKeys::GLYCOL_WINDOW_PERIOD];
-    if(json_doc[MinTimesKeys::GLYCOL_MIN_ON_TIME].is<uint16_t>()) GLYCOL_MIN_ON_TIME = json_doc[MinTimesKeys::GLYCOL_MIN_ON_TIME];
+    if(json_doc[MinTimesKeys::GLYCOL_MIN_HEAT_ON_TIME].is<uint16_t>()) GLYCOL_MIN_HEAT_ON_TIME = json_doc[MinTimesKeys::GLYCOL_MIN_HEAT_ON_TIME];
 }
 
 
@@ -948,7 +948,7 @@ void MinTimes::toJson(JsonDocument &doc) {
 
     // Glycol mode time-proportional control settings
     doc[MinTimesKeys::GLYCOL_WINDOW_PERIOD] = GLYCOL_WINDOW_PERIOD;
-    doc[MinTimesKeys::GLYCOL_MIN_ON_TIME] = GLYCOL_MIN_ON_TIME;
+    doc[MinTimesKeys::GLYCOL_MIN_HEAT_ON_TIME] = GLYCOL_MIN_HEAT_ON_TIME;
 }
 
 // ============================================================================
@@ -988,6 +988,6 @@ void TempControl::loadGlycolParams() {
     glycolConfig.loadFromFilesystem();
     glycolRuntime.reset();
     glycolRuntime.cooling.reset(extendedSettings.glycolCoolingAlgorithm);
-    glycolTuning.load(glycolRuntime.cooling);
+    glycolTuning.load(glycolRuntime.cooling, ticks.millis());
     glycolRuntime.cooling_output = glycolRuntime.cooling.output();
 }

@@ -162,7 +162,7 @@ public:
 
     // Glycol mode time-proportional control settings
     uint16_t GLYCOL_WINDOW_PERIOD;  //! Window period for time-proportional control in seconds (default: 1000s)
-    uint16_t GLYCOL_MIN_ON_TIME;    //! Minimum heating duty slice; cooling uses the selected cooling configuration (2s)
+    uint16_t GLYCOL_MIN_HEAT_ON_TIME;    //! Minimum heating duty slice; cooling uses the selected cooling configuration (2s)
 
 	void toJson(JsonDocument &doc);
     void storeToFilesystem();
@@ -191,7 +191,7 @@ namespace MinTimesKeys {
 	constexpr auto COOL_PEAK_DETECT_TIME = "COOL_PEAK_DETECT_TIME";
 	constexpr auto HEAT_PEAK_DETECT_TIME = "HEAT_PEAK_DETECT_TIME";
 	constexpr auto GLYCOL_WINDOW_PERIOD = "GLYCOL_WINDOW_PERIOD";
-	constexpr auto GLYCOL_MIN_ON_TIME = "GLYCOL_MIN_ON_TIME";
+	constexpr auto GLYCOL_MIN_HEAT_ON_TIME = "GLYCOL_MIN_HEAT_ON_TIME";
 };
 
 // struct ControlConstants was moved to EepromStructs.h

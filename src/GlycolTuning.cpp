@@ -10,6 +10,7 @@
 namespace {
 constexpr unsigned schemaVersion = 1;
 constexpr size_t maxFileBytes = 1024;
+constexpr uint32_t saveIntervalMs = 30 * 60 * 1000;
 constexpr uint32_t retryDelayMs = 30000;
 constexpr char temporaryFile[] = "/glycolTuning.json.tmp";
 
@@ -19,13 +20,10 @@ double roundAtBoundary(double value, double boundary) {
         ? boundary : value;
 }
 
-bool sameTuning(const GlycolCooling::Tuning& a, const GlycolCooling::Tuning& b) {
+bool sameLearnedValues(const GlycolCooling::Tuning& a, const GlycolCooling::Tuning& b) {
     return a.predictive.coast_s == b.predictive.coast_s &&
         a.predictive.budget_gain_c_per_s == b.predictive.budget_gain_c_per_s &&
-        a.predictive.learning_updates == b.predictive.learning_updates &&
-        a.predictive.response_updates == b.predictive.response_updates &&
-        a.pulse_dose.gain_c_per_on_s == b.pulse_dose.gain_c_per_on_s &&
-        a.pulse_dose.learning_updates == b.pulse_dose.learning_updates;
+        a.pulse_dose.gain_c_per_on_s == b.pulse_dose.gain_c_per_on_s;
 }
 
 bool readTuning(GlycolCooling::Controller& controller) {
@@ -68,9 +66,9 @@ bool writeTuning(const GlycolCooling::Tuning& tuning) {
     char buffer[maxFileBytes];
     // Keep double precision for the small response gains used by both cores.
     const int count = snprintf(buffer, sizeof(buffer),
-        "{\"version\":%u,\"predictive\":{\"algorithm\":\"%s\",\"coast_s\":%.17g,"
-        "\"budget_gain_c_per_s\":%.17g,\"learning_updates\":%" PRIu32 ",\"response_updates\":%" PRIu32 "},"
-        "\"pulse_dose\":{\"algorithm\":\"%s\",\"gain_c_per_on_s\":%.17g,\"learning_updates\":%" PRIu32 "}}",
+        "{\"version\":%u,\"predictive\":{\"algorithm\":\"%s\",\"coast_s\":%.16e,"
+        "\"budget_gain_c_per_s\":%.16e,\"learning_updates\":%" PRIu32 ",\"response_updates\":%" PRIu32 "},"
+        "\"pulse_dose\":{\"algorithm\":\"%s\",\"gain_c_per_on_s\":%.16e,\"learning_updates\":%" PRIu32 "}}",
         schemaVersion, GlycolCooling::algorithmVersion(GlycolCooling::Algorithm::PredictiveCoast),
         tuning.predictive.coast_s, tuning.predictive.budget_gain_c_per_s,
         tuning.predictive.learning_updates, tuning.predictive.response_updates,
@@ -93,17 +91,23 @@ bool writeTuning(const GlycolCooling::Tuning& tuning) {
 }
 } // namespace
 
-bool GlycolTuningStore::load(GlycolCooling::Controller& controller) {
+bool GlycolTuningStore::load(GlycolCooling::Controller& controller, uint32_t now_ms) {
     fs_remove(temporaryFile);
     const bool loaded = readTuning(controller);
     saved_ = controller.tuning();
+    // A loaded snapshot starts a fresh interval on the current boot's clock.
+    saved_at_ms_ = now_ms;
+    save_delay_active_ = loaded;
     retry_pending_ = false;
     return loaded;
 }
 
 bool GlycolTuningStore::saveIfChanged(const GlycolCooling::Controller& controller, uint32_t now_ms) {
+    if (save_delay_active_ && static_cast<uint32_t>(now_ms - saved_at_ms_) >= saveIntervalMs)
+        save_delay_active_ = false;
     const auto tuning = controller.tuning();
-    if (sameTuning(tuning, saved_)) return true;
+    if (sameLearnedValues(tuning, saved_)) return true;
+    if (save_delay_active_) return false;
     if (retry_pending_ && static_cast<uint32_t>(now_ms - failed_at_ms_) < retryDelayMs) return false;
     if (!writeTuning(tuning)) {
         failed_at_ms_ = now_ms;
@@ -111,6 +115,8 @@ bool GlycolTuningStore::saveIfChanged(const GlycolCooling::Controller& controlle
         return false;
     }
     saved_ = tuning;
+    saved_at_ms_ = now_ms;
+    save_delay_active_ = true;
     retry_pending_ = false;
     return true;
 }

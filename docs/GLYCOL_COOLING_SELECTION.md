@@ -46,11 +46,21 @@ observed by the cooling cores. Learned values are retained.
 
 Both algorithms save their learned tuning separately: predictive coast saves its
 coast duration, cooling-response gain and update counters; pulse-dose saves its
-cooling-response gain and update counter. Changed learning is saved to flash once
-the heating and cooling outputs are OFF. Both sets of tuning are stored together
+cooling-response gain and update counter. Both sets of tuning are stored together
 in `/glycolTuning.json`, with an atomic file replacement so an interrupted save
-does not overwrite the previous snapshot. Failed writes retry after 30 seconds
-while the outputs are OFF. A reboot restores the most recent saved values.
+does not overwrite the previous snapshot.
+
+With no valid saved snapshot, the first change to a learned value is saved as soon
+as heating and cooling are OFF. Subsequent successful saves are at least 30 minutes
+apart and occur only when a learned value differs from the saved snapshot. Update
+counters are included with the values, but counter changes alone do not trigger
+a save. Failed writes retry after 30 seconds; every attempt waits for heating and
+cooling to be OFF.
+
+A reboot restores the most recent saved values. Loading a valid snapshot starts
+a fresh 30-minute wait before the next save, using device uptime without an
+Internet clock. Learning continues in RAM during this wait; an abrupt reboot
+loses changes that have not yet been saved.
 Missing, malformed or unsupported-version tuning records use the initial defaults.
 
 Pump state, incomplete observations, temperature samples and elapsed timers are

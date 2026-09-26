@@ -65,7 +65,8 @@ bool stateIsCooling(const GlycolMode::Context& ctx) {
 }
 
 double rawCelsius(temperature value) {
-    // BrewPi absolute temperatures include the -48 C offset as well as Q9.
+    // BrewPi stores temperatures as (degrees Celsius - 48) * 512.
+    // Undo the offset and scaling to get degrees Celsius.
     return (static_cast<int32_t>(value) - C_OFFSET) / 512.0;
 }
 
@@ -117,8 +118,8 @@ uint16_t heatingOnTime(const GlycolMode::Context& ctx) {
     uint32_t onTime = ((uint32_t) ctx.runtime.heating_output * windowPeriod) /
                       (uint32_t) ctx.cc.pidMax_heat;
 
-    if (onTime > 0 && onTime < ctx.minTimes.GLYCOL_MIN_ON_TIME) {
-        onTime = ctx.minTimes.GLYCOL_MIN_ON_TIME;
+    if (onTime > 0 && onTime < ctx.minTimes.GLYCOL_MIN_HEAT_ON_TIME) {
+        onTime = ctx.minTimes.GLYCOL_MIN_HEAT_ON_TIME;
     }
     if (onTime > windowPeriod) {
         onTime = windowPeriod;
@@ -208,7 +209,7 @@ void setHeatingWaitState(
 void setHeatingActiveState(GlycolMode::Context& ctx, uint16_t elapsedInWindowS) {
     ctx.runtime.heating_wait_reason = GLYCOL_HEATING_WAIT_NONE;
     ctx.state =
-        (elapsedInWindowS < ctx.minTimes.GLYCOL_MIN_ON_TIME) ? HEATING_MIN_TIME : HEATING;
+        (elapsedInWindowS < ctx.minTimes.GLYCOL_MIN_HEAT_ON_TIME) ? HEATING_MIN_TIME : HEATING;
     ctx.lastHeatTime = ticks.seconds();
     resetWaitTime(ctx);
 }

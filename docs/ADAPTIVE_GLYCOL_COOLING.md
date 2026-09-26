@@ -40,7 +40,7 @@ remain available for display and for the retained heating PID.
 
 Normal pump ON and OFF intervals are at least two seconds, explicitly defined by
 `AdaptiveCooling::Config::min_on_s` and `min_off_s`. This does not reuse the legacy
-10-second `GLYCOL_MIN_ON_TIME`, which remains the minimum requested heating duty
+10-second `GLYCOL_MIN_HEAT_ON_TIME`, which remains the minimum requested heating duty
 slice. A fault or disabled mode immediately stops the pump; safety shutdown can
 shorten an ON interval. It must still remain OFF for two seconds before restart.
 
@@ -71,10 +71,18 @@ has the existing worker semantics.
 `/glycolConfig.json` stores the heating start `trigger_margin`, which defaults to
 0.1 degrees in the selected display unit. Adaptive cooling defaults are explicit,
 unit-labelled fields in `AdaptiveCooling::Config`. The learned cooling-response
-gain and its update counter are saved to flash after learning changes, once the
-heating and cooling outputs are OFF. Startup restores the latest saved tuning; missing,
-malformed or unsupported-version records use the initial defaults. Pump state,
-temperature history, incomplete observations and elapsed timers start fresh.
+gain is saved with its update counter under the shared
+[tuning save policy](GLYCOL_COOLING_SELECTION.md#saving-learned-tuning): the first
+value change without a saved snapshot is eligible immediately; subsequent saves
+are at least 30 minutes apart. Counter changes alone do not trigger a save, and
+every write waits for heating and cooling to be OFF. Failed writes retry after
+30 seconds. Loading a valid snapshot starts a new 30-minute wait based on uptime;
+no Internet clock is needed. Learning continues during the wait, but a reboot
+loses unsaved changes.
+
+Startup restores the latest saved tuning; missing, malformed or
+unsupported-version records use the initial defaults. Pump state, temperature
+history, incomplete observations and elapsed timers start fresh.
 
 The Telnet `v` control-variable response adds an `adaptiveCooling` object:
 
