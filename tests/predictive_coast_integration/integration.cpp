@@ -60,7 +60,6 @@ struct Fixture {
     ControlSettings cs;
     ControlVariables cv{};
     MinTimes times;
-    GlycolLearnedParams learned;
     GlycolConfig config;
     GlycolRuntimeState runtime{};
     Input input;
@@ -95,17 +94,17 @@ struct Fixture {
         extendedSettings.glycolCoolingAlgorithm = selection;
         if (sample) sensor.update();
         auto c = context();
-        GlycolMode::Context ctx(c, learned, config, runtime, selection);
+        GlycolMode::Context ctx(c, config, runtime, selection);
         cv.beerDiff = cs.beerSetting - sensor.readSlowFiltered();
         cv.beerSlope = sensor.readSlope();
-        GlycolMode::updatePID(ctx, integral_counter);
+        GlycolMode::updateHeatingPID(ctx, integral_counter);
         GlycolMode::updateState(ctx);
         cooler.setActive(pump()); heater.setActive(heat());
     }
     void suspend(uint64_t ms) {
         ticks.now_ms = ms;
         auto c = context();
-        GlycolMode::Context ctx(c, learned, config, runtime, selection);
+        GlycolMode::Context ctx(c, config, runtime, selection);
         GlycolMode::suspend(ctx);
         cooler.setActive(false); heater.setActive(false);
     }
@@ -331,12 +330,10 @@ int main() {
         }
         assert(stopped);
     }
-    // Display units and arbitrary legacy settings cannot change cooling output.
+    // Display units cannot change cooling output.
     {
         Fixture a, b;
         a.cc.tempFormat = 'C'; b.cc.tempFormat = 'F';
-        b.learned.k=100; b.learned.C_off=100; b.learned.L=1;
-        b.config.min_on_time_s=600; b.config.min_off_time_s=600;
         for (unsigned s=0;s<1000;++s) {
             a.input.value=b.input.value=q9(21.6875 - std::min(0.2, s*0.00025));
             a.update(s*1000); b.update(s*1000);
@@ -393,6 +390,27 @@ int main() {
         assert(f.runtime.heating_window_on_time_s>=10);
         auto count=f.integral_counter;
         f.update(61500,false); assert(f.integral_counter==count);
+    }
+    // The configured margin controls the heating start threshold.
+    {
+        Fixture a, b;
+        JsonDocument config;
+        a.config.toJson(config);
+        assert(config.size() == 1);
+        assert(config["trigger_margin"].as<float>() == 0.1f);
+        b.config.trigger_margin = 0.5f;
+        for (auto* f : {&a, &b}) {
+            f->heater_present = true;
+            f->cc.tempFormat = 'C';
+            f->cs.beerSetting = q9(21);
+            f->input.value = q9(20.75);
+            f->update(60000); f->update(61000);
+            assert(f->runtime.heating_output > 0);
+        }
+        assert(a.heat() && !b.heat());
+        b.config.trigger_margin = 0.2f;
+        b.update(62000); b.update(63000);
+        assert(b.heat());
     }
     // Runtime selection waits for the actual ON minimum, then observes OFF
     // timing even when UI callbacks, mode inhibition or clock wrap intervene.

@@ -44,7 +44,7 @@ invalid readings, and sample buffer exhaustion fail OFF. Python throws for
 invalid clocks/configuration and uses unbounded sample queues, so those are
 explicit platform boundary differences.
 
-The controllers share `src/CoolingMeasurements.h`. Older companion harnesses
+The controllers share `src/GlycolCoolingMeasurements.h`. Older companion harnesses
 only hash the original controller header, source and adapter for their native
 cache/provenance. Pass a fresh `--cache` directory to the full replay whenever
 that shared header changes, and include it in any archived source snapshot and

@@ -60,7 +60,7 @@
       "min_heat_time":"Min. Heat Time"
     },
     "sidebar_options":{
-      "water_test": "Contribute a water test",
+      "water_test": "Contribute a Chill Test",
       "dashboard":"@:dashboard.dashboard",
       "fermentrack_settings":"@:upstream_settings.fermentrack_settings",
       "set_up_sensors":"@:sensors.config_sensors_header",
@@ -257,7 +257,7 @@
     "current_temperature_units": "Current Units"
   },
   "water_test": {
-    "contribute": "Contribute a water test",
+    "contribute": "Contribute a Chill Test",
     "intro": "Help improve BrewPi's glycol simulator using your own fermenter and cooling system.",
     "stale_readings": "Displayed values are the last known state, not live readings. Closing this page or losing WiFi does not stop a test.",
     "reconnect": "Reconnect now",
@@ -331,14 +331,14 @@
     "consent": "I agree to submit this test's setup answers, temperature readings, relay events, firmware details, and device GUID to chill.fermentrack.net to improve BrewPi's simulator. This records only this test, not ongoing brewing. The submission and setup answers can be viewed by anyone with the device's results link.",
     "privacy": "No account, additional logger, or manual upload is needed. WiFi passwords and upstream API keys are not part of the test data.",
     "starting": "Starting…",
-    "start": "Start water test",
+    "start": "Start Chill Test",
     "previous_results": "View previous submissions for this device",
-    "title": "Water test",
-    "in_progress": "Water test in progress",
+    "title": "Chill Test",
+    "in_progress": "Chill Test in progress",
     "unavailable": "Unavailable",
     "duration": "{minutes}m {seconds}s",
     "phases": {
-      "idle": "Ready for a water test",
+      "idle": "Ready for a Chill Test",
       "preflight": "Checking sensors and recording space",
       "baseline": "Recording the starting temperature and drift",
       "pilot": "Pilot cooling pulse",
@@ -384,7 +384,7 @@
       "command_unconfirmed": "Unable to confirm the command. Check the device status before trying again.",
       "request_failed": "Device request failed ({status}).",
       "timeout": "The device did not reply. The test may still be running; reconnect to check its state.",
-      "unreadable": "The device returned an unreadable water-test status.",
+      "unreadable": "The device returned an unreadable Chill Test status.",
       "unreachable": "Unable to reach the device.",
       "confirm_preparation": "Confirm the water-only preparation and consent to submit this test.",
       "select_units": "Select volume and temperature units.",

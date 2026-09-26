@@ -1,7 +1,7 @@
 #pragma once
 
 #include "TemperatureFormats.h"
-#include "CoolingAlgorithm.h"
+#include "GlycolCoolingAlgorithm.h"
 typedef uint8_t DeviceAddress[8];
 
 #ifdef HAS_BLUETOOTH

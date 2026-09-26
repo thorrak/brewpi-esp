@@ -178,6 +178,7 @@ private:
     // Worker-only.
     uint64_t m_last_bus_reset_us;
     uint64_t m_last_enumeration_us;
+    // Used only for WaterTest sample timestamps; remove with the WaterTest hooks.
     uint64_t m_conversion_start_us = 0;
 };
 

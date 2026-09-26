@@ -44,7 +44,7 @@ with tempfile.TemporaryDirectory(prefix='brewpi-integration-') as temp:
     for name in names:
         for suffix in ['.cpp', '.h']:
             shutil.copyfile(ROOT / 'src' / (name + suffix), build / (name + suffix))
-    for name in ['CoolingMeasurements.h', 'CoolingAlgorithm.h', 'ControlContext.h', 'TempSensorBasic.h', 'Actuator.h', 'ChamberMode.h', 'JsonKeys.h']:
+    for name in ['GlycolCoolingMeasurements.h', 'GlycolCoolingAlgorithm.h', 'ControlContext.h', 'TempSensorBasic.h', 'Actuator.h', 'ChamberMode.h', 'JsonKeys.h']:
         shutil.copyfile(ROOT / 'src' / name, build / name)
     header = (ROOT / 'src/TempControl.h').read_text()
     (build / 'ControlTypes.h').write_text('#pragma once\n' + header[

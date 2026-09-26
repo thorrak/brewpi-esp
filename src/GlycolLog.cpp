@@ -34,7 +34,7 @@ const char* GlycolLogger::stateToString(GlycolState state) {
         case GLYCOL_IDLE: return "IDLE";
         case GLYCOL_COOLING: return "COOLING";
         case GLYCOL_COASTING: return "COASTING";
-        case GLYCOL_EMERGENCY_COOLING: return "FULL_COOLING";
+        case GLYCOL_FULL_COOLING: return "FULL_COOLING";
         case GLYCOL_HEATING: return "HEATING";
         default: return "UNKNOWN";
     }
@@ -88,7 +88,7 @@ void GlycolLogger::logTransition(const GlycolRuntimeState& runtime,
     char timestamp[32];
     if (!getFormattedTime(timestamp, sizeof(timestamp))) strcpy(timestamp, "N/A");
     const auto& output = runtime.cooling_output;
-    const bool was_cooling = last_state_ == GLYCOL_COOLING || last_state_ == GLYCOL_EMERGENCY_COOLING;
+    const bool was_cooling = last_state_ == GLYCOL_COOLING || last_state_ == GLYCOL_FULL_COOLING;
     // Inhibition discards an incomplete core response. Retain the real active
     // interval in the transition record even when the core's duration resets.
     const double actual_on_s = output.pump_on || was_cooling

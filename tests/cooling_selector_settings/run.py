@@ -36,7 +36,7 @@ def definition(source, signature):
 
 with tempfile.TemporaryDirectory(prefix="brewpi-selector-settings-") as temp:
     build = Path(temp)
-    for name in ["EepromStructs.h", "TemperatureFormats.h", "CoolingAlgorithm.h", "JsonKeys.h"]:
+    for name in ["EepromStructs.h", "TemperatureFormats.h", "GlycolCoolingAlgorithm.h", "JsonKeys.h"]:
         shutil.copyfile(ROOT / "src" / name, build / name)
     control_header = (ROOT / "src/TempControl.h").read_text()
     modes_end = control_header.index("\n};", control_header.index("namespace Modes")) + 3

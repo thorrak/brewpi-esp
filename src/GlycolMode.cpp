@@ -269,8 +269,8 @@ void applyCoolingOutput(GlycolMode::Context& ctx, bool wasCooling) {
             runtime.pump_started_s = runtime.clock_elapsed_ms / 1000.0;
         }
         double activeSeconds = runtime.clock_elapsed_ms / 1000.0 - runtime.pump_started_s;
-        runtime.state = output.full_cooling ? GLYCOL_EMERGENCY_COOLING : GLYCOL_COOLING;
-        // Full cooling is a diagnostic label, not an overriding emergency mode.
+        runtime.state = output.full_cooling ? GLYCOL_FULL_COOLING : GLYCOL_COOLING;
+        // Full cooling uses the controller's normal relay timing and stop conditions.
         ctx.state = activeSeconds < runtime.cooling.minOnSeconds()
             ? COOLING_MIN_TIME : COOLING;
         runtime.last_pump_active_s = runtime.clock_elapsed_ms / 1000.0;
@@ -290,7 +290,7 @@ void applyCoolingOutput(GlycolMode::Context& ctx, bool wasCooling) {
 
 namespace GlycolMode {
 
-void updatePID(Context& ctx, unsigned char& integralUpdateCounter) {
+void updateHeatingPID(Context& ctx, unsigned char& integralUpdateCounter) {
     ctx.cs.fridgeSetting = INVALID_TEMP;
     monotonicSeconds(ctx);
     // UI setters can request an extra update between regular 1 Hz ticks.
@@ -311,7 +311,7 @@ void updatePID(Context& ctx, unsigned char& integralUpdateCounter) {
             bool coolingActive =
                 ctx.runtime.state == GLYCOL_COOLING ||
                 ctx.runtime.state == GLYCOL_COASTING ||
-                ctx.runtime.state == GLYCOL_EMERGENCY_COOLING;
+                ctx.runtime.state == GLYCOL_FULL_COOLING;
 
             if (coolingActive) {
                 integratorUpdate = 0;

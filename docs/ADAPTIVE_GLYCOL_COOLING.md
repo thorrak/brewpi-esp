@@ -27,9 +27,8 @@ per pump-second. It waits for the subsequent cooling response, then updates that
 gain. Larger errors first use longer probe pulses; a sufficiently large required
 dose becomes continuous cooling. Predictive stop conditions still apply during
 continuous cooling. There is no mandatory emergency dwell and no pump timer reset
-when a diagnostic state changes. The public `GLYCOL_EMERGENCY_COOLING` label means
-continuous demand under these same rules, for compatibility with existing state
-enumerations.
+when a diagnostic state changes. The `GLYCOL_FULL_COOLING` state identifies
+continuous demand under these same rules.
 
 All cooling calculations are in Celsius and seconds. BrewPi absolute temperature
 values have an offset as well as nine fractional bits; the integration decodes
@@ -67,16 +66,12 @@ sensor with an invalid cache cannot enable cooling. This does not change the
 underlying OneWire worker's cached-conversion timeout; stale-but-valid worker data
 has the existing worker semantics.
 
-## Settings migration and diagnostic interface
+## Settings and diagnostic interface
 
-Old `/glycolLearned.json` values (`k`, `C_off`, `L`, `drift_rate`) remain on disk for
-rollback. They are **not** interpreted as adaptive gain and are not updated by the
-new controller. Legacy `/glycolConfig.json` cooling fields also remain stored but
-are ignored by adaptive cooling. Its `trigger_margin` is still used by the retained
-heating start logic. The adaptive defaults are explicit, unit-labelled fields in
-`AdaptiveCooling::Config`. Gain learning is deliberately RAM-only and returns to
-the default after reboot. An explicit new persistence schema would be needed to
-change that behavior; this branch does not silently migrate unrelated parameters.
+`/glycolConfig.json` stores the heating start `trigger_margin`, which defaults to
+0.1 degrees in the selected display unit. Adaptive cooling defaults are explicit,
+unit-labelled fields in `AdaptiveCooling::Config`. Gain learning is RAM-only and
+returns to the default after reboot.
 
 The Telnet `v` control-variable response adds an `adaptiveCooling` object:
 
@@ -88,7 +83,7 @@ The Telnet `v` control-variable response adds an `adaptiveCooling` object:
 - `gainCPerPumpSecond`, `learningUpdates`, `pulseBudgetSeconds`,
   `predictedEndpointC`, `actualOnSeconds`, `lastCompletedOnSeconds`;
 - `uptimeMillis`, `coastAgeSeconds`, `coolerActive`, `heaterActive`, `lightActive`;
-- explicit relay minimums, `learningPersistence` and `legacyCoolingSettingsIgnored`.
+- explicit relay minimums and `learningPersistence`.
 
 A null pulse budget represents continuous demand. `actualOnSeconds` is the current
 uninterrupted ON duration; `lastCompletedOnSeconds` reports the last completed dose.
@@ -109,7 +104,7 @@ This compiles the actual branch core, integration, sensor and filter sources wit
 deterministic I/O shims. It extracts declarations and default/reset bodies from
 this branch. Checks cover raw
 cache validity and offset decoding, boot inhibition, four-second initial pulses,
-unit invariance/ignored legacy settings, duplicate calls, fault/mode OFF edge
+unit invariance, duplicate calls, fault/mode OFF edge
 retention, target changes during minimum ON time, counter wraps, heater-to-pump
 guards and heating preservation. The board build
 is still required to verify platform integration; these tests do not claim GPIO

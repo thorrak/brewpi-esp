@@ -47,7 +47,7 @@ preserves learned estimates and the real OFF edge; a full reset clears learning.
 
 The test adapter is outside `src/` and is not part of the firmware image.
 
-The controllers share `src/CoolingMeasurements.h`. Older companion harnesses
+The controllers share `src/GlycolCoolingMeasurements.h`. Older companion harnesses
 only hash the original controller header, source and adapter for their native
 cache/provenance. Pass a fresh `--cache` directory to the full replay whenever
 that shared header changes, and include it in any archived source snapshot and

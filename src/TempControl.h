@@ -47,21 +47,20 @@ struct ControlContext;
 // See docs/GLYCOL_COOLING_SELECTION.md for the cooling algorithm selection.
 
 /**
- * Legacy public state labels retained for cooling diagnostics
+ * Runtime states used for glycol control and diagnostics.
  */
 enum GlycolState : uint8_t {
     GLYCOL_IDLE = 0,              //!< Monitoring temperature, waiting to cool
     GLYCOL_COOLING = 1,           //!< Pump on, actively cooling
     GLYCOL_COASTING = 2,          //!< Pump off, temperature still dropping, measuring coast
-    GLYCOL_EMERGENCY_COOLING = 3, //!< Continuous cooling demand; same stop rules, no forced dwell
+    GLYCOL_FULL_COOLING = 3,     //!< Continuous cooling demand
     GLYCOL_HEATING = 4            //!< Beer-only heating via time-proportional duty cycle
 };
 
 /**
  * Internal reason for WAITING_TO_HEAT while in glycol heating mode.
- * The public legacy state remains WAITING_TO_HEAT, but internally we keep
- * track of whether we're blocked by protection delays or just in the PWM off
- * slice.
+ * Distinguishes actuator protection delays from the OFF portion of a heating
+ * duty cycle while the reported control state is WAITING_TO_HEAT.
  */
 enum GlycolHeatingWaitReason : uint8_t {
     GLYCOL_HEATING_WAIT_NONE = 0,
@@ -93,7 +92,6 @@ struct GlycolHeatingGateResult {
  * Runtime state for glycol controller (not persisted)
  */
 struct GlycolRuntimeState {
-    // These parameters/state are deliberately independent of legacy k/C_off/L files.
     GlycolCooling::Controller cooling{};
     GlycolCooling::Output cooling_output{};
     bool clock_initialized = false;
@@ -392,11 +390,10 @@ public:
 	TEMP_CONTROL_FIELD ControlVariables cv;
 
 	// Glycol mode: Selectable beer-only cooling
-	TEMP_CONTROL_FIELD GlycolLearnedParams glycolLearned;   //!< Learned parameters (persisted)
-	TEMP_CONTROL_FIELD GlycolConfig glycolConfig;           //!< Configuration (persisted)
+	TEMP_CONTROL_FIELD GlycolConfig glycolConfig;           //!< Heating configuration (persisted)
 	TEMP_CONTROL_FIELD GlycolRuntimeState glycolRuntime;    //!< Runtime state (not persisted)
 
-	TEMP_CONTROL_METHOD void loadGlycolParams();            //!< Load glycol learned params and config
+	TEMP_CONTROL_METHOD void loadGlycolParams();            //!< Load glycol heating config and reset runtime
 
 	TEMP_CONTROL_FIELD uint16_t getMinCoolOnTime();
 	TEMP_CONTROL_FIELD uint16_t getMinHeatOnTime();

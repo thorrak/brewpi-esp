@@ -32,7 +32,6 @@ struct TempControl {
     bool doorOpen = false, doPosPeakDetect = false, doNegPeakDetect = false;
     uint8_t state = IDLE;
     uint16_t lastIdleTime = 0, lastHeatTime = 0, lastCoolTime = 0, waitTime = 0;
-    GlycolLearnedParams glycolLearned;
     GlycolConfig glycolConfig;
     unsigned settingsWrites = 0;
     bool storedWithOutputActive = false;

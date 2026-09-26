@@ -72,7 +72,6 @@ ControlSettings TempControl::cs;
 ControlVariables TempControl::cv;
 
 // Glycol mode
-GlycolLearnedParams TempControl::glycolLearned;
 GlycolConfig TempControl::glycolConfig;
 GlycolRuntimeState TempControl::glycolRuntime;
 	
@@ -244,8 +243,8 @@ void TempControl::updatePID(){
             // Set fridgeSetting to INVALID_TEMP since it's not used in glycol mode
             cs.fridgeSetting = INVALID_TEMP;
 
-            GlycolMode::Context glycolCtx(controlCtx, glycolLearned, glycolConfig, glycolRuntime, extendedSettings.glycolCoolingAlgorithm);
-            GlycolMode::updatePID(glycolCtx, integralUpdateCounter);
+            GlycolMode::Context glycolCtx(controlCtx, glycolConfig, glycolRuntime, extendedSettings.glycolCoolingAlgorithm);
+            GlycolMode::updateHeatingPID(glycolCtx, integralUpdateCounter);
 
         } else {
             ChamberMode::Context chamberCtx(controlCtx, doPosPeakDetect, doNegPeakDetect);
@@ -262,7 +261,7 @@ void TempControl::updatePID(){
 // reconnect or mode change cannot bypass actuator protection.
 void TempControl::resetGlycolControl() {
     ControlContext controlCtx = makeControlContext();
-    GlycolMode::Context glycolCtx(controlCtx, glycolLearned, glycolConfig, glycolRuntime, extendedSettings.glycolCoolingAlgorithm);
+    GlycolMode::Context glycolCtx(controlCtx, glycolConfig, glycolRuntime, extendedSettings.glycolCoolingAlgorithm);
     GlycolMode::suspend(glycolCtx);
     // A mode transition into/out of manual test mode cannot rely on
     // updateOutputs(), which normally bypasses commands in that mode.
@@ -337,7 +336,7 @@ void TempControl::updateState(){
     // ===== GLYCOL MODE STATE MACHINE =====
     // Uses selectable cooling (see docs/GLYCOL_COOLING_SELECTION.md)
     if(useGlycolBeerMode(cs) && !stayIdle) {
-        GlycolMode::Context glycolCtx(controlCtx, glycolLearned, glycolConfig, glycolRuntime, extendedSettings.glycolCoolingAlgorithm);
+        GlycolMode::Context glycolCtx(controlCtx, glycolConfig, glycolRuntime, extendedSettings.glycolCoolingAlgorithm);
         GlycolMode::updateState(glycolCtx);
         // Glycol mode uses its own state machine - skip compressor mode logic
         return;
@@ -709,7 +708,6 @@ void TempControl::getControlVariablesDoc(JsonDocument& doc) {
     cooling["minOnSeconds"] = glycolRuntime.cooling.minOnSeconds();
     cooling["minOffSeconds"] = glycolRuntime.cooling.minOffSeconds();
     cooling["learningPersistence"] = "RAM only";
-    cooling["legacyCoolingSettingsIgnored"] = true;
   }
 }
 
@@ -978,7 +976,6 @@ void GlycolRuntimeState::reset() {
 // ----- TempControl Glycol Methods -----
 
 void TempControl::loadGlycolParams() {
-    glycolLearned.loadFromFilesystem();
     glycolConfig.loadFromFilesystem();
     glycolRuntime.reset();
 }

@@ -97,8 +97,11 @@ class TempSensor {
 
 	void update();
 
-	// Last successful update/init read, in offset Celsius Q9; never reads the bus.
-	// INVALID_TEMP immediately follows a failed read or sensor replacement.
+	// Returns the latest reading saved by init() or update(), before smoothing.
+	// Reads memory only; does not contact the sensor or request a new measurement.
+	// Convert a valid result to Celsius with: value / 512.0 + 48.
+	// Returns INVALID_TEMP if no valid reading is cached, including after a
+	// failed read or sensor replacement.
 	temperature readRawCached() const { return rawTemperature; }
 
 	temperature readFastFiltered();
@@ -151,4 +154,3 @@ class TempSensor {
 	friend class Chamber;
 	friend class DeviceManager;
 };
-

@@ -9,7 +9,7 @@
  */
 #pragma once
 
-#include "CoolingMeasurements.h"
+#include "GlycolCoolingMeasurements.h"
 #include <cstdint>
 
 namespace PredictiveCooling {

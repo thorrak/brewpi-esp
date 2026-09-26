@@ -2,7 +2,7 @@
 
 #ifdef ENABLE_GLYCOL_LOGGING
 
-#include "CoolingAlgorithm.h"
+#include "GlycolCoolingAlgorithm.h"
 #include "TemperatureFormats.h"
 #include <cstddef>
 

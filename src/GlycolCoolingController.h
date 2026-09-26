@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #pragma once
 
-#include "CoolingAlgorithm.h"
+#include "GlycolCoolingAlgorithm.h"
 #include "AdaptiveDoseController.h"
 #include "PredictiveCoastController.h"
 

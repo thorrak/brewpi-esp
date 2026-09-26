@@ -92,7 +92,7 @@ both files. Manual output commands are not logged as automatic cooling cycles.
 
 `GlycolCoolingController` provides a common interface and shared switch timing
 around the `PredictiveCoastController` and `AdaptiveDoseController` policies.
-Both cores use `CoolingMeasurements` for bounded sample windows, smoothing and
+Both cores use `GlycolCoolingMeasurements.h` for bounded sample windows, smoothing and
 regression. The helper retains the frozen reference's arithmetic order, expiry
 rules, capacity limits and hourly rebasing. Policy, parameters and learned values
 remain separate. Only the active core processes temperature samples. `GlycolMode` retains heating

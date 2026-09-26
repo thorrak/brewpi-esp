@@ -44,8 +44,8 @@ continuous pumping immediately. A calculated near-target budget exceeding
 120 seconds also permits continuous pumping. Both cases retain every stopping
 condition: predicted endpoint at/below target, mean temperature at/below target,
 raw temperature at least 0.04°C below target, or exhaustion of a finite budget.
-There is no mandatory emergency duration. The legacy
-`GLYCOL_EMERGENCY_COOLING` state label indicates continuous demand only.
+There is no mandatory emergency duration. The
+`GLYCOL_FULL_COOLING` state label indicates continuous demand only.
 
 After every completed ON interval, the pump remains OFF for an observation.
 Observation ends after at least 450 seconds when the slope magnitude is no more
@@ -79,10 +79,9 @@ discard the current cooling observation. Coast/gain learning survives those
 interruptions in RAM and resets to defaults on reboot. The normal heating PID,
 minimum heating slices, and cool-to-heat guard retain their inherited behavior.
 
-Existing `/glycolConfig.json` cooling coefficients and `/glycolLearned.json`
-values are retained for rollback but do not tune this controller and are not
-updated by it. The retained heater still uses its existing trigger margin.
-Predictive defaults are explicit fields in `PredictiveCooling::Config`.
+`/glycolConfig.json` stores the heating start `trigger_margin`, which defaults to
+0.1 degrees in the selected display unit. Predictive cooling defaults are explicit
+fields in `PredictiveCooling::Config`.
 
 ## Fermentrack and diagnostics
 
