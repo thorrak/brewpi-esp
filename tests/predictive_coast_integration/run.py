@@ -39,36 +39,47 @@ with tempfile.TemporaryDirectory(prefix='brewpi-integration-') as temp:
     build = Path(temp)
     for file in (HERE / 'shim').iterdir():
         shutil.copyfile(file, build / file.name)
-    names = ['PredictiveCoastController', 'AdaptiveDoseController', 'GlycolCoolingController', 'GlycolMode', 'GlycolParams', 'TempSensor',
+    names = ['PredictiveCoastController', 'AdaptiveDoseController', 'GlycolCoolingController', 'GlycolMode', 'GlycolLog', 'GlycolParams', 'TempSensor',
              'FilterFixed', 'FilterCascaded', 'TemperatureFormats']
     for name in names:
         for suffix in ['.cpp', '.h']:
             shutil.copyfile(ROOT / 'src' / (name + suffix), build / (name + suffix))
-    for name in ['CoolingAlgorithm.h', 'ControlContext.h', 'TempSensorBasic.h', 'Actuator.h', 'GlycolLog.h', 'JsonKeys.h']:
+    for name in ['CoolingMeasurements.h', 'CoolingAlgorithm.h', 'ControlContext.h', 'TempSensorBasic.h', 'Actuator.h', 'ChamberMode.h', 'JsonKeys.h']:
         shutil.copyfile(ROOT / 'src' / name, build / name)
     header = (ROOT / 'src/TempControl.h').read_text()
     (build / 'ControlTypes.h').write_text('#pragma once\n' + header[
         header.index('enum GlycolState'):header.index('#define TC_STATE_MASK')])
     constants = (ROOT / 'src/EepromStructs.cpp').read_text()
     control = (ROOT / 'src/TempControl.cpp').read_text()
-    definitions = '#include "TempControl.h"\n#include "Ticks.h"\n#include <cmath>\n'
+    definitions = ('#include "TempControl.h"\n#include "Ticks.h"\n#include "PiLink.h"\n'
+                   '#include "GlycolMode.h"\n#include "GlycolLog.h"\n#include "ChamberMode.h"\n'
+                   '#include <cmath>\nnamespace WaterTest { bool controlOwned() { return false; } }\n')
     for signature in ['ControlConstants::ControlConstants()', 'void ControlConstants::setDefaults()',
                       'ControlSettings::ControlSettings()', 'void ControlSettings::setDefaults()']:
         definitions += body(constants, signature)
     for signature in ['MinTimes::MinTimes()', 'void MinTimes::setDefaults()', 'void GlycolRuntimeState::reset()']:
         definitions += body(control, signature)
-    for signature in ['void TempControl::getControlVariablesDoc(JsonDocument& doc)',
+    for signature in ['bool isBeerMode(const ControlSettings& settings)',
+                      'bool useGlycolBeerMode(const ControlSettings& settings)',
+                      'ControlContext TempControl::makeControlContext()',
+                      'void TempControl::reset()', 'void TempControl::resetGlycolControl()',
+                      'void TempControl::updateState()', 'void TempControl::updateOutputs()',
+                      'void TempControl::setMode(char newMode, bool force)',
+                      'bool TempControl::stateIsCooling()', 'bool TempControl::stateIsHeating()',
+                      'void TempControl::getControlVariablesDoc(JsonDocument& doc)',
                       'void TempControl::getControlConstantsDoc(JsonDocument& doc)']:
         definitions += body(control, signature)
     (build / 'Defaults.cpp').write_text(definitions)
     shutil.copyfile(HERE / 'integration.cpp', build / 'integration.cpp')
     compiler = os.environ.get('CXX', 'c++')
-    for cooling_only in [False, True]:
-        executable = build / ('test-cooling-only' if cooling_only else 'test-normal')
+    for cooling_only, logging in [(False, False), (True, False), (False, True), (True, True)]:
+        executable = build / ('test-' + ('cooling-only' if cooling_only else 'normal') + ('-logging' if logging else ''))
         command = [compiler, '-std=c++17', '-O2', '-fwrapv', '-fno-fast-math',
                    '-ffp-contract=off', '-I', str(build), '-I', str(json_path)]
         if cooling_only:
             command.append('-DBREWPI_CHILLSIM_TEST')
+        if logging:
+            command.append('-DENABLE_GLYCOL_LOGGING')
         command += [str(p) for p in build.glob('*.cpp')] + ['-o', str(executable)]
         subprocess.run(command, check=True)
-        subprocess.run([str(executable)], check=True)
+        subprocess.run([str(executable)], cwd=build, check=True)

@@ -90,20 +90,6 @@ struct GlycolHeatingGateResult {
 };
 
 /**
- * Sample for rate calculation buffer
- */
-struct RateSample {
-    uint32_t timestamp_ms;
-    float temp;  // Temperature in internal units converted to float
-};
-
-/**
- * Circular buffer size for rate calculation
- * At ~3 second intervals, 30 samples covers ~90 seconds
- */
-constexpr uint8_t RATE_BUFFER_SIZE = 30;
-
-/**
  * Runtime state for glycol controller (not persisted)
  */
 struct GlycolRuntimeState {
@@ -123,32 +109,12 @@ struct GlycolRuntimeState {
     double pump_started_s = 0;
 
     GlycolState state;                    //!< Current glycol state machine state
-    uint32_t t_pump_on;                   //!< Timestamp when pump turned on (ms)
     uint32_t t_pump_off;                  //!< Timestamp when pump turned off (ms)
-    uint32_t emergency_entry_time;        //!< Timestamp when emergency mode was entered (ms)
-    float temp_at_pump_on;                //!< Temperature when pump was turned on
-    float temp_at_pump_off;               //!< Temperature when pump was turned off
-    float min_temp_reached;               //!< Minimum temperature during coasting
-    float cooling_rate_at_pump_off;       //!< Cooling rate when pump was turned off (°/min)
-    float current_cooling_rate;           //!< Current cooling rate (°/min)
-    bool cooling_confirmed;               //!< True once cooling effect is detected
-    uint8_t negative_rate_count;          //!< Count of consecutive negative rate readings
-    bool setpoint_changed_this_cycle;     //!< True if setpoint changed during this cycle
-    uint16_t cooling_duration_s;          //!< Duration of current cooling cycle in seconds
     temperature heating_output;           //!< Heat authority from PID (0..pidMax_heat)
     bool heating_window_active;          //!< A duty window has been started
     uint32_t heating_window_start_ms;     //!< Start of current heating duty-cycle window
     uint16_t heating_window_on_time_s;    //!< Requested ON time in current heating window
     GlycolHeatingWaitReason heating_wait_reason; //!< Internal reason for WAITING_TO_HEAT
-
-    // Hot glycol compensation: long runs warm the reservoir; after pump stops,
-    // chiller cools it back to setpoint. Next cycle should use minimum time and re-learn.
-    bool force_minimum_cooling;           //!< If true, stop after min_on_time_s (don't trust predictions)
-
-    // Rate calculation buffer
-    RateSample rate_buffer[RATE_BUFFER_SIZE];
-    uint8_t rate_buffer_head;             //!< Index of next write position
-    uint8_t rate_buffer_count;            //!< Number of valid samples in buffer
 
     void reset();
 };
@@ -431,7 +397,6 @@ public:
 	TEMP_CONTROL_FIELD GlycolRuntimeState glycolRuntime;    //!< Runtime state (not persisted)
 
 	TEMP_CONTROL_METHOD void loadGlycolParams();            //!< Load glycol learned params and config
-	TEMP_CONTROL_METHOD void storeGlycolParams();           //!< Store glycol learned params
 
 	TEMP_CONTROL_FIELD uint16_t getMinCoolOnTime();
 	TEMP_CONTROL_FIELD uint16_t getMinHeatOnTime();

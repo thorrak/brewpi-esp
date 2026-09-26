@@ -6,7 +6,6 @@ import fixture from './fixtures/api.extended.json';
 
 jest.mock('mande');
 
-const inputs = [true, false, true, false, 2, 100, 200, 300, 400, 500, 600, 700, 800];
 const expectedSettings = {
     glycol: true,
     largeTFT: false,
@@ -69,7 +68,7 @@ describe('ExtendedSettingsStore', () => {
         expect(store.hasExtendedSettings).toBe(true);
         expect(store.hasGlycolCoolingAlgorithm).toBe(false);
         expect(store.glycolCoolingAlgorithm).toBeNull();
-        await store.setExtendedSettings(...inputs);
+        await store.setExtendedSettings(expectedSettings);
         expect(mockPut).toHaveBeenCalledWith(expectedSettings);
     });
 
@@ -79,7 +78,7 @@ describe('ExtendedSettingsStore', () => {
         await store.getExtendedSettings();
         expect(store.glycolCoolingAlgorithm).toBe('pulse_dose');
         expect(store.hasGlycolCoolingAlgorithm).toBe(false);
-        await store.setExtendedSettings(...inputs);
+        await store.setExtendedSettings(expectedSettings);
         expect(mockPut).toHaveBeenCalledWith(expectedSettings);
     });
 
@@ -108,9 +107,9 @@ describe('ExtendedSettingsStore', () => {
         expect(store.hasGlycolCoolingAlgorithm).toBe(false);
     });
 
-    it.each(['predictive_coast', 'pulse_dose'])('saves %s with the existing settings and positional argument order', async (algorithm) => {
+    it.each(['predictive_coast', 'pulse_dose'])('saves %s with named settings', async (algorithm) => {
         await store.getExtendedSettings();
-        const result = await store.setExtendedSettings(...inputs, algorithm);
+        const result = await store.setExtendedSettings({ ...expectedSettings, glycolCoolingAlgorithm: algorithm });
         expect(result).toBe(true);
         expect(mockPut).toHaveBeenCalledWith({ ...expectedSettings, glycolCoolingAlgorithm: algorithm });
         for (const [key, value] of Object.entries(expectedSettings)) expect(store[key]).toBe(value);
@@ -118,30 +117,30 @@ describe('ExtendedSettingsStore', () => {
         expect(store.extendedSettingsUpdateError).toBe(false);
     });
 
-    it('preserves pulse-dose on unrelated saves by older callers', async () => {
+    it('preserves pulse-dose on unrelated saves when no algorithm is specified', async () => {
         mockGet.mockResolvedValue(responseWithAlgorithm('pulse_dose'));
         await store.getExtendedSettings();
-        await store.setExtendedSettings(...inputs);
+        await store.setExtendedSettings(expectedSettings);
         expect(mockPut).toHaveBeenCalledWith({ ...expectedSettings, glycolCoolingAlgorithm: 'pulse_dose' });
     });
 
     it.each(['unsupported', '', null])('rejects an invalid algorithm (%s) before sending settings', async (algorithm) => {
         await store.getExtendedSettings();
-        expect(await store.setExtendedSettings(...inputs, algorithm)).toBe(false);
+        expect(await store.setExtendedSettings({ ...expectedSettings, glycolCoolingAlgorithm: algorithm })).toBe(false);
         expect(mockPut).not.toHaveBeenCalled();
         expect(store.glycolCoolingAlgorithm).toBe('predictive_coast');
         expect(store.extendedSettingsUpdateError).toBe(true);
     });
 
     it('rejects explicit selection when firmware has not advertised support', async () => {
-        expect(await store.setExtendedSettings(...inputs, 'pulse_dose')).toBe(false);
+        expect(await store.setExtendedSettings({ ...expectedSettings, glycolCoolingAlgorithm: 'pulse_dose' })).toBe(false);
         expect(mockPut).not.toHaveBeenCalled();
     });
 
     it.each([{ status: 'failed' }, { status: true }, {}, null])('does not accept a failed or malformed PUT response: %j', async (response) => {
         await store.getExtendedSettings();
         mockPut.mockResolvedValue(response);
-        expect(await store.setExtendedSettings(...inputs, 'pulse_dose')).toBe(false);
+        expect(await store.setExtendedSettings({ ...expectedSettings, glycolCoolingAlgorithm: 'pulse_dose' })).toBe(false);
         expect(store.glycolCoolingAlgorithm).toBe('predictive_coast');
         expect(store.hasExtendedSettings).toBe(true);
         expect(store.glycol).toBe(fixture.extendedSettings.glycol);
@@ -151,11 +150,11 @@ describe('ExtendedSettingsStore', () => {
     it('keeps confirmed settings after network failure and allows retry', async () => {
         await store.getExtendedSettings();
         mockPut.mockRejectedValueOnce(new Error('network error'));
-        expect(await store.setExtendedSettings(...inputs, 'pulse_dose')).toBe(false);
+        expect(await store.setExtendedSettings({ ...expectedSettings, glycolCoolingAlgorithm: 'pulse_dose' })).toBe(false);
         expect(store.glycolCoolingAlgorithm).toBe('predictive_coast');
         expect(store.hasExtendedSettings).toBe(true);
         expect(store.extendedSettingsUpdateError).toBe(true);
-        expect(await store.setExtendedSettings(...inputs, 'pulse_dose')).toBe(true);
+        expect(await store.setExtendedSettings({ ...expectedSettings, glycolCoolingAlgorithm: 'pulse_dose' })).toBe(true);
         expect(store.glycolCoolingAlgorithm).toBe('pulse_dose');
         expect(store.extendedSettingsUpdateError).toBe(false);
     });

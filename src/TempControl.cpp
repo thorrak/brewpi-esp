@@ -274,6 +274,20 @@ void TempControl::resetGlycolControl() {
     light->setActive(false);
 #endif
     fan->setActive(false);
+    if (cs.mode == Modes::test) {
+        // Manual commands bypass the cooling cores, including OFF commands
+        // immediately before this handoff. Start conservative protection
+        // intervals for both directions without discarding learned values.
+        const double now = glycolRuntime.clock_elapsed_ms / 1000.0;
+        glycolRuntime.cooling.externalOff(now);
+        glycolRuntime.cooling_output = glycolRuntime.cooling.output();
+        glycolRuntime.last_pump_active_s = glycolRuntime.last_heater_active_s = now;
+        glycolRuntime.t_pump_off = ticks.millis();
+        lastCoolTime = lastHeatTime = ticks.seconds();
+    }
+#ifdef ENABLE_GLYCOL_LOGGING
+    glycolLog.logTransition(glycolRuntime, beerSensor->readRawCached(), cs.beerSetting);
+#endif
     cv.p = cv.i = cv.d = 0;
     cv.diffIntegral = 0;
     waitTime = 0;
@@ -295,6 +309,12 @@ void TempControl::updateState(){
         snprintf(annotation, sizeof(annotation), "Fridge door %s", doorOpen ? "opened" : "closed");
         piLink.printTemperatures(0, annotation);
     }
+
+#ifndef BREWPI_CHILLSIM_TEST
+    // Manual commands own the relays until an explicit mode transition. Test
+    // mode does not require temperature sensors or an automatic setpoint.
+    if (cs.mode == Modes::test) return;
+#endif
 
     if(cs.mode == Modes::off){
         if (extendedSettings.glycol) resetGlycolControl();
@@ -323,9 +343,7 @@ void TempControl::updateState(){
     // Uses selectable cooling (see docs/GLYCOL_COOLING_SELECTION.md)
     if(useGlycolBeerMode(cs) && !stayIdle) {
         GlycolMode::Context glycolCtx(controlCtx, glycolLearned, glycolConfig, glycolRuntime, extendedSettings.glycolCoolingAlgorithm);
-        if (GlycolMode::updateState(glycolCtx)) {
-            storeGlycolParams();
-        }
+        GlycolMode::updateState(glycolCtx);
         // Glycol mode uses its own state machine - skip compressor mode logic
         return;
     }
@@ -360,6 +378,11 @@ void TempControl::updateOutputs() {
 	#endif
 	light->setActive(lightActive);
 	fan->setActive(heating || cooling);
+#ifdef ENABLE_GLYCOL_LOGGING
+    if (extendedSettings.glycol) {
+        glycolLog.logTransition(glycolRuntime, beerSensor->readRawCached(), cs.beerSetting);
+    }
+#endif
 }
 
 
@@ -970,26 +993,12 @@ void GlycolRuntimeState::reset() {
     last_pump_active_s = 0;
     pump_started_s = 0;
     state = GLYCOL_IDLE;
-    t_pump_on = 0;
     t_pump_off = 0;
-    emergency_entry_time = 0;
-    temp_at_pump_on = 0;
-    temp_at_pump_off = 0;
-    min_temp_reached = 0;
-    cooling_rate_at_pump_off = 0;
-    current_cooling_rate = 0;
-    cooling_confirmed = false;
-    negative_rate_count = 0;
-    setpoint_changed_this_cycle = false;
-    cooling_duration_s = 0;
     heating_output = 0;
     heating_window_active = false;
     heating_window_start_ms = 0;
     heating_window_on_time_s = 0;
     heating_wait_reason = GLYCOL_HEATING_WAIT_NONE;
-    force_minimum_cooling = false;
-    rate_buffer_head = 0;
-    rate_buffer_count = 0;
 }
 
 // ----- TempControl Glycol Methods -----
@@ -998,8 +1007,4 @@ void TempControl::loadGlycolParams() {
     glycolLearned.loadFromFilesystem();
     glycolConfig.loadFromFilesystem();
     glycolRuntime.reset();
-}
-
-void TempControl::storeGlycolParams() {
-    glycolLearned.storeToFilesystem();
 }

@@ -2,7 +2,9 @@ import { createPinia, setActivePinia } from 'pinia';
 import { jest } from '@jest/globals';
 import { requestWaterTest, useWaterTestStore } from '@/stores/WaterTestStore';
 
-const status = { active: true, can_start: false, control_owned: true, phase: 'observe', device_guid: '0123456789ABCDEF' };
+import fixture from './fixtures/api.water-test.json';
+
+const status = { ...fixture, active: true, can_start: false, control_owned: true, phase: 'observe', device_guid: '0123456789ABCDEF' };
 const reply = (payload, options = {}) => ({ ok: true, status: 200, json: async () => payload, ...options });
 
 describe('water-test communication', () => {

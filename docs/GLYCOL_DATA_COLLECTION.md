@@ -32,7 +32,7 @@ background research telemetry is collected during ordinary brewing.
 
 `cooling-water-v1` uses a five-minute pump-OFF baseline, three cooling pulses and
 20 minutes of pump-OFF observation after each pulse. Typical duration is about
-65–67 minutes, with a hard 90-minute ceiling. The heater is always OFF.
+65–67 minutes, with a planned 90-minute ceiling. The heater is always OFF.
 
 Start with water between 8 and 35°C, at least 2°C warmer than the glycol
 input when that input is available. Unknown glycol input remains explicitly
@@ -40,15 +40,23 @@ unknown in the submission.
 
 The pilot is 10 seconds, extended if the configured minimum ON time requires it.
 Later pulses are selected from short, bounded durations according to the preceding
-observed response. Each pulse is at most 60 seconds; cumulative pump time is at
-most 180 seconds. Ordinary transitions respect at least two seconds ON/OFF and
+observed response. Planned pulses are at most 60 seconds; the planned cumulative
+pump budget is 180 seconds. Ordinary transitions respect at least two seconds ON/OFF and
 the selected glycol controller’s effective minimum intervals. Unsupported minimum intervals block preflight.
 
 The test stops at a 3°C drop from its initial water reading or a 4°C water reading.
 Beer-probe failures, readings older than ten seconds, recording failures and
-unaccounted sample loss terminate the experiment. Protective stops switch OFF
-immediately; a normal user Stop may wait for the current minimum ON interval.
-These are limits on the measured probe, not guarantees of spatially uniform water.
+unaccounted sample loss terminate the experiment. A detected fault or temperature
+limit switches outputs OFF before its sample or diagnostic records are written.
+A normal user Stop may wait for the current minimum ON interval. These are limits
+on the measured probe, not guarantees of spatially uniform water.
+
+Pulse, freshness and runtime deadlines are checked between journal writes, and each
+control tick consumes a fixed snapshot of the sample queue. Durable flash writes
+are synchronous: an operation already in progress can delay a deadline or processing
+of a newly arrived fault until that operation returns. The durations above are
+therefore scheduling limits, not hard real-time cutoffs. Output records preserve
+the monotonic time when the command was actually applied, before storage work.
 
 There is no temperature reset between pulses and no assumption that a 20-minute
 observation proves every installation has reached equilibrium. Little or no
@@ -79,7 +87,11 @@ An upload pending state is independent of whether the experiment completed.
 
 A reboot holds outputs OFF, preserves the recoverable journal and marks an active
 run interrupted. It never resumes a pulse sequence or invents the time when power
-was lost. A new run cannot replace a pending submission. The journal occupies the
+was lost. A new run cannot replace a pending submission. Recovery markers are
+checked against the test UUID, and all prior test files must be removed successfully
+before a replacement starts. Existing untagged boot metadata is migrated only for
+legacy manifests; old untagged upload acknowledgements are re-confirmed with the
+receiver instead of being trusted locally. The journal occupies the
 same LittleFS partition as the web UI and device configuration; replacing that
 filesystem image removes those local files, including pending contributions.
 

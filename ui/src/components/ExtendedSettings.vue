@@ -280,7 +280,7 @@
 import { useExtendedSettingsStore } from "@/stores/ExtendedSettingsStore";
 import { Switch, SwitchGroup, SwitchLabel, Listbox, ListboxButton, ListboxLabel, ListboxOption, ListboxOptions } from "@headlessui/vue";
 import { CheckIcon, ChevronDownIcon, ExclamationTriangleIcon } from '@heroicons/vue/20/solid'
-import { i18n } from "@/main.js";
+import { i18n } from "@/i18n";
 import { onMounted, ref } from "vue";
 import { useLoading } from "vue-loading-overlay";
 import { useControlConstantsStore } from "@/stores/ControlConstantsStore";
@@ -333,9 +333,22 @@ async function submitForm() {
   settingsSaved.value = false;
   const loader = $loading.show({});
   try {
-    settingsSaved.value = await ExtendedSettingsStore.setExtendedSettings(glycol.value, largeTFT.value, invertTFT.value, resetScreenOnPin.value, selectedSettingSet.value.value, MIN_COOL_OFF_TIME.value, MIN_HEAT_OFF_TIME.value, MIN_COOL_ON_TIME.value, MIN_HEAT_ON_TIME.value,
-        MIN_COOL_OFF_TIME_FRIDGE_CONSTANT.value, MIN_SWITCH_TIME.value, COOL_PEAK_DETECT_TIME.value, HEAT_PEAK_DETECT_TIME.value,
-        ExtendedSettingsStore.hasGlycolCoolingAlgorithm ? glycolCoolingAlgorithm.value : undefined);
+    settingsSaved.value = await ExtendedSettingsStore.setExtendedSettings({
+      glycol: glycol.value,
+      largeTFT: largeTFT.value,
+      invertTFT: invertTFT.value,
+      resetScreenOnPin: resetScreenOnPin.value,
+      SETTINGS_CHOICE: selectedSettingSet.value.value,
+      MIN_COOL_OFF_TIME: MIN_COOL_OFF_TIME.value,
+      MIN_HEAT_OFF_TIME: MIN_HEAT_OFF_TIME.value,
+      MIN_COOL_ON_TIME: MIN_COOL_ON_TIME.value,
+      MIN_HEAT_ON_TIME: MIN_HEAT_ON_TIME.value,
+      MIN_COOL_OFF_TIME_FRIDGE_CONSTANT: MIN_COOL_OFF_TIME_FRIDGE_CONSTANT.value,
+      MIN_SWITCH_TIME: MIN_SWITCH_TIME.value,
+      COOL_PEAK_DETECT_TIME: COOL_PEAK_DETECT_TIME.value,
+      HEAT_PEAK_DETECT_TIME: HEAT_PEAK_DETECT_TIME.value,
+      glycolCoolingAlgorithm: ExtendedSettingsStore.hasGlycolCoolingAlgorithm ? glycolCoolingAlgorithm.value : undefined,
+    });
     if (settingsSaved.value) {
       await ExtendedSettingsStore.getExtendedSettings();
       if (!ExtendedSettingsStore.extendedSettingsError) updateCachedSettings();

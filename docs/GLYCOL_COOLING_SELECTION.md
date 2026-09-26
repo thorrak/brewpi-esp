@@ -36,6 +36,12 @@ interval finishes. An algorithm change does not wait for a whole observation
 period to complete. The physical system can continue cooling after shutoff;
 changing algorithms cannot cancel that thermal response.
 
+Manual test mode owns its outputs until an explicit mode change and does not
+require a sensor or setpoint. Entering or leaving test mode switches outputs OFF
+before saving settings. Leaving test mode starts conservative cooling OFF,
+heating OFF and direction-switch guards: manually issued relay edges are not
+observed by the cooling cores. Learned values are retained.
+
 ## API and logging
 
 Read `GET /api/extended/`. The response includes:
@@ -72,11 +78,24 @@ Unassigned actuator roles report inactive. This avoids the shared dummy actuator
 making unassigned heater/light diagnostics appear active when the fan command
 follows cooling.
 
+With `ENABLE_GLYCOL_LOGGING`, `/glycol_log.csv` records glycol state and algorithm
+changes after the relay commands have been applied. It reports current raw
+Celsius temperature, setpoint, rate, completed/active ON duration, the selected
+algorithm's learned values, pulse budget and predicted endpoint. Inapplicable
+values are `nan`; continuous budgets are `inf`. The logger retains a single
+archive and rotates at 30 KB. The first write after an upgrade archives the old
+legacy-controller CSV before creating the new column header. If migration fails,
+it leaves the old active file unchanged. The existing clear-log action clears
+both files. Manual output commands are not logged as automatic cooling cycles.
+
 ## Implementation and installation
 
 `GlycolCoolingController` provides a common interface and shared switch timing
-around the unchanged `PredictiveCoastController` and `AdaptiveDoseController`.
-Only the active core processes temperature samples. `GlycolMode` retains heating
+around the `PredictiveCoastController` and `AdaptiveDoseController` policies.
+Both cores use `CoolingMeasurements` for bounded sample windows, smoothing and
+regression. The helper retains the frozen reference's arithmetic order, expiry
+rules, capacity limits and hourly rebasing. Policy, parameters and learned values
+remain separate. Only the active core processes temperature samples. `GlycolMode` retains heating
 and heating/cooling coordination; `TempControl` retains hardware output and
 persistence responsibilities. `ChamberMode` and `ControlContext` are unchanged.
 
@@ -118,7 +137,10 @@ switching, independent learning, faults, repeated requests, and differing relay
 minimums. The integration suite retains its historical directory name but now
 exercises both selections with real BrewPi temperature conversion, clock wrap,
 heating interlocks, and ArduinoJson diagnostics, in both normal and cooling-only
-builds. The settings suite exercises actual persistence, HTTP, and Telnet methods.
+builds, with optional logging both enabled and disabled. It also checks manual
+relay ownership with absent sensors, conservative manual-to-automatic protection,
+OFF commands before storage access, CSV schema migration, and failed migration.
+The settings suite exercises actual persistence, HTTP, and Telnet methods.
 These two Python runners need ArduinoJson from a PlatformIO build, or an explicit
 `--arduinojson /path/to/ArduinoJson/src`.
 

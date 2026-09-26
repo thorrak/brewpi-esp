@@ -283,7 +283,7 @@ const $loading = useLoading({});
 import {onMounted, ref, computed} from "vue";
 import { Listbox, ListboxButton, ListboxLabel, ListboxOption, ListboxOptions } from "@headlessui/vue";
 import {CheckIcon, ChevronDownIcon} from "@heroicons/vue/20/solid";
-import {i18n} from "@/main";
+import {i18n} from "@/i18n";
 
 // selectedSettingSet is one of three values:
 //   0 - "Legacy Fermentack" (or no REST API target)

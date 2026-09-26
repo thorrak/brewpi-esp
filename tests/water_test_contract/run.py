@@ -36,7 +36,10 @@ def between(source, first, end):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--portal", type=Path, required=True)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--portal", type=Path)
+    mode.add_argument("--firmware-only", action="store_true",
+                      help="Compile and exercise firmware serialization without a portal checkout")
     parser.add_argument("--arduinojson", type=Path)
     args = parser.parse_args()
     paths = [args.arduinojson] if args.arduinojson else list((ROOT / ".pio/libdeps").glob("*/ArduinoJson/src"))
@@ -46,15 +49,14 @@ def main():
     source = (ROOT / "src/WaterTest.cpp").read_text()
     functions = "".join(definition(source, name) for name in (
         "std::string romOf(", "void common(", "void sensorManifest(", "void outputManifest(",
-        "void recordOutput(", "void recordPhase(",
+        "void recordOutput(", "void recordPhase(", "Record sampleRecord(",
     ))
     # Extract within the owning function so unrelated records cannot match.
     manifest = between(definition(source, "void startRun("), "char testId[37];", "if (!allocateReserve()")
-    sample = between(definition(source, "void processSample("), "Record r{};", "if (recordingFailed)")
     finish = between(definition(source, "void finishRun("), "terminal.clear();", "uint32_t counts[maxBoots]")
     harness = (HERE / "harness.cpp").read_text()
     for marker, code in (("SOURCE_FUNCTIONS", functions), ("MANIFEST_SOURCE", manifest),
-                         ("SAMPLE_SOURCE", sample), ("FINISH_SOURCE", finish)):
+                         ("FINISH_SOURCE", finish)):
         harness = harness.replace(f"// @@{marker}@@", code)
     with tempfile.TemporaryDirectory(prefix="water-test-contract-") as temp:
         build = Path(temp)
@@ -64,7 +66,17 @@ def main():
                         "-I", str(headers), "-I", str(ROOT / "src"), str(cpp), "-o", str(binary)], check=True)
         completed = subprocess.run([str(binary)], check=True, text=True, capture_output=True)
         requests = [json.loads(line) for line in completed.stdout.splitlines()]
-        exercise_portal(args.portal.resolve(), requests, build, binary)
+        if args.firmware_only:
+            assert len(requests) > 2
+            manifest, terminal = requests[0]["payload"], requests[-1]["payload"]
+            assert manifest["test_id"] == terminal["test_id"]
+            assert terminal["outcome"] == "completed"
+            assert terminal["final_outputs"] == {"pump_on": False, "heater_on": False}
+            count = sum(len(request["payload"]["records"]) for request in requests[1:-1])
+            print(f"Firmware serializer completed its three-pulse fixture: {count} records in {len(requests)-2} batches.")
+            print("Portal API and analysis integration were not exercised (--firmware-only).")
+        else:
+            exercise_portal(args.portal.resolve(), requests, build, binary)
     print("Serializer source SHA256:", hashlib.sha256(source.encode()).hexdigest())
 
 

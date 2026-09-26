@@ -2,12 +2,13 @@
 #include "Brewpi.h"
 #include "DeviceManager.h"
 #include "ESPEepromAccess.h"
-#include "ESP_BP_WiFi.h"
 #include "EepromManager.h"
 #include "TempControl.h"
 #include "Version.h"
 #include "WaterTestCore.h"
 #include "WaterTestProtocol.h"
+#include "WaterTestStorage.h"
+#include "WaterTestTransport.h"
 #include "getGuid.h"
 #include "ntp.h"
 #include <algorithm>
@@ -15,7 +16,6 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
-#include <esp_http_client.h>
 #include <esp_random.h>
 #include <esp_system.h>
 #include <esp_timer.h>
@@ -29,18 +29,13 @@
 namespace WaterTest {
 namespace {
 using namespace WaterTestCore;
-constexpr const char *manifestPath = "/water-test-manifest.json";
-constexpr const char *journalPath = "/water-test-records.bin";
-constexpr const char *finishPath = "/water-test-finish.json";
-constexpr const char *ackPath = "/water-test-ack.json";
-constexpr const char *bootsPath = "/water-test-boots.json";
-constexpr const char *resumedPath = "/water-test-resumed.json";
-constexpr const char *reservePath = "/water-test-reserve.bin";
+using namespace WaterTestStorage;
+using WaterTestTransport::endpoint;
 constexpr size_t maxRecords = 6000;
 constexpr size_t requiredBytes = maxRecords * sizeof(Record) + 32768;
 constexpr size_t batchSize = 12;
+constexpr size_t sampleQueueCapacity = 64;
 constexpr unsigned maxBoots = 8;
-constexpr const char *endpoint = "http://chill.fermentrack.net";
 struct Sample {
   uint64_t address, conversion, read;
   int16_t raw;
@@ -83,43 +78,6 @@ void uuid(char *out) {
   snprintf(out, 37, "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x", bytes[0], bytes[1],
            bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7], bytes[8], bytes[9], bytes[10], bytes[11],
            bytes[12], bytes[13], bytes[14], bytes[15]);
-}
-bool readJson(const char *path, JsonDocument &doc) {
-  FILE *f = fs_open(path, "rb");
-  if (!f)
-    return false;
-  char buffer[512];
-  std::string text;
-  size_t n;
-  while ((n = fread(buffer, 1, sizeof(buffer), f)) > 0) {
-    text.append(buffer, n);
-    if (text.size() > 16384) {
-      fclose(f);
-      return false;
-    }
-  }
-  fclose(f);
-  return deserializeJson(doc, text) == DeserializationError::Ok;
-}
-bool atomicJson(const char *path, const JsonDocument &doc) {
-  std::string target = std::string(FS_PREFIX) + path, tmp = target + ".tmp", text;
-  serializeJson(doc, text);
-  FILE *f = fopen(tmp.c_str(), "wb");
-  if (!f)
-    return false;
-  bool ok = fwrite(text.data(), 1, text.size(), f) == text.size();
-  ok = fflush(f) == 0 && ok;
-  ok = fsync(fileno(f)) == 0 && ok;
-  ok = fclose(f) == 0 && ok;
-  if (ok)
-    ok = rename(tmp.c_str(), target.c_str()) == 0;
-  if (!ok)
-    remove(tmp.c_str());
-  return ok;
-}
-size_t freeBytes() {
-  size_t total = 0, used = 0;
-  return esp_littlefs_info("spiffs", &total, &used) == ESP_OK && total > used ? total - used : 0;
 }
 void forceOff() {
   if (tempControl.cooler)
@@ -170,6 +128,8 @@ bool fresh(const DeviceConfig &d) {
 }
 bool movedProbe() { return manifest["installation"]["glycol_temperature_source"] == "chamber_probe"; }
 void recordFailure(uint32_t attempted) {
+  // A failed write must not delay protective shutdown while reserve space is freed.
+  forceOff();
   if (!lostRecord) {
     lostRecord = true;
     lostSequence = attempted;
@@ -185,13 +145,16 @@ bool append(Record r) {
   }
   r.boot = bootIndex;
   r.seq = seq++;
-  r.t_us = std::max(nowUs(), lastRecordUs);
+  r.t_us = std::max(r.t_us ? r.t_us : nowUs(), lastRecordUs);
   lastRecordUs = r.t_us;
   seal(r);
   bool ok = fwrite(&r, sizeof(r), 1, journal) == 1;
-  ok = fflush(journal) == 0 && ok;
-  ok = fsync(fileno(journal)) == 0 && ok;
+  if (ok)
+    ok = fflush(journal) == 0;
+  if (ok)
+    ok = fsync(fileno(journal)) == 0;
   if (!ok) {
+    forceOff();
     // The possibly torn record is excluded from the immutable upload prefix.
     ftruncate(fileno(journal), recordCount * sizeof(Record));
     clearerr(journal);
@@ -201,8 +164,9 @@ bool append(Record r) {
   ++recordCount;
   return true;
 }
-void recordOutput(bool pump, bool requested, bool edge, Reason why) {
+void recordOutput(bool pump, bool requested, bool edge, Reason why, uint64_t appliedUs = 0) {
   Record r{};
+  r.t_us = appliedUs;
   r.kind = 3;
   r.role = pump ? 0 : 1;
   r.flags = (physicalPump() ? 2 : 0) | (requested ? 4 : 0) | (edge ? 8 : 0);
@@ -247,6 +211,17 @@ void common(JsonDocument &doc) {
   doc["device_guid"] = guid;
   doc["test_id"] = testId;
 }
+bool sameTest(const JsonDocument &doc) {
+  const char *id = manifest["test_id"] | "";
+  return *id && doc["test_id"] == id &&
+         (doc["device_guid"].isNull() || doc["device_guid"] == guid);
+}
+bool readTestJson(const char *path, JsonDocument &doc) {
+  if (readJson(path, doc) && sameTest(doc))
+    return true;
+  doc.clear();
+  return false;
+}
 void closeJournal() {
   if (journal) {
     fflush(journal);
@@ -256,8 +231,12 @@ void closeJournal() {
   }
 }
 void finishRun() {
+  const uint64_t offUs = nowUs();
   const bool wasPump = physicalPump();
+  const bool wasHeat = physicalHeat();
   forceOff();
+  recordOutput(true, false, wasPump, program.reason, offUs);
+  recordOutput(false, false, wasHeat, program.reason, offUs);
   if (program.reason == Reason::SensorFault || program.reason == Reason::SensorStale ||
       program.reason == Reason::StorageFailure || program.reason == Reason::QueueOverflow ||
       program.reason == Reason::UnexpectedOutput) {
@@ -266,8 +245,6 @@ void finishRun() {
     event.code = static_cast<uint8_t>(program.reason);
     append(event);
   }
-  recordOutput(true, false, wasPump, program.reason);
-  recordOutput(false, false, false, program.reason);
   recordPhase();
   if (recordingFailed) {
     program.outcome = End::Failed;
@@ -389,22 +366,6 @@ std::string preflight(bool useGlycol, DeviceConfig &beer, DeviceConfig &glycol, 
     return "Not enough free recording space. A full offline test needs 272768 free bytes.";
   return "";
 }
-bool allocateReserve() {
-  FILE *f = fs_open(reservePath, "wb");
-  if (!f)
-    return false;
-  uint8_t zero[256] = {};
-  bool ok = true;
-  for (unsigned i = 0; i < 32; ++i)
-    if (fwrite(zero, 1, sizeof(zero), f) != sizeof(zero)) {
-      ok = false;
-      break;
-    }
-  ok = fflush(f) == 0 && ok;
-  ok = fsync(fileno(f)) == 0 && ok;
-  fclose(f);
-  return ok;
-}
 void startRun(const std::string &payload) {
   JsonDocument input;
   if (deserializeJson(input, payload) != DeserializationError::Ok) {
@@ -430,8 +391,11 @@ void startRun(const std::string &payload) {
   }
   // Old datasets are replaceable only after every upload is acknowledged and
   // the participant has explicitly released control.
-  for (auto path : {manifestPath, journalPath, finishPath, ackPath, bootsPath, resumedPath, reservePath})
-    fs_remove(path);
+  if (!removePreviousDataset()) {
+    reason = "Unable to remove the previous test's files; a new recording was not started.";
+    owned = false;
+    return;
+  }
   manifest.clear();
   terminal.clear();
   bootList.clear();
@@ -489,7 +453,9 @@ void startRun(const std::string &payload) {
   manifest["acquisition"]["sequence_start"] = 0;
   manifest["acquisition"]["freshness_limit_s"] = freshnessSeconds;
   manifest["acquisition"]["recording_format"] = "crc32-binary-v1";
+  manifest["acquisition"]["local_metadata_version"] = 1;
   manifest["acquisition"]["clock_status_at_start"] = isNtpSynced() ? "synced" : "unknown";
+  common(bootList);
   bootList["boots"].to<JsonArray>().add(currentBoot);
   if (!allocateReserve() || !atomicJson(bootsPath, bootList) || !atomicJson(manifestPath, manifest)) {
     reason = "Unable to reserve durable recording storage.";
@@ -530,24 +496,82 @@ void startRun(const std::string &payload) {
   recordPhase();
   recordStartUs = lastRecordUs; // discard queued reads acquired before the initial record boundary
 }
-void applyProgram(Phase oldPhase, bool /*oldPump*/) {
-  bool actual = physicalPump();
-  if (actual != program.pump) {
+// Apply relay changes before any potentially blocking journal operation. The
+// captured edge time is preserved even when the subsequent flash write is slow.
+bool applyOutputs() {
+  const bool changed = physicalPump() != program.pump;
+  if (tempControl.cooler)
     tempControl.cooler->setActive(program.pump);
-    recordOutput(true, program.pump, true, program.reason);
-  }
   if (tempControl.heater)
     tempControl.heater->setActive(false);
   if (tempControl.light)
     tempControl.light->setActive(false);
   if (tempControl.fan)
     tempControl.fan->setActive(false);
-  if (oldPhase != program.phase && program.active())
+  return changed;
+}
+void serviceProgram(bool allowNewPulse);
+void persistProgram(Phase oldPhase, bool pumpChanged, uint64_t appliedUs) {
+  if (pumpChanged) {
+    recordOutput(true, program.pump, true, program.reason, appliedUs);
+    if (program.pump) {
+      const auto phase = program.phase;
+      // A slow ON-edge write may consume the entire pulse. This nested service
+      // can only turn OFF; if it does, it persists that transition itself.
+      serviceProgram(false);
+      if (!running || phase != program.phase)
+        return;
+    }
+  }
+  if (oldPhase != program.phase && program.active()) {
     recordPhase();
+    if (program.pump) {
+      serviceProgram(false);
+      if (!running)
+        return;
+    }
+  }
   if (recordingFailed && program.active())
     program.finish(nowUs() / 1e6, End::Failed, Reason::StorageFailure);
   if (!program.active())
     finishRun();
+}
+void applyProgram(Phase oldPhase) {
+  const uint64_t appliedUs = nowUs();
+  const bool changed = applyOutputs();
+  persistProgram(oldPhase, changed, appliedUs);
+}
+// New pulses wait until the current queue snapshot has been consumed. Protective
+// OFF decisions, user stops, and pulse deadlines are serviced between writes.
+void serviceProgram(bool allowNewPulse) {
+  if (!running)
+    return;
+  const auto phase = program.phase;
+  const double now = nowUs() / 1e6;
+  const bool unexpected = physicalHeat() || physicalPump() != program.pump;
+  if (queuedStop) {
+    queuedStop = false;
+    program.stop(now);
+  }
+  if (recordingFailed || overflow)
+    program.finish(now, End::Failed, recordingFailed ? Reason::StorageFailure : Reason::QueueOverflow);
+  else if (unexpected)
+    program.finish(now, End::Failed, Reason::UnexpectedOutput);
+  else if (allowNewPulse || program.pump || program.stopping || now - program.started >= maximumSeconds)
+    program.tick(now);
+  applyProgram(phase);
+}
+Record sampleRecord(const Sample &sample, bool beer) {
+  Record r{};
+  r.t_us = nowUs();
+  r.kind = 2;
+  r.role = beer ? 0 : 1;
+  r.raw = sample.raw;
+  r.read_us = sample.read;
+  r.conversion_us =
+      sample.read >= sample.conversion ? uint32_t(std::min<uint64_t>(sample.read - sample.conversion, UINT32_MAX)) : 0;
+  r.flags = (sample.valid ? 1 : 0) | (physicalPump() ? 2 : 0);
+  return r;
 }
 void processSample(const Sample &sample) {
   Cache *slot = cached(sample.address);
@@ -571,83 +595,18 @@ void processSample(const Sample &sample) {
   if (sample.read <= previous)
     return;
   previous = sample.read;
-  Record r{};
-  r.kind = 2;
-  r.role = beer ? 0 : 1;
-  r.raw = sample.raw;
-  r.read_us = sample.read;
-  r.conversion_us =
-      sample.read >= sample.conversion ? uint32_t(std::min<uint64_t>(sample.read - sample.conversion, UINT32_MAX)) : 0;
-  r.flags = (sample.valid ? 1 : 0) | (physicalPump() ? 2 : 0);
-  append(r);
-  if (recordingFailed) {
-    program.finish(nowUs() / 1e6, End::Failed, Reason::StorageFailure);
-    finishRun();
-    return;
-  }
+  const Record r = sampleRecord(sample, beer);
+  const auto phase = program.phase;
   if (beer) {
     beerC = sample.valid ? sample.raw / 16.0 + beerOffset : NAN;
-    auto p = program.phase;
-    bool on = program.pump;
     program.sample(sample.read / 1e6, beerC, sample.valid, nowUs() / 1e6);
-    applyProgram(p, on);
   } else
     glycolC = sample.valid ? sample.raw / 16.0 + glycolOffset : NAN;
+  const bool changed = applyOutputs();
+  append(r);
+  persistProgram(phase, changed, r.t_us);
 }
 
-struct Response {
-  std::string body;
-  bool tooLong = false;
-};
-esp_err_t httpEvent(esp_http_client_event_t *e) {
-  if (e->event_id == HTTP_EVENT_ON_DATA) {
-    auto r = static_cast<Response *>(e->user_data);
-    if (r->body.size() + e->data_len > 8192) {
-      r->tooLong = true;
-      return ESP_FAIL;
-    }
-    r->body.append(static_cast<const char *>(e->data), e->data_len);
-  }
-  return ESP_OK;
-}
-bool send(const std::string &path, esp_http_client_method_t method, const std::string &body, JsonDocument &response,
-          std::string &error) {
-  if (!bp_wifi_is_connected()) {
-    error = "WiFi disconnected; original data retained.";
-    return false;
-  }
-  Response captured;
-  std::string url = std::string(endpoint) + path;
-  esp_http_client_config_t config = {};
-  config.url = url.c_str();
-  config.method = method;
-  config.timeout_ms = 6000;
-  config.disable_auto_redirect = true;
-  config.event_handler = httpEvent;
-  config.user_data = &captured;
-  auto client = esp_http_client_init(&config);
-  if (!client) {
-    error = "HTTP client allocation failed.";
-    return false;
-  }
-  esp_http_client_set_header(client, "Content-Type", "application/json");
-  esp_http_client_set_header(client, "User-Agent", "BrewPi-WaterTest/1");
-  esp_http_client_set_post_field(client, body.data(), body.size());
-  esp_err_t result = esp_http_client_perform(client);
-  int code = esp_http_client_get_status_code(client);
-  esp_http_client_cleanup(client);
-  if (result != ESP_OK || (code != 200 && code != 201) || captured.tooLong) {
-    error = "HTTP upload pending (status " + std::to_string(code) + ").";
-    if (code >= 300 && code < 400)
-      error = "Server redirected HTTP; configure the collection API to accept HTTP without redirect.";
-    return false;
-  }
-  if (deserializeJson(response, captured.body) != DeserializationError::Ok) {
-    error = "Invalid server acknowledgement.";
-    return false;
-  }
-  return true;
-}
 // This worker never touches actuators. It starts only after acquisition is closed;
 // upload/response delays cannot change an experiment's timing or sample cadence.
 void uploader(void *) {
@@ -660,10 +619,16 @@ void uploader(void *) {
     JsonDocument ack, request, response;
     {
       Guard lock;
-      if (running || !queuedStart.empty() || manifest.isNull() || !fs_exists(finishPath) || uploadState == "submitted")
+      if (running || !queuedStart.empty() || !sameTest(terminal) || !sameTest(bootList) ||
+          !fs_exists(finishPath) || uploadState == "submitted")
         continue;
-      readJson(ackPath, ack);
+      readTestJson(ackPath, ack);
       next = ack["next_record"] | 0U;
+      if (next > recordCount) {
+        // A damaged cursor must never skip the immutable local prefix.
+        ack.clear();
+        next = 0;
+      }
       id = manifest["test_id"].as<std::string>();
       path = "/api/v1/water-tests/" + id;
       if (!ack["manifest"].as<bool>()) {
@@ -716,7 +681,7 @@ void uploader(void *) {
       uploadState = "uploading";
       uploaderBusy = true;
     }
-    bool ok = send(path, (!isManifest && !isFinish) ? HTTP_METHOD_POST : HTTP_METHOD_PUT, body, response, error);
+    bool ok = WaterTestTransport::send(path, !isManifest && !isFinish, body, response, error);
     if (ok) {
       ok = WaterTestProtocol::acknowledged(response.as<JsonVariantConst>(), id, guid);
       if (!isManifest && !isFinish)
@@ -731,6 +696,7 @@ void uploader(void *) {
     {
       Guard lock;
       if (ok) {
+        common(ack);
         if (isManifest)
           ack["manifest"] = true;
         else if (isFinish)
@@ -766,10 +732,19 @@ void recover() {
     }
     return;
   }
-  bool resumed = fs_exists(resumedPath);
+  JsonDocument release;
+  const bool resumed = readTestJson(resumedPath, release) && release["resumed"] == true;
   owned = !resumed;
   restoreSaved(manifest["prior_control"]);
-  if (!readJson(bootsPath, bootList) || !bootList["boots"].is<JsonArray>()) {
+  const bool bootsRead = readJson(bootsPath, bootList);
+  // Older firmware did not bind its boot list to the test. Only legacy manifests
+  // may migrate that format; a new test must never inherit an untagged marker.
+  const bool legacyBoots = bootsRead && bootList["test_id"].isNull() &&
+                           manifest["acquisition"]["local_metadata_version"].isNull();
+  if (!bootsRead || (!sameTest(bootList) && !legacyBoots) || !bootList["boots"].is<JsonArray>() ||
+      bootList["boots"].size() == 0 || bootList["boots"].size() > maxBoots) {
+    owned = true;
+    forceOff();
     reason = "Recording boot metadata is damaged; control remains OFF.";
     uploadState = "error";
     return;
@@ -790,11 +765,21 @@ void recover() {
   }
   if (f)
     fclose(f);
-  if (readJson(finishPath, terminal)) {
+  if (legacyBoots) {
+    common(bootList);
+    if (!atomicJson(bootsPath, bootList)) {
+      owned = true;
+      forceOff();
+      reason = "Cannot migrate recording boot metadata; data retained and control remains OFF.";
+      uploadState = "error";
+      return;
+    }
+  }
+  if (readTestJson(finishPath, terminal)) {
     program.phase = Phase::Finished;
     reason = terminal["reason"] | "";
     JsonDocument ack;
-    readJson(ackPath, ack);
+    readTestJson(ackPath, ack);
     uploadState = ack["finish"].as<bool>() ? "submitted" : "pending";
     return;
   }
@@ -837,7 +822,7 @@ void init() {
   if (initialized)
     return;
   mutex = xSemaphoreCreateRecursiveMutex();
-  samples = xQueueCreate(64, sizeof(Sample));
+  samples = xQueueCreate(sampleQueueCapacity, sizeof(Sample));
   if (!mutex || !samples)
     return;
   getGuid(guid);
@@ -959,9 +944,16 @@ void tick() {
   if (!initialized)
     return;
   Guard lock;
+  serviceProgram(false);
   Sample sample;
-  while (xQueueReceive(samples, &sample, 0) == pdPASS)
+  // Snapshot the queue so concurrent acquisition cannot indefinitely extend a
+  // control tick. Any new arrivals remain available for the next tick.
+  for (size_t pending = uxQueueMessagesWaiting(samples); pending; --pending) {
+    if (xQueueReceive(samples, &sample, 0) != pdPASS)
+      break;
     processSample(sample);
+    serviceProgram(false);
+  }
   if (!queuedStart.empty()) {
     std::string payload;
     payload.swap(queuedStart);
@@ -974,29 +966,16 @@ void tick() {
   }
   if (owned)
     tempControl.cs.mode = Modes::off;
+  serviceProgram(true);
   if (running) {
-    auto phase = program.phase;
-    bool pump = program.pump;
-    bool unexpected = physicalHeat() || physicalPump() != program.pump;
-    if (queuedStop) {
-      queuedStop = false;
-      program.stop(nowUs() / 1e6);
-    }
-    if (recordingFailed || overflow)
-      program.finish(nowUs() / 1e6, End::Failed, recordingFailed ? Reason::StorageFailure : Reason::QueueOverflow);
-    else if (unexpected)
-      program.finish(nowUs() / 1e6, End::Failed, Reason::UnexpectedOutput);
-    else
-      program.tick(nowUs() / 1e6);
-    applyProgram(phase, pump);
-    if (running)
-      recordClock();
+    recordClock();
+    serviceProgram(false);
   } else if (owned)
     forceOff();
   if (queuedResume) {
     queuedResume = false;
     JsonDocument resumed;
-    resumed["test_id"] = manifest["test_id"];
+    common(resumed);
     resumed["resumed"] = true;
     if (atomicJson(resumedPath, resumed)) {
       tempControl.resumeAfterWaterTest(savedControl);

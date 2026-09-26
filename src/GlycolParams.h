@@ -6,9 +6,8 @@
 
 /**
  * Legacy predictive-controller parameters (retained on disk for rollback).
- * Adaptive pulse-dose cooling does not consume or update these fields.
- * Learned parameters for the former glycol mode (persisted to filesystem)
- * These adapt to the specific system characteristics over time
+ * Neither selectable cooling algorithm consumes or updates these fields.
+ * Predictive coast and pulse-dose each retain their own learning in RAM.
  */
 struct GlycolLearnedParams : public JSONSaveable {
     float k;            //!< Coast factor in minutes (estimated_coast = k * |cooling_rate|)
@@ -27,9 +26,9 @@ struct GlycolLearnedParams : public JSONSaveable {
 
 /**
  * Legacy predictive cooling settings retained for configuration compatibility.
- * Adaptive cooling uses the explicit SI-unit defaults in AdaptiveCooling::Config;
- * these cooling fields are ignored. trigger_margin still controls heating start.
- * Configuration parameters for legacy glycol mode (persisted to filesystem)
+ * Predictive coast and pulse-dose use their respective SI-unit Config defaults;
+ * both ignore these legacy cooling fields. trigger_margin still controls heating
+ * start. The persisted representation remains compatible with older firmware.
  */
 struct GlycolConfig : public JSONSaveable {
     // Timing
@@ -47,7 +46,7 @@ struct GlycolConfig : public JSONSaveable {
 
     // Prediction
     float min_rate_for_k_model;       //!< Below this rate, use C_off instead (deg/min)
-    float trigger_margin;             //!< Margin above setpoint to trigger cooling (deg)
+    float trigger_margin;             //!< Current heating start margin below setpoint (display degrees)
 
     // Emergency detection
     float emergency_horizon_min;      //!< Minutes to look ahead for "can't catch up" detection

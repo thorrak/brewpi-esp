@@ -8,13 +8,23 @@ the portal's pinned Python environment:
   --portal /path/to/glycol_data_collection
 ```
 
+To compile and exercise the firmware serializers without a compatible portal
+checkout and Python environment, run:
+
+```sh
+python3 tests/water_test_contract/run.py --firmware-only
+```
+
+This checks the generated three-pulse fixture and its final output state. It does
+not exercise the portal API or analysis worker.
+
 `--arduinojson PATH` can supply another existing copy of the project's ArduinoJson
 headers. `CXX` selects the native C++ compiler. Nothing is sent over the network,
 and no physical sensors or relays are accessed; Django uses an in-memory database.
 
 The test compiles this checkout's actual `WaterTestCore.h`, `WaterTestProtocol.h::recordToJson`, `common`,
 `recordOutput`, `recordPhase`, probe/output metadata serializers, manifest
-construction, and sample-record packing with the real ArduinoJson library.
+construction, and the sample-record builder with the real ArduinoJson library.
 Hardware discovery and saved-control metadata are stubbed. Finish bounds and
 12-record batch framing reproduce the uploader structure; this does not exercise
 ESP-IDF HTTP, task scheduling, flash durability, or electrical behavior.

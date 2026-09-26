@@ -1,3 +1,5 @@
+import { i18n } from '@/i18n';
+
 const LITERS_PER_US_GALLON = 3.785411784;
 
 export function convertVolume(value, from, to) {
@@ -12,34 +14,34 @@ export function convertTemperature(value, from, to) {
     return to === 'F' ? celsius * 1.8 + 32 : celsius;
 }
 
-function requiredNumber(value, label) {
+function requiredNumber(value, messageKey) {
     if (value === null || value === undefined || String(value).trim() === '' || !Number.isFinite(Number(value))) {
-        throw new Error(`Enter ${label}.`);
+        throw new Error(i18n.global.t(`water_test.errors.${messageKey}`));
     }
     return Number(value);
 }
 
 export function buildWaterTestPayload(form) {
-    if (!form.consent || !form.waterConfirmed) throw new Error('Confirm the water-only preparation and consent to submit this test.');
+    if (!form.consent || !form.waterConfirmed) throw new Error(i18n.global.t('water_test.errors.confirm_preparation'));
     if (!['l', 'us_gal'].includes(form.volumeUnit) || !['C', 'F'].includes(form.temperatureUnit)) {
-        throw new Error('Select volume and temperature units.');
+        throw new Error(i18n.global.t('water_test.errors.select_units'));
     }
-    const waterVolume = requiredNumber(form.waterVolume, 'the amount of water in the fermenter');
+    const waterVolume = requiredNumber(form.waterVolume, 'enter_water');
     const waterLiters = convertVolume(waterVolume, form.volumeUnit, 'l');
-    if (waterLiters < 0.01 || waterLiters > 10000) throw new Error('Water volume must be between 0.01 and 10,000 liters.');
-    const capacity = String(form.capacity ?? '').trim() === '' ? null : requiredNumber(form.capacity, 'a valid fermenter capacity');
+    if (waterLiters < 0.01 || waterLiters > 10000) throw new Error(i18n.global.t('water_test.errors.water_range'));
+    const capacity = String(form.capacity ?? '').trim() === '' ? null : requiredNumber(form.capacity, 'enter_capacity');
     const capacityLiters = capacity === null ? null : convertVolume(capacity, form.volumeUnit, 'l');
     if (capacityLiters !== null && (capacityLiters < 0.01 || capacityLiters > 10000)) {
-        throw new Error('Fermenter capacity must be between 0.01 and 10,000 liters.');
+        throw new Error(i18n.global.t('water_test.errors.capacity_range'));
     }
-    if (!['jacket', 'immersion_coil', 'other', 'unknown'].includes(form.coolingType)) throw new Error('Select how the fermenter is cooled.');
-    if (!['thermowell', 'immersed', 'outside', 'other', 'unknown'].includes(form.probeMounting)) throw new Error('Select how the beer probe is installed.');
-    if (!['chamber_probe', 'reported_setpoint'].includes(form.glycolChoice)) throw new Error('Select whether you can place a chamber probe in the glycol bath.');
-    if (form.glycolChoice === 'chamber_probe' && !form.bathPlacementConfirmed) throw new Error('Confirm that the chamber probe is now in the glycol bath.');
+    if (!['jacket', 'immersion_coil', 'other', 'unknown'].includes(form.coolingType)) throw new Error(i18n.global.t('water_test.errors.select_cooling'));
+    if (!['thermowell', 'immersed', 'outside', 'other', 'unknown'].includes(form.probeMounting)) throw new Error(i18n.global.t('water_test.errors.select_probe'));
+    if (!['chamber_probe', 'reported_setpoint'].includes(form.glycolChoice)) throw new Error(i18n.global.t('water_test.errors.select_chamber'));
+    if (form.glycolChoice === 'chamber_probe' && !form.bathPlacementConfirmed) throw new Error(i18n.global.t('water_test.errors.confirm_probe'));
     const source = form.glycolChoice === 'chamber_probe' ? 'chamber_probe' : (form.unknownSetpoint ? 'unknown' : 'reported_setpoint');
-    const setpoint = source === 'reported_setpoint' ? requiredNumber(form.glycolSetpoint, "the chiller's setpoint, or select unknown") : null;
+    const setpoint = source === 'reported_setpoint' ? requiredNumber(form.glycolSetpoint, 'enter_setpoint') : null;
     const setpointC = setpoint === null ? null : convertTemperature(setpoint, form.temperatureUnit, 'C');
-    if (setpointC !== null && (setpointC < -60 || setpointC > 100)) throw new Error('Check the chiller setpoint and its units.');
+    if (setpointC !== null && (setpointC < -60 || setpointC > 100)) throw new Error(i18n.global.t('water_test.errors.setpoint_range'));
     return {
         consent: true,
         water_confirmed: true,

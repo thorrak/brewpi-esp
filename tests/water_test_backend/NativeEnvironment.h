@@ -10,6 +10,7 @@
 #include <deque>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -18,7 +19,9 @@
 #include <vector>
 namespace Native {
 inline std::string root;
-inline uint64_t clock = 1000000;
+inline uint64_t clock = 1000000, fsyncDelayUs = 0;
+inline std::string removeFailurePath;
+inline std::function<void()> fsyncHook, truncateHook;
 inline size_t freeBytes = 512000;
 inline int fsyncUntilFail = -1, delays = 0, nextHttpCode = 201;
 inline bool connected = true;
@@ -34,9 +37,12 @@ struct ControlSettings {
 struct Actuator {
   bool state = false;
   std::vector<bool> edges;
+  std::vector<uint64_t> edgeTimes;
   void setActive(bool on) {
-    if (on != state)
+    if (on != state) {
       edges.push_back(on);
+      edgeTimes.push_back(Native::clock);
+    }
     state = on;
   }
   bool isActive() { return state; }
@@ -118,9 +124,16 @@ struct {
 #define CONTROLLER_TYPE "native-test"
 #define FS_PREFIX Native::root.c_str()
 inline bool fs_exists(const char *path) { return std::filesystem::exists(Native::root + path); }
-inline bool fs_remove(const char *path) { return ::remove((Native::root + path).c_str()) == 0; }
+inline bool fs_remove(const char *path) {
+  if (Native::removeFailurePath == path)
+    return false;
+  return ::remove((Native::root + path).c_str()) == 0;
+}
 inline FILE *fs_open(const char *path, const char *mode) { return fopen((Native::root + path).c_str(), mode); }
 inline int native_fsync(int fd) {
+  Native::clock += Native::fsyncDelayUs;
+  if (Native::fsyncHook)
+    Native::fsyncHook();
   if (Native::fsyncUntilFail == 0) {
     Native::fsyncUntilFail = -1;
     return -1;
@@ -130,6 +143,12 @@ inline int native_fsync(int fd) {
   return ::fsync(fd);
 }
 #define fsync native_fsync
+inline int native_ftruncate(int fd, off_t size) {
+  if (Native::truncateHook)
+    Native::truncateHook();
+  return ::ftruncate(fd, size);
+}
+#define ftruncate native_ftruncate
 using esp_err_t = int;
 constexpr int ESP_OK = 0, ESP_FAIL = -1, pdPASS = 1, portMAX_DELAY = -1;
 inline int esp_littlefs_info(const char *, size_t *total, size_t *used) {
@@ -164,6 +183,7 @@ inline int xQueueSend(Queue *q, const void *p, int) {
   q->items.emplace_back(b, b + q->size);
   return pdPASS;
 }
+inline size_t uxQueueMessagesWaiting(Queue *q) { return q->items.size(); }
 inline int xQueueReceive(Queue *q, void *p, int) {
   if (q->items.empty())
     return 0;

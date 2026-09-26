@@ -987,18 +987,26 @@ const char* httpServer::getContentType(const char* filename) {
     return "text/plain";
 }
 
+static bool isPublicFilePath(const char* path) {
+    // LittleFS resolves repeated slashes and single-dot components as aliases.
+    // Require canonical absolute paths before checking private runtime names.
+    if (!path || path[0] != '/' || strstr(path, "//") || strstr(path, "/./") ||
+        endsWith(path, "/.") || strstr(path, "..") || strchr(path, '%')) {
+        return false;
+    }
+    return strncmp(path, "/water-test-", 12) != 0;
+}
+
 esp_err_t httpServer::handleFileRead(httpd_req_t *req, const char* path) {
-    // Research journals and recovery metadata are private runtime files, not
-    // web assets. Encoded/path-traversal variants must not reach the VFS either.
-    if (strncmp(path, "/water-test-", 12) == 0 || strstr(path, "..") || strchr(path, '%')) {
+    if (!isPublicFilePath(path)) {
         return ESP_FAIL;
     }
     char fullPath[256];
-    strlcpy(fullPath, path, sizeof(fullPath));
+    if (strlcpy(fullPath, path, sizeof(fullPath)) >= sizeof(fullPath)) return ESP_FAIL;
 
     size_t len = strlen(fullPath);
     if (len > 0 && fullPath[len - 1] == '/') {
-        strlcat(fullPath, "index.html", sizeof(fullPath));
+        if (strlcat(fullPath, "index.html", sizeof(fullPath)) >= sizeof(fullPath)) return ESP_FAIL;
     }
 
     const char* contentType = getContentType(fullPath);

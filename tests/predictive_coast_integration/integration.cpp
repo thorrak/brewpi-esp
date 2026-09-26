@@ -1,12 +1,43 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "GlycolMode.h"
 #include "Ticks.h"
+#include "ChamberMode.h"
+#include "GlycolLog.h"
+#include "ESPEepromAccess.h"
+#include "PiLink.h"
+#include "thorlog.h"
+#include <fstream>
+#include <functional>
+#include <string>
 #include <cassert>
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 
 HostTicks ticks;
+HostPiLink piLink;
+HostLog Log;
+MinTimes minTimes;
+ValueActuator cameraLightState;
+std::function<void()> onFileAccess;
+bool failFileRemoval = false;
+FILE* fs_open(const char* name, const char* mode) {
+    if (onFileAccess) onFileAccess();
+    return std::fopen((std::string(FS_PREFIX) + name).c_str(), mode);
+}
+bool fs_exists(const char* name) {
+    std::ifstream file(std::string(FS_PREFIX) + name);
+    return file.good();
+}
+bool fs_remove(const char* name) {
+    return !failFileRemoval && std::remove((std::string(FS_PREFIX) + name).c_str()) == 0;
+}
+// The chamber state machine is outside these glycol lifecycle tests.
+void ChamberMode::updateState(Context& ctx, bool stayIdle) {
+    assert(stayIdle);
+    ctx.state = IDLE;
+}
+
 TempControl tempControl;
 HostExtendedSettings extendedSettings;
 ValueActuator defaultActuator;
@@ -80,6 +111,150 @@ struct Fixture {
     }
 };
 
+
+static void attach(TempControl& control, Fixture& fixture, ValueActuator& fan) {
+    control = TempControl{};
+    control.cc = fixture.cc;
+    control.cs = fixture.cs;
+    control.beerSensor = &fixture.sensor;
+    control.fridgeSensor = &fixture.glycol_sensor;
+    control.cooler = &fixture.cooler;
+    control.heater = &fixture.heater;
+    control.light = &fixture.light;
+    control.fan = &fan;
+    control.glycolRuntime.reset();
+    minTimes = fixture.times;
+    extendedSettings.glycol = true;
+    extendedSettings.glycolCoolingAlgorithm = fixture.selection;
+}
+
+static void manualLifecycleChecks() {
+    for (auto algorithm : {GlycolCooling::Algorithm::PredictiveCoast,
+                           GlycolCooling::Algorithm::PulseDose}) {
+        for (bool manual_already_off : {false, true}) {
+            for (bool restart_heater : {false, true}) {
+                Fixture f; ValueActuator fan;
+                f.selection = algorithm;
+                attach(tempControl, f, fan);
+                auto& control = tempControl;
+                minTimes.MIN_SWITCH_TIME = 5;
+                minTimes.MIN_HEAT_OFF_TIME = 7;
+                control.cc.lightAsHeater = restart_heater;
+                control.cs.mode = Modes::test;
+                control.cs.fridgeSetting = control.cs.beerSetting = INVALID_TEMP;
+                f.input.connected = f.glycol_input.connected = false;
+                // DeviceManager's manual output commands do not require sensors.
+                f.cooler.setActive(true); f.heater.setActive(true); f.light.setActive(true);
+                fan.setActive(true);
+                for (unsigned i = 0; i < 3; ++i) {
+                    ticks.now_ms = 1000000 + 1000 * i;
+                    control.updateState(); control.updateOutputs();
+#ifdef BREWPI_CHILLSIM_TEST
+                    assert(!f.cooler.isActive() && !f.heater.isActive() && !f.light.isActive());
+#else
+                    assert(f.cooler.isActive() && f.heater.isActive() && f.light.isActive());
+                    assert(fan.isActive());
+#endif
+                }
+                if (manual_already_off) {
+                    f.cooler.setActive(false); f.heater.setActive(false); f.light.setActive(false);
+                }
+                // Handoff must protect even an OFF edge made just before exit.
+                ticks.now_ms = 1010000;
+                control.setMode(Modes::beerConstant);
+                assert(!f.cooler.isActive() && !f.heater.isActive());
+                if (control.cc.lightAsHeater) assert(!f.light.isActive());
+                assert(!control.storedWithOutputActive);
+                assert(control.glycolRuntime.last_pump_active_s == 1010);
+                assert(control.glycolRuntime.last_heater_active_s == 1010);
+                assert(!control.glycolRuntime.cooling_output.pump_on);
+                f.input.connected = true;
+                f.input.value = q9(restart_heater ? 19 : 25);
+                f.sensor.init(); f.sensor.update();
+                control.cs.beerSetting = q9(21);
+                control.glycolRuntime.heating_output = control.cc.pidMax_heat;
+                for (unsigned elapsed = 0; elapsed <= 7; ++elapsed) {
+                    ticks.now_ms = 1010000 + elapsed * 1000;
+                    control.updateState(); control.updateOutputs();
+                    if (!restart_heater) {
+                        assert(f.cooler.isActive() == (elapsed >= 5));
+                    } else {
+#ifdef BREWPI_CHILLSIM_TEST
+                        assert(!f.heater.isActive() && !f.light.isActive());
+#else
+                        assert(f.light.isActive() == (elapsed >= 7));
+                        assert(!f.heater.isActive());
+#endif
+                    }
+                }
+                // Entering test mode also turns automatic outputs OFF before save.
+                ticks.now_ms += 500;
+                control.setMode(Modes::test);
+                assert(!f.cooler.isActive() && !f.heater.isActive());
+                if (control.cc.lightAsHeater) assert(!f.light.isActive());
+                assert(!control.storedWithOutputActive);
+            }
+        }
+    }
+    std::puts("manual relay ownership and guarded automatic handoff checks passed");
+}
+
+#ifdef ENABLE_GLYCOL_LOGGING
+static std::string readLog(const char* filename) {
+    std::ifstream file(filename);
+    return std::string(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+}
+static void loggingChecks() {
+    std::remove("glycol_log.csv"); std::remove("glycol_log.archived.csv");
+    { std::ofstream old("glycol_log.csv"); old << "legacy,columns\nlegacy,event\n"; }
+    glycolLog = GlycolLogger{};
+    glycolLog.logReboot();
+    assert(readLog("glycol_log.archived.csv") == "legacy,columns\nlegacy,event\n");
+    assert(readLog("glycol_log.csv").find("algorithm,temperature_c,setpoint_c") != std::string::npos);
+    Fixture f; ValueActuator fan; f.input.value = q9(25);
+    attach(tempControl, f, fan);
+    tempControl.cs.mode = Modes::beerConstant;
+    f.sensor.init(); f.sensor.update();
+    ticks.now_ms = 60000;
+    auto before = readLog("glycol_log.csv");
+    tempControl.updateState();
+    assert(readLog("glycol_log.csv") == before); // decision does not write storage
+    tempControl.updateOutputs();
+    auto cooling = readLog("glycol_log.csv");
+    assert(cooling.size() > before.size());
+    assert(cooling.find("IDLE,FULL_COOLING,predictive-coast-v1,25.000000") != std::string::npos);
+    tempControl.updateOutputs();
+    assert(readLog("glycol_log.csv") == cooling); // unchanged state is not logged
+    // Any logging during protective reset must see physical commands already OFF.
+    onFileAccess = [&]() {
+        assert(!f.cooler.isActive() && !f.heater.isActive() && !f.light.isActive() && !fan.isActive());
+    };
+    f.input.fail_read = true; f.sensor.update(); ticks.now_ms = 60500;
+    tempControl.updateState(); tempControl.updateOutputs();
+    onFileAccess = {};
+    auto fault = readLog("glycol_log.csv");
+    const auto off = fault.find("FULL_COOLING,IDLE,predictive-coast-v1");
+    assert(off != std::string::npos);
+    assert(fault.substr(off).find(",0.000000000,0.500,") != std::string::npos);
+    assert(fault.find("DISABLED_OR_SENSOR_FAULT") != std::string::npos);
+    extendedSettings.glycolCoolingAlgorithm = GlycolCooling::Algorithm::PulseDose;
+    ticks.now_ms = 61000;
+    tempControl.updateState(); tempControl.updateOutputs();
+    assert(readLog("glycol_log.csv").find("adaptive-pulse-dose-v1") != std::string::npos);
+    // Failed legacy migration preserves both files and never appends new rows.
+    { std::ofstream old("glycol_log.csv"); old << "legacy,columns\n"; }
+    const auto archive = readLog("glycol_log.archived.csv");
+    glycolLog = GlycolLogger{}; failFileRemoval = true;
+    glycolLog.logReboot();
+    assert(readLog("glycol_log.csv") == "legacy,columns\n");
+    assert(readLog("glycol_log.archived.csv") == archive);
+    failFileRemoval = false;
+    glycolLog.clearLog();
+    assert(!fs_exists("/glycol_log.archived.csv"));
+    std::puts("optional transition logging, relay ordering and schema migration checks passed");
+}
+#endif
+
 int main() {
     // Raw cache is one sensor read per update, never another bus read by control.
     {
@@ -111,7 +286,7 @@ int main() {
         f.update(60000);
         assert(f.pump() && f.state == COOLING_MIN_TIME);
         assert(std::abs(f.runtime.cooling_output.temperature_c - 21.5) < 1e-12);
-        assert(f.runtime.t_pump_on == 60000);
+        assert(f.runtime.pump_started_s == 60);
         auto gain = f.runtime.cooling_output.budget_gain_c_per_s;
         f.update(60500, false); // UI duplicate cannot consume another sample/second
         assert(f.runtime.cooling_last_step_ms == 60000);
@@ -120,7 +295,6 @@ int main() {
         f.update(62000);
         assert(!f.pump()); // small error produces the predictive minimum 2-second pulse
         assert(f.runtime.cooling_output.actual_on_s == 2);
-        assert(f.runtime.cooling_duration_s == 2);
         assert(f.runtime.cooling_output.budget_gain_c_per_s == gain);
     }
     // Near-target blind cooling uses half the error divided by the response gain.
@@ -217,7 +391,7 @@ int main() {
         f.update(70000); assert(!f.pump());
         for (unsigned s=71;s<130;++s) { f.update(s*1000); assert(!f.pump()); }
         f.update(130000); assert(f.pump());
-        assert(f.runtime.t_pump_on==130000);
+        assert(f.runtime.pump_started_s==130);
     }
     // Normal builds retain heating PID/window; test builds must never request heat.
     {
@@ -384,5 +558,9 @@ int main() {
                            "predictive_coast")==0);
         defaultActuator.setActive(false);
     }
+    manualLifecycleChecks();
+#ifdef ENABLE_GLYCOL_LOGGING
+    loggingChecks();
+#endif
     std::puts("selectable cooling BrewPi integration checks passed");
 }

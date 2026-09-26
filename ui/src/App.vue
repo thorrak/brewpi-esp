@@ -119,7 +119,7 @@ import {
   Cog8ToothIcon
 } from '@heroicons/vue/24/outline'
 // import brewpiespLogoUrl from "@/assets/brewpiesp_logo.svg";
-import { i18n } from "@/main.js";
+import { i18n } from "@/i18n";
 import {onBeforeUnmount, onMounted} from "vue";
 import { ref } from "vue";
 import { useTempControlStore } from "@/stores/TempControlStore.js";

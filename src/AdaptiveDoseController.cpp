@@ -64,56 +64,14 @@ void Controller::resetTransient() {
 }
 
 void Controller::clearMeasurements() {
-    samples_.clear();
-    short_samples_.clear();
-    sum_y_ = sum_ty_ = sum_t_ = sum_tt_ = short_sum_ = 0.0;
-    time_origin_ = nanValue();
+    measurements_.clear();
     rate_c_per_s_ = 0.0;
 }
 
 bool Controller::observe(double time_s, double value_c) {
     raw_c_ = value_c;
-    if (!std::isfinite(time_origin_)) time_origin_ = time_s;
-    const double local_time = time_s - time_origin_;
-    if (!samples_.append({time_s, value_c})) return false;
-    sum_y_ += value_c;
-    sum_ty_ += local_time * value_c;
-    sum_t_ += local_time;
-    sum_tt_ += local_time * local_time;
-    while (samples_.size && samples_.at(0).time_s < time_s - config_.rate_window_s) {
-        const Sample old = samples_.pop();
-        const double local_t = old.time_s - time_origin_;
-        sum_y_ -= old.value_c;
-        sum_ty_ -= local_t * old.value_c;
-        sum_t_ -= local_t;
-        sum_tt_ -= local_t * local_t;
-    }
-    if (local_time >= 3600.0) {
-        time_origin_ = time_s;
-        // Separate ordered sums match Python's four generator sums.
-        sum_y_ = sum_ty_ = sum_t_ = sum_tt_ = 0.0;
-        for (std::size_t i = 0; i < samples_.size; ++i) sum_y_ += samples_.at(i).value_c;
-        for (std::size_t i = 0; i < samples_.size; ++i) {
-            const Sample& sample = samples_.at(i);
-            sum_ty_ += (sample.time_s - time_s) * sample.value_c;
-        }
-        for (std::size_t i = 0; i < samples_.size; ++i) sum_t_ += samples_.at(i).time_s - time_s;
-        for (std::size_t i = 0; i < samples_.size; ++i) {
-            const double t = samples_.at(i).time_s - time_s;
-            sum_tt_ += t * t;
-        }
-    }
-    if (!short_samples_.append({time_s, value_c})) return false;
-    short_sum_ += value_c;
-    while (short_samples_.at(0).time_s < time_s - config_.measurement_window_s) {
-        short_sum_ -= short_samples_.pop().value_c;
-    }
-    temperature_c_ = short_sum_ / static_cast<double>(short_samples_.size);
-    const double n = static_cast<double>(samples_.size);
-    const double denominator = n * sum_tt_ - sum_t_ * sum_t_;
-    rate_c_per_s_ = samples_.size >= 3 && denominator > 1e-9
-        ? (n * sum_ty_ - sum_t_ * sum_y_) / denominator : 0.0;
-    return true;
+    return measurements_.observe(time_s, value_c, config_.rate_window_s,
+        config_.measurement_window_s, temperature_c_, rate_c_per_s_);
 }
 
 bool Controller::switchPump(double time_s, bool desired, bool fail_off) {

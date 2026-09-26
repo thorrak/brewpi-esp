@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 using namespace WaterTestCore;
+struct Sample { uint64_t address, conversion, read; int16_t raw; bool valid; };
 JsonDocument manifest, terminal, bootList;
 Program program;
 uint64_t nativeNow = 1000000;
@@ -39,7 +40,7 @@ int savedControl = 0;
 void settingsToManifest(JsonObject o) { o["mode"] = "o"; o["fixture"] = true; }
 bool append(Record record) {
     record.boot = bootIndex; record.seq = records.size();
-    record.t_us = records.empty() ? nativeNow : std::max(nativeNow, records.back().t_us);
+    record.t_us = std::max(record.t_us ? record.t_us : nativeNow, records.empty() ? uint64_t(0) : records.back().t_us);
     seal(record); assert(valid(record)); records.push_back(record); return true;
 }
 // @@SOURCE_FUNCTIONS@@
@@ -59,11 +60,10 @@ void makeManifest() {
     // @@MANIFEST_SOURCE@@
 }
 void sample(bool beer, int16_t raw, bool validSample) {
-    // Record packing is copied verbatim at build time from processSample.
-    struct Sample { uint64_t address, conversion, read; int16_t raw; bool valid; };
+    // Exercise the production sample-record builder injected at build time.
     Sample sample{0, nativeNow-750000, nativeNow, raw, validSample};
     nativeNow += 1000; // Record assembly follows the actual read.
-    // @@SAMPLE_SOURCE@@
+    append(sampleRecord(sample, beer));
     if (beer) program.sample(sample.read/1e6, raw/16.0+1/16.0, validSample, nowUs()/1e6);
 }
 void outputRequest(const char* method, const char* suffix, const JsonDocument& payload) {

@@ -3,7 +3,6 @@
 
 #include <math.h>
 
-#include "GlycolLog.h"
 #include "Ticks.h"
 
 #if TEMP_CONTROL_STATIC
@@ -266,21 +265,15 @@ void updateHeatingState(GlycolMode::Context& ctx) {
 void applyCoolingOutput(GlycolMode::Context& ctx, bool wasCooling) {
     auto& runtime = ctx.runtime;
     const auto& output = runtime.cooling_output;
-    runtime.current_cooling_rate = output.rate_c_per_s * 60.0; // always C/min
-    runtime.cooling_confirmed = output.rate_c_per_s < 0;
-    runtime.force_minimum_cooling = false;
     runtime.heating_wait_reason = GLYCOL_HEATING_WAIT_NONE;
     resetHeatingWindow(ctx);
     resetWaitTime(ctx);
 
     if (output.pump_on) {
         if (!wasCooling) {
-            runtime.t_pump_on = ticks.millis();
             runtime.pump_started_s = runtime.clock_elapsed_ms / 1000.0;
-            runtime.temp_at_pump_on = output.temperature_c;
         }
         double activeSeconds = runtime.clock_elapsed_ms / 1000.0 - runtime.pump_started_s;
-        runtime.cooling_duration_s = static_cast<uint16_t>(std::min(65535.0, activeSeconds));
         runtime.state = output.full_cooling ? GLYCOL_EMERGENCY_COOLING : GLYCOL_COOLING;
         // Full cooling is a diagnostic label, not an overriding emergency mode.
         ctx.state = activeSeconds < runtime.cooling.minOnSeconds()
@@ -290,18 +283,9 @@ void applyCoolingOutput(GlycolMode::Context& ctx, bool wasCooling) {
     } else {
         if (wasCooling) {
             runtime.t_pump_off = ticks.millis();
-            runtime.temp_at_pump_off = output.temperature_c;
-            runtime.min_temp_reached = output.temperature_c;
-            runtime.cooling_rate_at_pump_off = runtime.current_cooling_rate;
-            runtime.cooling_duration_s = static_cast<uint16_t>(std::min(65535.0,
-                static_cast<uint32_t>(runtime.t_pump_off - runtime.t_pump_on) / 1000.0));
         }
         runtime.state = output.phase == GlycolCooling::Phase::Coast
             ? GLYCOL_COASTING : GLYCOL_IDLE;
-        if (runtime.state == GLYCOL_COASTING) {
-            runtime.min_temp_reached = std::min(runtime.min_temp_reached,
-                                              static_cast<float>(output.temperature_c));
-        }
         ctx.state = IDLE;
         ctx.lastIdleTime = ticks.seconds();
     }
@@ -387,17 +371,11 @@ void suspend(Context& ctx) {
     ctx.runtime.cooling_output = ctx.runtime.cooling.inhibit(now);
     ctx.runtime.cooling_step_initialized = false;
     if (wasCooling) ctx.runtime.t_pump_off = ticks.millis();
-    ctx.runtime.current_cooling_rate = 0;
-    ctx.runtime.cooling_confirmed = false;
-    ctx.runtime.setpoint_changed_this_cycle = false;
-    ctx.runtime.force_minimum_cooling = false;
-    ctx.runtime.rate_buffer_count = 0;
-    ctx.runtime.rate_buffer_head = 0;
     ctx.runtime.heating_output = 0;
     transitionToIdle(ctx);
 }
 
-bool updateState(Context& ctx) {
+void updateState(Context& ctx) {
     ctx.runtime.cooling.request(ctx.requestedAlgorithm);
     double now = monotonicSeconds(ctx);
     bool wasCooling = stateIsCooling(ctx);
@@ -407,18 +385,18 @@ bool updateState(Context& ctx) {
     if (ctx.cs.beerSetting == INVALID_TEMP || raw == INVALID_TEMP ||
         !ctx.beerSensor->isConnected()) {
         suspend(ctx);
-        return false;
+        return;
     }
 
     if (ctx.runtime.state == GLYCOL_HEATING) {
         ctx.runtime.cooling_output = ctx.runtime.cooling.inhibit(now);
         ctx.runtime.cooling_step_initialized = false;
         updateHeatingState(ctx);
-        return false;
+        return;
     }
     if (ctx.runtime.state == GLYCOL_IDLE && shouldStartHeating(ctx)) {
         transitionToHeating(ctx);
-        return false;
+        return;
     }
 
     // Apply the heat->cool/boot guard BEFORE invoking the cooling core. A
@@ -436,7 +414,7 @@ bool updateState(Context& ctx) {
             resetWaitTime(ctx);
         }
         ctx.lastIdleTime = ticks.seconds();
-        return false;
+        return;
     }
 
     // The raw sensor is already sampled/cached by updateTemperatures. Do not
@@ -444,15 +422,13 @@ bool updateState(Context& ctx) {
     // Repeated UI calls hold the last command until the next 1 Hz decision.
     if (ctx.runtime.cooling_step_initialized &&
         ctx.runtime.clock_elapsed_ms - ctx.runtime.cooling_last_step_ms < 1000) {
-        return false;
+        return;
     }
     ctx.runtime.cooling_step_initialized = true;
     ctx.runtime.cooling_last_step_ms = ctx.runtime.clock_elapsed_ms;
     ctx.runtime.cooling_output = ctx.runtime.cooling.step(
         now, rawCelsius(raw), rawCelsius(ctx.cs.beerSetting));
     applyCoolingOutput(ctx, wasCooling);
-    // Legacy persisted k/C_off/L are neither read nor written by either selectable cooling algorithm.
-    return false;
 }
 
 } // namespace GlycolMode

@@ -28,7 +28,7 @@ void updatePID(Context& ctx, unsigned char& integralUpdateCounter);
 // Immediate fault/mode inhibition: preserves each algorithm's learned values and actual OFF time.
 void suspend(Context& ctx);
 
-// Always false: cooling learning is intentionally RAM-only; no legacy file writes.
-bool updateState(Context& ctx);
+// Cooling learning is RAM-only; updating state does not persist legacy parameters.
+void updateState(Context& ctx);
 
 } // namespace GlycolMode

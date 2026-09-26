@@ -65,6 +65,33 @@ void uploadOnce() {
   } catch (const Native::Yield &) {
   }
 }
+void submitAndResume() {
+  fresh(3, 320, false);
+  for (unsigned n = 0; n < 100 && WaterTest::uploadState != "submitted"; ++n)
+    uploadOnce();
+  assert(WaterTest::uploadState == "submitted");
+  JsonDocument release;
+  release["probe_returned"] = true;
+  std::string error;
+  assert(WaterTest::requestResume(release, error));
+  WaterTest::tick();
+  assert(!WaterTest::controlOwned());
+}
+void makeLegacyMetadata() {
+  WaterTest::manifest["acquisition"].remove("local_metadata_version");
+  assert(WaterTest::atomicJson(WaterTest::manifestPath, WaterTest::manifest));
+  WaterTest::bootList.remove("test_id");
+  WaterTest::bootList.remove("device_guid");
+  WaterTest::bootList.remove("schema_version");
+  assert(WaterTest::atomicJson(WaterTest::bootsPath, WaterTest::bootList));
+  JsonDocument ack;
+  if (WaterTest::readJson(WaterTest::ackPath, ack)) {
+    ack.remove("test_id");
+    ack.remove("device_guid");
+    ack.remove("schema_version");
+    assert(WaterTest::atomicJson(WaterTest::ackPath, ack));
+  }
+}
 void verifyJournal() {
   FILE *f = fs_open(WaterTest::journalPath, "rb");
   assert(f);
@@ -83,7 +110,227 @@ int main(int argc, char **argv) {
   initializeHardware();
   std::string error;
   std::string scenario = argv[1];
-  if (scenario == "normal_stop") {
+  if (scenario == "slow_sensor_fault" || scenario == "slow_temperature_limit") {
+    start();
+    advance(302);
+    Native::fsyncDelayUs = 12000000;
+    const uint64_t readAt = 302100000;
+    fresh(readAt / 1e6, scenario == "slow_temperature_limit" ? 272 : 320, scenario != "slow_sensor_fault");
+    assert(!WaterTest::active() && !WaterTest::physicalPump());
+    assert(tempControl.pump.edgeTimes.back() == readAt);
+    assert(WaterTest::terminal["reason"] ==
+           (scenario == "slow_temperature_limit" ? "temperature_limit" : "beer_sensor_fault"));
+    FILE *journal = fs_open(WaterTest::journalPath, "rb");
+    Record record{};
+    bool foundEdge = false;
+    while (fread(&record, sizeof(record), 1, journal) == 1)
+      if (record.kind == 3 && record.role == 0 && (record.flags & 8) && !(record.flags & 2)) {
+        assert(record.t_us == readAt);
+        foundEdge = true;
+      }
+    fclose(journal);
+    assert(foundEdge);
+    verifyJournal();
+  } else if (scenario == "slow_deadline") {
+    start();
+    advance(310);
+    Native::clock = 311000000;
+    Native::fsyncDelayUs = 3000000;
+    for (unsigned n = 0; n < 6; ++n)
+      WaterTest::onSample(WaterTest::beerAddress, 320, true, 310000000, 310500000 + n);
+    WaterTest::tick();
+    assert(!WaterTest::physicalPump());
+    // A synchronous write cannot be interrupted. Recheck immediately afterward,
+    // rather than allowing the remaining queue to extend the pulse further.
+    assert(tempControl.pump.edgeTimes.back() == 314000000);
+    verifyJournal();
+  } else if (scenario == "slow_on_edge" || scenario == "slow_phase") {
+    start();
+    advance(300);
+    Native::clock = 302000000;
+    Native::fsyncDelayUs = scenario == "slow_on_edge" ? 12000000 : 6000000;
+    WaterTest::tick();
+    assert(!WaterTest::physicalPump());
+    assert(tempControl.pump.edgeTimes.size() == 2);
+    assert(tempControl.pump.edgeTimes.front() == 302000000);
+    assert(tempControl.pump.edgeTimes.back() == 314000000);
+    verifyJournal();
+  } else if (scenario == "slow_storage_repair") {
+    start();
+    advance(302);
+    Native::fsyncUntilFail = 0;
+    Native::truncateHook = [] {
+      assert(!WaterTest::physicalPump() && !WaterTest::physicalHeat());
+      Native::clock += 12000000;
+    };
+    fresh(302.1);
+    assert(!WaterTest::active());
+    assert(tempControl.pump.edgeTimes.back() == 302100000);
+    assert(WaterTest::terminal["reason"] == "recording_failure");
+    verifyJournal();
+  } else if (scenario == "queue_snapshot") {
+    start();
+    Native::clock = 3000000;
+    uint64_t nextRead = Native::clock;
+    Native::fsyncHook = [&] {
+      WaterTest::onSample(WaterTest::beerAddress, 320, true, 2250000, ++nextRead);
+    };
+    WaterTest::onSample(WaterTest::beerAddress, 320, true, 2250000, Native::clock);
+    WaterTest::onSample(WaterTest::glycolAddress, 112, true, 2250000, Native::clock);
+    WaterTest::tick();
+    assert(WaterTest::active());
+    assert(uxQueueMessagesWaiting(WaterTest::samples) == 2);
+    Native::fsyncHook = {};
+    verifyJournal();
+  } else if (scenario == "slow_queue_overflow" || scenario == "queued_unexpected_output") {
+    start();
+    advance(302);
+    Native::clock = 302100000;
+    Native::fsyncDelayUs = 12000000;
+    const unsigned count = scenario == "slow_queue_overflow" ? 65 : 1;
+    for (unsigned n = 0; n < count; ++n)
+      WaterTest::onSample(WaterTest::beerAddress, 320, true, 301350000, Native::clock + n);
+    if (scenario == "queued_unexpected_output")
+      tempControl.heater->setActive(true);
+    WaterTest::tick();
+    assert(!WaterTest::physicalPump() && !WaterTest::physicalHeat());
+    assert(tempControl.pump.edgeTimes.back() == 302100000);
+    assert(WaterTest::terminal["reason"] ==
+           (scenario == "slow_queue_overflow" ? "sample_queue_overflow" : "unexpected_output"));
+    verifyJournal();
+  } else if (scenario == "cleanup_ack_failure" || scenario == "cleanup_resume_failure" ||
+             scenario == "cleanup_manifest_failure") {
+    start();
+    submitAndResume();
+    const std::string previous = WaterTest::manifest["test_id"];
+    Native::removeFailurePath = scenario == "cleanup_ack_failure" ? WaterTest::ackPath :
+                                scenario == "cleanup_resume_failure" ? WaterTest::resumedPath : WaterTest::manifestPath;
+    fresh(4);
+    auto d = survey();
+    assert(WaterTest::requestStart(d, error));
+    WaterTest::tick();
+    assert(!WaterTest::active() && !WaterTest::controlOwned());
+    assert(WaterTest::manifest["test_id"] == previous);
+    assert(WaterTest::reason.find("Unable to remove") != std::string::npos);
+    assert(fs_exists(Native::removeFailurePath.c_str()));
+    Native::removeFailurePath.clear();
+    assert(WaterTest::requestStart(d, error));
+    WaterTest::tick();
+    assert(WaterTest::active());
+    assert(WaterTest::manifest["test_id"] != previous);
+  } else if (scenario == "cleanup_ack_before_reboot" || scenario == "cleanup_resume_before_reboot" ||
+             scenario == "cleanup_manifest_before_reboot") {
+    start();
+    submitAndResume();
+    Native::removeFailurePath = scenario == "cleanup_ack_before_reboot" ? WaterTest::ackPath :
+                                scenario == "cleanup_resume_before_reboot" ? WaterTest::resumedPath : WaterTest::manifestPath;
+    fresh(4);
+    auto d = survey();
+    assert(WaterTest::requestStart(d, error));
+    WaterTest::tick();
+    assert(!WaterTest::active());
+    assert(WaterTest::reason.find("Unable to remove") != std::string::npos);
+  } else if (scenario == "cleanup_after_reboot") {
+    assert(!WaterTest::controlOwned() && !WaterTest::active());
+    assert(WaterTest::manifest.isNull() || WaterTest::uploadState == "submitted");
+    start();
+    assert(WaterTest::sameTest(WaterTest::bootList));
+    assert(!fs_exists(WaterTest::ackPath) && !fs_exists(WaterTest::resumedPath));
+  } else if (scenario == "foreign_markers_before_reboot" || scenario == "foreign_finish_before_reboot") {
+    start();
+    submitAndResume();
+    JsonDocument oldAck, oldRelease, oldFinish;
+    assert(WaterTest::readJson(WaterTest::ackPath, oldAck));
+    assert(WaterTest::readJson(WaterTest::resumedPath, oldRelease));
+    assert(WaterTest::readJson(WaterTest::finishPath, oldFinish));
+    start();
+    if (scenario == "foreign_markers_before_reboot") {
+      fresh(3, 320, false);
+      assert(WaterTest::atomicJson(WaterTest::ackPath, oldAck));
+      assert(WaterTest::atomicJson(WaterTest::resumedPath, oldRelease));
+    } else {
+      WaterTest::closeJournal();
+      assert(WaterTest::atomicJson(WaterTest::finishPath, oldFinish));
+    }
+  } else if (scenario == "foreign_markers_after_reboot") {
+    assert(WaterTest::controlOwned() && !WaterTest::active());
+    assert(WaterTest::uploadState == "pending");
+    assert(fs_exists(WaterTest::journalPath));
+    uploadOnce();
+    JsonDocument first;
+    assert(deserializeJson(first, Native::payloads.back()) == DeserializationError::Ok);
+    assert(first["installation"].is<JsonObject>());
+    assert(first["test_id"] == WaterTest::manifest["test_id"]);
+    assert(WaterTest::controlOwned());
+  } else if (scenario == "foreign_finish_after_reboot") {
+    assert(WaterTest::controlOwned() && !WaterTest::active());
+    assert(WaterTest::terminal["outcome"] == "interrupted");
+    assert(WaterTest::terminal["test_id"] == WaterTest::manifest["test_id"]);
+    assert(WaterTest::bootList["boots"].size() == 2);
+    verifyJournal();
+  } else if (scenario == "foreign_boots_before_reboot" || scenario == "untagged_boots_before_reboot") {
+    start();
+    fresh(3, 320, false);
+    if (scenario == "foreign_boots_before_reboot")
+      WaterTest::bootList["test_id"] = "a-different-test";
+    else
+      WaterTest::bootList.remove("test_id");
+    assert(WaterTest::atomicJson(WaterTest::bootsPath, WaterTest::bootList));
+  } else if (scenario == "invalid_boots_after_reboot") {
+    assert(WaterTest::controlOwned() && !WaterTest::active());
+    assert(WaterTest::uploadState == "error");
+    uploadOnce();
+    assert(Native::payloads.empty());
+    assert(fs_exists(WaterTest::journalPath));
+  } else if (scenario == "submitted_before_reboot" || scenario == "legacy_submitted_before_reboot") {
+    start();
+    submitAndResume();
+    if (scenario == "legacy_submitted_before_reboot")
+      makeLegacyMetadata();
+  } else if (scenario == "submitted_after_reboot") {
+    assert(!WaterTest::controlOwned() && !WaterTest::active());
+    assert(WaterTest::uploadState == "submitted");
+    uploadOnce();
+    assert(Native::payloads.empty());
+    assert(!fs_exists(WaterTest::journalPath));
+  } else if (scenario == "legacy_submitted_after_reboot") {
+    assert(!WaterTest::controlOwned() && !WaterTest::active());
+    assert(WaterTest::uploadState == "pending");
+    assert(!fs_exists(WaterTest::journalPath));
+    uploadOnce();
+    uploadOnce();
+    assert(WaterTest::uploadState == "submitted");
+    assert(Native::payloads.size() == 2);
+  } else if (scenario == "legacy_active_before_reboot" || scenario == "legacy_pending_before_reboot") {
+    start();
+    advance(302);
+    if (scenario == "legacy_pending_before_reboot") {
+      fresh(302.1, 320, false);
+      uploadOnce();
+      uploadOnce();
+    } else
+      WaterTest::closeJournal();
+    makeLegacyMetadata();
+  } else if (scenario == "legacy_active_after_reboot" || scenario == "legacy_pending_after_reboot") {
+    assert(WaterTest::controlOwned() && !WaterTest::active());
+    assert(WaterTest::uploadState == "pending");
+    assert(WaterTest::bootList["test_id"] == WaterTest::manifest["test_id"]);
+    JsonDocument durableBoots;
+    assert(WaterTest::readJson(WaterTest::bootsPath, durableBoots));
+    assert(durableBoots["test_id"] == WaterTest::manifest["test_id"]);
+    if (scenario == "legacy_active_after_reboot")
+      assert(WaterTest::terminal["outcome"] == "interrupted");
+    else {
+      uploadOnce();
+      JsonDocument first;
+      assert(deserializeJson(first, Native::payloads.back()) == DeserializationError::Ok);
+      assert(first["installation"].is<JsonObject>());
+      uploadOnce();
+      assert(deserializeJson(first, Native::payloads.back()) == DeserializationError::Ok);
+      assert(first["first_seq"] == 0);
+    }
+    verifyJournal();
+  } else if (scenario == "normal_stop") {
     start();
     advance(302);
     assert(WaterTest::physicalPump());

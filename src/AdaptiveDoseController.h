@@ -9,7 +9,7 @@
  */
 #pragma once
 
-#include <cstddef>
+#include "CoolingMeasurements.h"
 #include <cstdint>
 
 namespace AdaptiveCooling {
@@ -85,30 +85,6 @@ public:
     static const char* phaseName(Phase phase);
 
 private:
-    struct Sample { double time_s; double value_c; };
-    // Append precedes expiry, exactly as in the Python reference. Spare space
-    // accommodates 91 rate samples + one append and 13 short samples + append.
-    static constexpr std::size_t kRateCapacity = 128;
-    static constexpr std::size_t kShortCapacity = 32;
-    template <std::size_t N> struct Samples {
-        Sample values[N];
-        std::size_t begin = 0;
-        std::size_t size = 0;
-        void clear() { begin = 0; size = 0; }
-        const Sample& at(std::size_t i) const { return values[(begin + i) % N]; }
-        bool append(Sample sample) {
-            if (size == N) return false;
-            values[(begin + size) % N] = sample;
-            ++size;
-            return true;
-        }
-        Sample pop() {
-            Sample sample = values[begin];
-            begin = (begin + 1) % N;
-            --size;
-            return sample;
-        }
-    };
 
     Config config_;
     bool config_valid_;
@@ -117,9 +93,7 @@ private:
     double last_edge_s_;
     double last_time_s_;
     double setpoint_c_;
-    Samples<kRateCapacity> samples_;
-    Samples<kShortCapacity> short_samples_;
-    double sum_y_, sum_ty_, sum_t_, sum_tt_, time_origin_, short_sum_;
+    GlycolCooling::Measurements measurements_;
     double temperature_c_, raw_c_, rate_c_per_s_;
     uint32_t learning_updates_;
     double gain_;

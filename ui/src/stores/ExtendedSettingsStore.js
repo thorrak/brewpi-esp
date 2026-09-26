@@ -86,51 +86,51 @@ export const useExtendedSettingsStore = defineStore("ExtendedSettingsStore", () 
         return value === 'predictive_coast' || value === 'pulse_dose';
     }
 
-    async function setExtendedSettings(glycolInput, largeTFTInput, invertTFTInput, resetScreenOnPinInput, SETTINGS_CHOICEInput, MIN_COOL_OFF_TIMEInput, MIN_HEAT_OFF_TIMEInput, MIN_COOL_ON_TIMEInput, MIN_HEAT_ON_TIMEInput, MIN_COOL_OFF_TIME_FRIDGE_CONSTANTInput, MIN_SWITCH_TIMEInput, COOL_PEAK_DETECT_TIMEInput, HEAT_PEAK_DETECT_TIMEInput, glycolCoolingAlgorithmInput = undefined) {
+    async function setExtendedSettings(input) {
         try {
-            const algorithm = glycolCoolingAlgorithmInput === undefined ? glycolCoolingAlgorithm.value : glycolCoolingAlgorithmInput;
+            const algorithm = input.glycolCoolingAlgorithm === undefined ? glycolCoolingAlgorithm.value : input.glycolCoolingAlgorithm;
             if ((hasGlycolCoolingAlgorithm.value && !isCoolingAlgorithm(algorithm)) ||
-                (!hasGlycolCoolingAlgorithm.value && glycolCoolingAlgorithmInput !== undefined)) {
+                (!hasGlycolCoolingAlgorithm.value && input.glycolCoolingAlgorithm !== undefined)) {
                 extendedSettingsUpdateError.value = true;
                 return false;
             }
             const remote_api = mande("/api/extended/", genCSRFOptions());
             const settings = {
-                glycol: glycolInput,
-                largeTFT: largeTFTInput,
-                invertTFT: invertTFTInput,
-                resetScreenOnPin: resetScreenOnPinInput,
-                SETTINGS_CHOICE: SETTINGS_CHOICEInput,
-                MIN_COOL_OFF_TIME: MIN_COOL_OFF_TIMEInput,
-                MIN_HEAT_OFF_TIME: MIN_HEAT_OFF_TIMEInput,
-                MIN_COOL_ON_TIME: MIN_COOL_ON_TIMEInput,
-                MIN_HEAT_ON_TIME: MIN_HEAT_ON_TIMEInput,
-                MIN_COOL_OFF_TIME_FRIDGE_CONSTANT: MIN_COOL_OFF_TIME_FRIDGE_CONSTANTInput,
-                MIN_SWITCH_TIME: MIN_SWITCH_TIMEInput,
-                COOL_PEAK_DETECT_TIME: COOL_PEAK_DETECT_TIMEInput,
-                HEAT_PEAK_DETECT_TIME: HEAT_PEAK_DETECT_TIMEInput,
+                glycol: input.glycol,
+                largeTFT: input.largeTFT,
+                invertTFT: input.invertTFT,
+                resetScreenOnPin: input.resetScreenOnPin,
+                SETTINGS_CHOICE: input.SETTINGS_CHOICE,
+                MIN_COOL_OFF_TIME: input.MIN_COOL_OFF_TIME,
+                MIN_HEAT_OFF_TIME: input.MIN_HEAT_OFF_TIME,
+                MIN_COOL_ON_TIME: input.MIN_COOL_ON_TIME,
+                MIN_HEAT_ON_TIME: input.MIN_HEAT_ON_TIME,
+                MIN_COOL_OFF_TIME_FRIDGE_CONSTANT: input.MIN_COOL_OFF_TIME_FRIDGE_CONSTANT,
+                MIN_SWITCH_TIME: input.MIN_SWITCH_TIME,
+                COOL_PEAK_DETECT_TIME: input.COOL_PEAK_DETECT_TIME,
+                HEAT_PEAK_DETECT_TIME: input.HEAT_PEAK_DETECT_TIME,
             };
             if (hasGlycolCoolingAlgorithm.value) {
                 settings.glycolCoolingAlgorithm = algorithm;
             }
             const response = await remote_api.put(settings);
             if (response && response.status === 'ok') {
-                glycol.value = glycolInput;
+                glycol.value = settings.glycol;
                 if (hasGlycolCoolingAlgorithm.value) {
                     glycolCoolingAlgorithm.value = algorithm;
                 }
-                largeTFT.value = largeTFTInput;
-                invertTFT.value = invertTFTInput;
-                resetScreenOnPin.value = resetScreenOnPinInput;
-                SETTINGS_CHOICE.value = SETTINGS_CHOICEInput;
-                MIN_COOL_OFF_TIME.value = MIN_COOL_OFF_TIMEInput;
-                MIN_HEAT_OFF_TIME.value = MIN_HEAT_OFF_TIMEInput;
-                MIN_COOL_ON_TIME.value = MIN_COOL_ON_TIMEInput;
-                MIN_HEAT_ON_TIME.value = MIN_HEAT_ON_TIMEInput;
-                MIN_COOL_OFF_TIME_FRIDGE_CONSTANT.value = MIN_COOL_OFF_TIME_FRIDGE_CONSTANTInput;
-                MIN_SWITCH_TIME.value = MIN_SWITCH_TIMEInput;
-                COOL_PEAK_DETECT_TIME.value = COOL_PEAK_DETECT_TIMEInput;
-                HEAT_PEAK_DETECT_TIME.value = HEAT_PEAK_DETECT_TIMEInput;
+                largeTFT.value = settings.largeTFT;
+                invertTFT.value = settings.invertTFT;
+                resetScreenOnPin.value = settings.resetScreenOnPin;
+                SETTINGS_CHOICE.value = settings.SETTINGS_CHOICE;
+                MIN_COOL_OFF_TIME.value = settings.MIN_COOL_OFF_TIME;
+                MIN_HEAT_OFF_TIME.value = settings.MIN_HEAT_OFF_TIME;
+                MIN_COOL_ON_TIME.value = settings.MIN_COOL_ON_TIME;
+                MIN_HEAT_ON_TIME.value = settings.MIN_HEAT_ON_TIME;
+                MIN_COOL_OFF_TIME_FRIDGE_CONSTANT.value = settings.MIN_COOL_OFF_TIME_FRIDGE_CONSTANT;
+                MIN_SWITCH_TIME.value = settings.MIN_SWITCH_TIME;
+                COOL_PEAK_DETECT_TIME.value = settings.COOL_PEAK_DETECT_TIME;
+                HEAT_PEAK_DETECT_TIME.value = settings.HEAT_PEAK_DETECT_TIME;
                 extendedSettingsUpdateError.value = false;
                 return true;
             } else {
