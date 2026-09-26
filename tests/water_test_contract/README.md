@@ -21,7 +21,7 @@ ESP-IDF HTTP, task scheduling, flash durability, or electrical behavior.
 
 A deterministic synthetic water/bath history runs the actual three-pulse state
 machine, including one invalid glycol sample during pumping. The generated JSON
-is ingested by the actual portal API with public submissions enabled, testing
+is ingested by the actual portal API without any upload credentials or enablement setting, testing
 HTTP without redirects, finish-before-batch order, reversed batch arrival,
 acknowledgements through the actual firmware acknowledgement helpers, and unchanged retries. The real analysis worker must generate
 a replay-v2 comparison and PNG with the unchanged Chillsim package. This validates

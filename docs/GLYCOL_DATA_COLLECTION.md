@@ -98,8 +98,9 @@ or stop failed to reach the device. Other configuration requests return HTTP 409
 while experiment ownership is held.
 
 The server contract is in the collection portal's `docs/API.md`. Its water-test
-API must be reachable on port 80 without an HTTPS redirect. The portal operator
-enables opted-in public submissions; participants do not configure an upload token.
+API must be reachable on port 80 without an HTTPS redirect. Uploads require no
+credential or enablement setting; participant consent, schema validation, request
+limits, and immutable retry checks remain enforced.
 GUID-keyed result pages are unlisted and display the setup survey and comparison.
 
 ## Build and verify

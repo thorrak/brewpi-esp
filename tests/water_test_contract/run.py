@@ -70,7 +70,7 @@ def main():
 
 def exercise_portal(portal, requests, scratch, binary):
     os.environ.update(DJANGO_SETTINGS_MODULE="portal.settings", DJANGO_DEBUG="1", SQLITE_PATH=":memory:",
-                      ALLOW_PUBLIC_WATER_TEST_UPLOADS="1", INGEST_TOKEN="", MPLCONFIGDIR=str(scratch / "mpl"))
+                      MPLCONFIGDIR=str(scratch / "mpl"))
     sys.path.insert(0, str(portal))
     import django
     django.setup()
