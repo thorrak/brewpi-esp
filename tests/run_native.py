@@ -39,7 +39,7 @@ def main():
                 "-Werror", "-pedantic", "-fno-fast-math", "-ffp-contract=off", "-Isrc",
                 "-I" + str(json_headers), *sources, "-o", binary)
             run(binary)
-    for name in ["cooling_selector_settings", "predictive_coast_integration",
+    for name in ["cooling_selector_settings", "glycol_tuning", "predictive_coast_integration",
                  "water_test_backend", "static_file_serving"]:
         print(f"Running {name}", flush=True)
         run(sys.executable, ROOT / "tests" / name / "run.py")

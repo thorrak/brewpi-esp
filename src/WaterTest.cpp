@@ -35,7 +35,6 @@ constexpr size_t maxRecords = 6000;
 constexpr size_t requiredBytes = maxRecords * sizeof(Record) + 32768;
 constexpr size_t batchSize = 12;
 constexpr size_t sampleQueueCapacity = 64;
-constexpr unsigned maxBoots = 8;
 struct Sample {
   uint64_t address, conversion, read;
   int16_t raw;
@@ -51,11 +50,12 @@ std::atomic<bool> initialized{false}, owned{false}, running{false}, overflow{fal
 std::atomic<bool> uploaderBusy{false};
 Cache cache[Config::EepromFormat::MAX_DEVICES];
 Program program;
-JsonDocument manifest, terminal, bootList;
+JsonDocument manifest, terminal;
 std::string queuedStart, reason, uploadError, uploadState = "idle";
 bool queuedStop = false, queuedResume = false, clockRecorded = false, recordingFailed = false;
 bool lostRecord = false;
-uint8_t bootIndex = 0;
+bool manifestUploaded = false;
+uint32_t uploadedRecords = 0;
 uint32_t seq = 0, recordCount = 0, lostSequence = 0;
 uint64_t beerAddress = 0, glycolAddress = 0, lastBeerRead = 0, lastGlycolRead = 0, recordStartUs = 0;
 double beerOffset = 0, glycolOffset = 0;
@@ -128,14 +128,12 @@ bool fresh(const DeviceConfig &d) {
 }
 bool movedProbe() { return manifest["installation"]["glycol_temperature_source"] == "chamber_probe"; }
 void recordFailure(uint32_t attempted) {
-  // A failed write must not delay protective shutdown while reserve space is freed.
   forceOff();
   if (!lostRecord) {
     lostRecord = true;
     lostSequence = attempted;
   }
   recordingFailed = true;
-  fs_remove(reservePath);
 }
 bool append(Record r) {
   if (!journal || recordingFailed || recordCount >= maxRecords) {
@@ -143,7 +141,7 @@ bool append(Record r) {
       recordFailure(seq++);
     return false;
   }
-  r.boot = bootIndex;
+  r.boot = 0;
   r.seq = seq++;
   r.t_us = std::max(r.t_us ? r.t_us : nowUs(), lastRecordUs);
   lastRecordUs = r.t_us;
@@ -195,32 +193,21 @@ void recordClock() {
   if (append(r))
     clockRecorded = true;
 }
-void recordBoot(bool recovered) {
+void recordBoot() {
   Record r{};
   r.kind = 0;
-  r.code = recovered ? static_cast<uint8_t>(Reason::Reboot) : static_cast<uint8_t>(Reason::Start);
+  r.code = static_cast<uint8_t>(Reason::Start);
   r.detail = esp_reset_reason();
   append(r);
   recordClock();
-  recordOutput(true, false, false, recovered ? Reason::Reboot : Reason::Start);
-  recordOutput(false, false, false, recovered ? Reason::Reboot : Reason::Start);
+  recordOutput(true, false, false, Reason::Start);
+  recordOutput(false, false, false, Reason::Start);
 }
 void common(JsonDocument &doc) {
   const std::string testId = manifest["test_id"].as<std::string>();
   doc["schema_version"] = 1;
   doc["device_guid"] = guid;
   doc["test_id"] = testId;
-}
-bool sameTest(const JsonDocument &doc) {
-  const char *id = manifest["test_id"] | "";
-  return *id && doc["test_id"] == id &&
-         (doc["device_guid"].isNull() || doc["device_guid"] == guid);
-}
-bool readTestJson(const char *path, JsonDocument &doc) {
-  if (readJson(path, doc) && sameTest(doc))
-    return true;
-  doc.clear();
-  return false;
 }
 void closeJournal() {
   if (journal) {
@@ -256,41 +243,23 @@ void finishRun() {
   terminal["reason"] = reasonName(program.reason);
   terminal["final_phase"] = "finished";
   terminal["t_us"] = nowUs();
-  terminal["boot_id"] = bootList["boots"][bootIndex];
+  terminal["boot_id"] = currentBoot;
   terminal["final_outputs"]["pump_on"] = false;
   terminal["final_outputs"]["heater_on"] = false;
   terminal["elapsed_s"] = program.started > 0 ? uint32_t(nowUs() / 1e6 - program.started) : 0;
   terminal["response_settled"] = false; // Fixed observation windows do not prove equilibrium.
   JsonObject bounds = terminal["final_seq_by_boot"].to<JsonObject>();
-  uint32_t counts[maxBoots] = {};
   closeJournal();
-  FILE *f = fs_open(journalPath, "rb");
-  Record r{};
-  while (f && fread(&r, sizeof(r), 1, f) == 1)
-    if (valid(r) && r.boot < maxBoots)
-      counts[r.boot] = std::max(counts[r.boot], r.seq + 1);
-  if (f)
-    fclose(f);
-  for (unsigned i = 0; i < bootList["boots"].size(); ++i) {
-    const char *id = bootList["boots"][i];
-    bounds[id] = counts[i] ? int64_t(counts[i]) - 1 : -1;
-  }
+  bounds[currentBoot] = recordCount ? int64_t(recordCount) - 1 : -1;
   if (lostRecord) {
-    const char *id = bootList["boots"][bootIndex];
-    bounds[id] = int64_t(seq) - 1;
+    bounds[currentBoot] = int64_t(seq) - 1;
     auto loss = terminal["lost_ranges"].to<JsonArray>().add<JsonObject>();
-    loss["boot_id"] = id;
+    loss["boot_id"] = currentBoot;
     loss["first_seq"] = lostSequence;
     loss["last_seq"] = seq - 1;
   }
-  fs_remove(reservePath);
-  if (!atomicJson(finishPath, terminal)) {
-    uploadError = "Cannot save test outcome; data retained for recovery after restart.";
-    uploadState = "error";
-  } else {
-    uploadState = "pending";
-    uploadError.clear();
-  }
+  uploadState = "pending";
+  uploadError.clear();
   reason = reasonName(program.reason);
   running = false;
   queuedStop = false;
@@ -303,14 +272,6 @@ void settingsToManifest(JsonObject p) {
   p["cool_estimator_raw"] = tempControl.cs.coolEstimator;
   p["glycol"] = extendedSettings.glycol;
   p["cooling_algorithm"] = GlycolCooling::selectionName(extendedSettings.glycolCoolingAlgorithm);
-}
-void restoreSaved(JsonVariantConst p) {
-  const char *mode = p["mode"] | "o";
-  savedControl.mode = mode[0];
-  savedControl.beerSetting = p["beer_setting_raw"].as<temperature>();
-  savedControl.fridgeSetting = p["fridge_setting_raw"].as<temperature>();
-  savedControl.heatEstimator = p["heat_estimator_raw"].as<temperature>();
-  savedControl.coolEstimator = p["cool_estimator_raw"].as<temperature>();
 }
 void sensorManifest(JsonObject o, const DeviceConfig &d, const char *source, const char *placement) {
   o["rom"] = romOf(d);
@@ -373,6 +334,11 @@ void startRun(const std::string &payload) {
     owned = false;
     return;
   }
+  if (!removePreviousDataset()) {
+    reason = "Unable to remove the previous test's files; a new recording was not started.";
+    owned = false;
+    return;
+  }
   bool bath = input["glycol_temperature_source"] == "chamber_probe";
   DeviceConfig beer{}, glycol{}, cool{};
   std::string failure = preflight(bath, beer, glycol, cool);
@@ -389,20 +355,13 @@ void startRun(const std::string &payload) {
     owned = false;
     return;
   }
-  // Old datasets are replaceable only after every upload is acknowledged and
-  // the participant has explicitly released control.
-  if (!removePreviousDataset()) {
-    reason = "Unable to remove the previous test's files; a new recording was not started.";
-    owned = false;
-    return;
-  }
   manifest.clear();
   terminal.clear();
-  bootList.clear();
   recordingFailed = false;
   lostRecord = false;
   recordCount = seq = 0;
-  bootIndex = 0;
+  manifestUploaded = false;
+  uploadedRecords = 0;
   clockRecorded = false;
   lastRecordUs = 0;
   char testId[37];
@@ -453,26 +412,13 @@ void startRun(const std::string &payload) {
   manifest["acquisition"]["sequence_start"] = 0;
   manifest["acquisition"]["freshness_limit_s"] = freshnessSeconds;
   manifest["acquisition"]["recording_format"] = "crc32-binary-v1";
-  manifest["acquisition"]["local_metadata_version"] = 1;
   manifest["acquisition"]["clock_status_at_start"] = isNtpSynced() ? "synced" : "unknown";
-  common(bootList);
-  bootList["boots"].to<JsonArray>().add(currentBoot);
-  if (!allocateReserve() || !atomicJson(bootsPath, bootList) || !atomicJson(manifestPath, manifest)) {
-    reason = "Unable to reserve durable recording storage.";
-    fs_remove(manifestPath);
-    fs_remove(reservePath);
-    manifest.clear();
-    terminal.clear();
-    bootList.clear();
-    uploadState = "idle";
-    owned = false;
-    return;
-  }
   journal = fs_open(journalPath, "wb");
   if (!journal) {
-    program.start(nowUs() / 1e6, waterC, minimumOn(), minimumOff());
-    program.finish(nowUs() / 1e6, End::Failed, Reason::StorageFailure);
-    finishRun();
+    reason = "Unable to open the test recording file.";
+    manifest.clear();
+    uploadState = "idle";
+    owned = false;
     return;
   }
   beerAddress = addressOf(beer);
@@ -492,7 +438,7 @@ void startRun(const std::string &payload) {
   uploadError.clear();
   overflow = false;
   running = true;
-  recordBoot(false);
+  recordBoot();
   recordPhase();
   recordStartUs = lastRecordUs; // discard queued reads acquired before the initial record boundary
 }
@@ -616,22 +562,15 @@ void uploader(void *) {
     uint32_t next = 0, end = 0;
     bool isManifest = false, isFinish = false;
     std::string batchId;
-    JsonDocument ack, request, response;
+    JsonDocument request, response;
     {
       Guard lock;
-      if (running || !queuedStart.empty() || !sameTest(terminal) || !sameTest(bootList) ||
-          !fs_exists(finishPath) || uploadState == "submitted")
+      if (running || !queuedStart.empty() || terminal.isNull() || uploadState == "submitted")
         continue;
-      readTestJson(ackPath, ack);
-      next = ack["next_record"] | 0U;
-      if (next > recordCount) {
-        // A damaged cursor must never skip the immutable local prefix.
-        ack.clear();
-        next = 0;
-      }
+      next = uploadedRecords;
       id = manifest["test_id"].as<std::string>();
       path = "/api/v1/water-tests/" + id;
-      if (!ack["manifest"].as<bool>()) {
+      if (!manifestUploaded) {
         isManifest = true;
         serializeJson(manifest, body);
       } else if (next < recordCount) {
@@ -643,21 +582,16 @@ void uploader(void *) {
         }
         fseek(f, next * sizeof(Record), SEEK_SET);
         Record r{};
-        uint8_t b = 255;
         common(request);
         auto list = request["records"].to<JsonArray>();
         end = next;
         while (end < recordCount && end - next < batchSize && fread(&r, sizeof(r), 1, f) == 1) {
-          if (!valid(r))
-            break;
-          if (b == 255)
-            b = r.boot;
-          else if (b != r.boot)
+          if (!valid(r) || r.boot != 0)
             break;
           if (end == next)
             request["first_seq"] = r.seq;
           request["last_seq"] = r.seq;
-          WaterTestProtocol::recordToJson(list.add<JsonObject>(), r, bootList["boots"][r.boot],
+          WaterTestProtocol::recordToJson(list.add<JsonObject>(), r, currentBoot,
                                           manifest["sensors"][r.role ? "glycol" : "beer"]["calibration_offset_c"] |
                                               0.0);
           ++end;
@@ -670,7 +604,7 @@ void uploader(void *) {
         }
         batchId = WaterTestProtocol::batchIdentifier(id, next);
         request["batch_id"] = batchId;
-        request["boot_id"] = bootList["boots"][b];
+        request["boot_id"] = currentBoot;
         serializeJson(request, body);
         path += "/batches";
       } else {
@@ -696,19 +630,10 @@ void uploader(void *) {
     {
       Guard lock;
       if (ok) {
-        common(ack);
         if (isManifest)
-          ack["manifest"] = true;
-        else if (isFinish)
-          ack["finish"] = true;
-        else
-          ack["next_record"] = end;
-        if (!atomicJson(ackPath, ack)) {
-          ok = false;
-          error = "Could not persist acknowledgement; retrying the same data.";
-        }
-      }
-      if (ok) {
+          manifestUploaded = true;
+        else if (!isFinish)
+          uploadedRecords = end;
         uploadError.clear();
         uploadState = isFinish ? "submitted" : "pending";
         if (isFinish)
@@ -723,99 +648,6 @@ void uploader(void *) {
       vTaskDelay(pdMS_TO_TICKS(30000));
   }
 }
-void recover() {
-  if (!readJson(manifestPath, manifest)) {
-    if (fs_exists(manifestPath)) {
-      owned = true;
-      reason = "Saved test metadata is damaged; control remains OFF.";
-      uploadState = "error";
-    }
-    return;
-  }
-  JsonDocument release;
-  const bool resumed = readTestJson(resumedPath, release) && release["resumed"] == true;
-  owned = !resumed;
-  restoreSaved(manifest["prior_control"]);
-  const bool bootsRead = readJson(bootsPath, bootList);
-  // Older firmware did not bind its boot list to the test. Only legacy manifests
-  // may migrate that format; a new test must never inherit an untagged marker.
-  const bool legacyBoots = bootsRead && bootList["test_id"].isNull() &&
-                           manifest["acquisition"]["local_metadata_version"].isNull();
-  if (!bootsRead || (!sameTest(bootList) && !legacyBoots) || !bootList["boots"].is<JsonArray>() ||
-      bootList["boots"].size() == 0 || bootList["boots"].size() > maxBoots) {
-    owned = true;
-    forceOff();
-    reason = "Recording boot metadata is damaged; control remains OFF.";
-    uploadState = "error";
-    return;
-  }
-  FILE *f = fs_open(journalPath, "rb");
-  Record r{};
-  recordCount = 0;
-  bool torn = false;
-  while (f) {
-    size_t n = fread(&r, 1, sizeof(r), f);
-    if (!n)
-      break;
-    if (n != sizeof(r) || !valid(r) || r.boot >= bootList["boots"].size()) {
-      torn = true;
-      break;
-    }
-    ++recordCount;
-  }
-  if (f)
-    fclose(f);
-  if (legacyBoots) {
-    common(bootList);
-    if (!atomicJson(bootsPath, bootList)) {
-      owned = true;
-      forceOff();
-      reason = "Cannot migrate recording boot metadata; data retained and control remains OFF.";
-      uploadState = "error";
-      return;
-    }
-  }
-  if (readTestJson(finishPath, terminal)) {
-    program.phase = Phase::Finished;
-    reason = terminal["reason"] | "";
-    JsonDocument ack;
-    readTestJson(ackPath, ack);
-    uploadState = ack["finish"].as<bool>() ? "submitted" : "pending";
-    return;
-  }
-  forceOff();
-  owned = true;
-  program.phase = Phase::Finished;
-  program.outcome = End::Interrupted;
-  program.reason = Reason::Reboot;
-  if (bootList["boots"].size() >= maxBoots) {
-    reason = "Repeated interrupted recovery exceeded boot journal limit; data retained.";
-    uploadState = "error";
-    return;
-  }
-  bootIndex = bootList["boots"].size();
-  bootList["boots"].add(currentBoot);
-  if (!atomicJson(bootsPath, bootList)) {
-    reason = "Cannot persist recovery; control remains OFF.";
-    uploadState = "error";
-    return;
-  }
-  journal = fs_open(journalPath, "r+b");
-  if (journal) {
-    ftruncate(fileno(journal), recordCount * sizeof(Record));
-    fseek(journal, 0, SEEK_END);
-  } else
-    journal = fs_open(journalPath, "wb");
-  seq = 0;
-  lastRecordUs = 0;
-  recordBoot(true);
-  Record gap{};
-  gap.kind = 6;
-  gap.code = static_cast<uint8_t>(Reason::RecordingGap);
-  gap.detail = torn ? 1 : 0;
-  append(gap);
-  finishRun();
-}
 } // namespace
 
 void init() {
@@ -828,10 +660,10 @@ void init() {
   getGuid(guid);
   uuid(currentBoot);
   initialized = true;
-  recover();
+  removePreviousDataset();
   if (xTaskCreate(uploader, "water-upload", 12288, nullptr, 1, nullptr) != pdPASS) {
     uploadState = "error";
-    uploadError = "Cannot start upload worker. Data will remain on device.";
+    uploadError = "Cannot start upload worker.";
   }
 }
 bool active() { return running.load(); }
@@ -974,15 +806,9 @@ void tick() {
     forceOff();
   if (queuedResume) {
     queuedResume = false;
-    JsonDocument resumed;
-    common(resumed);
-    resumed["resumed"] = true;
-    if (atomicJson(resumedPath, resumed)) {
-      tempControl.resumeAfterWaterTest(savedControl);
-      owned = false;
-      reason = "Normal control resumed.";
-    } else
-      reason = "Could not persist control release; control remains OFF.";
+    tempControl.resumeAfterWaterTest(savedControl);
+    owned = false;
+    reason = "Normal control resumed.";
   }
 }
 void status(JsonDocument &doc) {

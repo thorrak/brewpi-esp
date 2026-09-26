@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
 #include "GlycolMode.h"
 #include "Ticks.h"
 #include "ChamberMode.h"
@@ -43,6 +42,13 @@ HostExtendedSettings extendedSettings;
 ValueActuator defaultActuator;
 void JSONSaveable::writeJsonToFile(const char*, const JsonDocument&) {}
 JsonDocument JSONSaveable::readJsonFromFile(const char*) { return JsonDocument(); }
+static char savedMode = Modes::off;
+void ControlSettings::storeToFilesystem() {
+    ++tempControl.settingsWrites;
+    tempControl.storedWithOutputActive = tempControl.cooler->isActive() ||
+        tempControl.heater->isActive() || tempControl.light->isActive();
+    savedMode = mode;
+}
 
 static temperature q9(double c) { return static_cast<temperature>(std::lround(c * 512 + C_OFFSET)); }
 class Input : public BasicTempSensor {
@@ -188,6 +194,72 @@ static void manualLifecycleChecks() {
         }
     }
     std::puts("manual relay ownership and guarded automatic handoff checks passed");
+}
+
+static void tuningLifecycleChecks() {
+    std::remove("glycolTuning.json");
+    Fixture fixture; ValueActuator fan;
+    attach(tempControl, fixture, fan);
+    auto& control = tempControl;
+    control.cs.mode = Modes::beerConstant;
+    control.storeSettings();
+    const auto savedControl = control.cs;
+    auto learned = control.glycolRuntime.cooling.tuning();
+    learned.predictive = {720, 0.025, 8, 9};
+    learned.pulse_dose = {0.065, 12};
+    assert(control.glycolRuntime.cooling.restoreTuning(learned));
+
+    unsigned accesses = 0;
+    onFileAccess = [&]() {
+        ++accesses;
+        assert(!fixture.cooler.isActive() && !fixture.heater.isActive());
+        assert(!control.cc.lightAsHeater || !fixture.light.isActive());
+    };
+    control.state = COOLING;
+    control.updateOutputs();
+    assert(fixture.cooler.isActive());
+    assert(!fs_exists(GlycolTuningStore::filename));
+    control.state = HEATING;
+    control.updateOutputs();
+    assert(fixture.heater.isActive());
+    assert(!fs_exists(GlycolTuningStore::filename));
+    control.cc.lightAsHeater = true;
+    control.updateOutputs();
+    assert(fixture.light.isActive() && !fixture.heater.isActive());
+    assert(!fs_exists(GlycolTuningStore::filename));
+    control.state = IDLE;
+    control.updateOutputs();
+    assert(fs_exists(GlycolTuningStore::filename));
+    assert(accesses > 0);
+    accesses = 0;
+    control.updateOutputs();
+    assert(accesses == 0);
+    onFileAccess = {};
+
+    // A test's temporary OFF mode cannot replace the saved normal mode.
+    WaterTest::owned = true;
+    control.cs.mode = Modes::off;
+    control.storeSettings();
+    assert(control.settingsWrites == 1 && savedMode == savedControl.mode);
+    ticks.now_ms = 500000;
+    control.resumeAfterWaterTest(savedControl);
+    WaterTest::owned = false;
+    assert(control.cs.mode == savedControl.mode);
+    assert(control.glycolRuntime.cooling.tuning().predictive.coast_s == 720);
+    assert(std::fabs(control.glycolRuntime.cooling.tuning().pulse_dose.gain_c_per_on_s - 0.065) < 1e-15);
+    assert(!control.glycolRuntime.cooling_output.pump_on);
+    assert(control.glycolRuntime.last_pump_active_s == 500);
+
+    // Startup loads both estimates with fresh control history and relay state.
+    attach(tempControl, fixture, fan);
+    extendedSettings.glycolCoolingAlgorithm = GlycolCooling::Algorithm::PulseDose;
+    control.loadGlycolParams();
+    assert(control.glycolRuntime.cooling.selection() == GlycolCooling::Algorithm::PulseDose);
+    assert(control.glycolRuntime.cooling.tuning().predictive.coast_s == 720);
+    assert(std::fabs(control.glycolRuntime.cooling.tuning().pulse_dose.gain_c_per_on_s - 0.065) < 1e-15);
+    assert(!control.glycolRuntime.cooling_output.pump_on);
+    assert(!control.glycolRuntime.clock_initialized && !control.glycolRuntime.cooling_step_initialized);
+    std::remove("glycolTuning.json");
 }
 
 #ifdef ENABLE_GLYCOL_LOGGING
@@ -563,5 +635,6 @@ int main() {
 #ifdef ENABLE_GLYCOL_LOGGING
     loggingChecks();
 #endif
+    tuningLifecycleChecks();
     std::puts("selectable cooling BrewPi integration checks passed");
 }

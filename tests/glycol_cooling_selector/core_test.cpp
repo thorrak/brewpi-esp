@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "GlycolCoolingController.h"
 #include <cassert>
 #include <cmath>
@@ -20,6 +19,51 @@ static void sharedEqual(const GlycolCooling::Output& a, const Original& b) {
     assert(a.learning_updates == b.learning_updates);
 }
 int main() {
+    {
+        Controller controller;
+        const GlycolCooling::Tuning saved = {{600, 0.015, 7, 8}, {0.04, 9}};
+        assert(controller.restoreTuning(saved));
+        assert(!controller.output().pump_on && controller.output().phase == Phase::Idle);
+        assert(std::isnan(controller.output().temperature_c));
+        assert(controller.output().pulse_budget_s == 0 && controller.output().actual_on_s == 0);
+        auto invalid = saved;
+        invalid.predictive.coast_s = 900;
+        invalid.pulse_dose.gain_c_per_on_s = 0;
+        assert(!controller.restoreTuning(invalid));
+        assert(controller.tuning().predictive.coast_s == saved.predictive.coast_s);
+        assert(controller.tuning().pulse_dose.gain_c_per_on_s == saved.pulse_dose.gain_c_per_on_s);
+        invalid = saved;
+        invalid.predictive.budget_gain_c_per_s = std::numeric_limits<double>::quiet_NaN();
+        invalid.pulse_dose.gain_c_per_on_s = 0.1;
+        assert(!controller.restoreTuning(invalid));
+        assert(controller.tuning().predictive.budget_gain_c_per_s == saved.predictive.budget_gain_c_per_s);
+        assert(controller.tuning().pulse_dose.gain_c_per_on_s == saved.pulse_dose.gain_c_per_on_s);
+
+        assert(controller.step(0, 21.5, 21).pulse_budget_s == 0.25 / saved.predictive.budget_gain_c_per_s);
+        controller.request(Algorithm::PulseDose);
+        assert(controller.step(1, 21.5, 21).phase == Phase::AlgorithmSwitchWait);
+        assert(controller.restoreTuning(saved));
+        assert(controller.output().pump_on && controller.output().phase == Phase::AlgorithmSwitchWait);
+        assert(!controller.step(2, 21.5, 21).pump_on);
+        assert(!controller.step(3, 21.5, 21).pump_on);
+        const auto dose = controller.step(4, 21.5, 21);
+        assert(dose.pump_on && dose.pulse_budget_s == 0.25 / saved.pulse_dose.gain_c_per_on_s);
+        assert(dose.learning_updates == saved.pulse_dose.learning_updates);
+        controller.request(Algorithm::PredictiveCoast);
+        assert(!controller.step(6, 21.5, 21).pump_on);
+        const auto predictive = controller.step(8, 21.5, 21);
+        assert(predictive.pump_on && predictive.coast_s == saved.predictive.coast_s);
+        assert(predictive.learning_updates == saved.predictive.learning_updates);
+        assert(predictive.response_updates == saved.predictive.response_updates);
+
+        controller.reset();
+        assert(controller.tuning().predictive.learning_updates == 0);
+        assert(controller.tuning().predictive.response_updates == 0);
+        assert(controller.tuning().pulse_dose.learning_updates == 0);
+        assert(controller.restoreTuning(saved));
+        assert(!controller.output().pump_on && controller.output().phase == Phase::Idle);
+        assert(std::isnan(controller.output().temperature_c));
+    }
     // Experiment pulses are external to both cooling cores. Even a fresh core
     // must honor the handoff OFF interval, including after another inhibit.
     for (Algorithm algorithm : {Algorithm::PredictiveCoast, Algorithm::PulseDose}) {

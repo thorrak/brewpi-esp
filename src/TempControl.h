@@ -30,6 +30,7 @@
 #include "EepromStructs.h"
 #include "GlycolParams.h"
 #include "GlycolCoolingController.h"
+#include "GlycolTuning.h"
 #include <ArduinoJson.h>
 
 struct ControlContext;
@@ -89,7 +90,7 @@ struct GlycolHeatingGateResult {
 };
 
 /**
- * Runtime state for glycol controller (not persisted)
+ * Glycol controller state. Only learned cooling tuning is persisted.
  */
 struct GlycolRuntimeState {
     GlycolCooling::Controller cooling{};
@@ -391,9 +392,10 @@ public:
 
 	// Glycol mode: Selectable beer-only cooling
 	TEMP_CONTROL_FIELD GlycolConfig glycolConfig;           //!< Heating configuration (persisted)
-	TEMP_CONTROL_FIELD GlycolRuntimeState glycolRuntime;    //!< Runtime state (not persisted)
+	TEMP_CONTROL_FIELD GlycolTuningStore glycolTuning;
+	TEMP_CONTROL_FIELD GlycolRuntimeState glycolRuntime;    //!< Active cooling and heating state
 
-	TEMP_CONTROL_METHOD void loadGlycolParams();            //!< Load glycol heating config and reset runtime
+	TEMP_CONTROL_METHOD void loadGlycolParams();            //!< Load heating settings and cooling tuning into fresh runtime
 
 	TEMP_CONTROL_FIELD uint16_t getMinCoolOnTime();
 	TEMP_CONTROL_FIELD uint16_t getMinHeatOnTime();

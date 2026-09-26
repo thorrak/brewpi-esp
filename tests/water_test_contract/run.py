@@ -52,8 +52,8 @@ def main():
         "void recordOutput(", "void recordPhase(", "Record sampleRecord(",
     ))
     # Extract within the owning function so unrelated records cannot match.
-    manifest = between(definition(source, "void startRun("), "char testId[37];", "if (!allocateReserve()")
-    finish = between(definition(source, "void finishRun("), "terminal.clear();", "uint32_t counts[maxBoots]")
+    manifest = between(definition(source, "void startRun("), "char testId[37];", 'journal = fs_open(journalPath, "wb");')
+    finish = between(definition(source, "void finishRun("), "terminal.clear();", "closeJournal();")
     harness = (HERE / "harness.cpp").read_text()
     for marker, code in (("SOURCE_FUNCTIONS", functions), ("MANIFEST_SOURCE", manifest),
                          ("FINISH_SOURCE", finish)):

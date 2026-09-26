@@ -162,7 +162,6 @@ void setup()
   // are NULL until TempControl::init() allocates default sensors, so a
   // browser auto-refresh during boot would otherwise crash the device.
   tempControl.init();
-  // Recover experiment ownership before saved modes or network commands load.
   WaterTest::init();
 
   // Order matters: wifi_cfg's Network Provisioning backend (esp_wifi_config

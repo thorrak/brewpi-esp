@@ -17,7 +17,7 @@ constexpr double freshnessSeconds = 10;
 constexpr double maximumDropC = 3;
 constexpr double minimumWaterC = 4;
 enum class Phase : uint8_t { Idle, Baseline, Pulse, Observe, Stopping, Finished };
-enum class End : uint8_t { None, Completed, Stopped, Interrupted, Inconclusive, Failed };
+enum class End : uint8_t { None, Completed, Stopped, Inconclusive, Failed };
 enum class Reason : uint8_t {
   None,
   Start,
@@ -33,8 +33,6 @@ enum class Reason : uint8_t {
   RuntimeLimit,
   StorageFailure,
   QueueOverflow,
-  Reboot,
-  RecordingGap,
   RelayLimit,
   PumpBudget,
   UnexpectedOutput
@@ -44,7 +42,7 @@ inline const char *phaseName(Phase p) {
   return names[static_cast<unsigned>(p)];
 }
 inline const char *endName(End e) {
-  const char *names[] = {"", "completed", "stopped", "interrupted", "inconclusive", "failed"};
+  const char *names[] = {"", "completed", "stopped", "inconclusive", "failed"};
   return names[static_cast<unsigned>(e)];
 }
 inline const char *reasonName(Reason r) {
@@ -62,8 +60,6 @@ inline const char *reasonName(Reason r) {
                          "runtime_limit",
                          "recording_failure",
                          "sample_queue_overflow",
-                         "reboot_interrupted",
-                         "recording_gap",
                          "relay_minimum_limit",
                          "pump_time_limit",
                          "unexpected_output"};
@@ -182,8 +178,7 @@ struct Program {
     }
   }
 };
-// A checksummed append-only journal survives reset in a write; recovery accepts
-// only the contiguous valid prefix and declares any incomplete tail as a gap.
+// Record checksums detect damaged data before upload.
 #pragma pack(push, 1)
 struct Record {
   uint64_t t_us;

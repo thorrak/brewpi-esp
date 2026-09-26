@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Execute the production WaterTest.cpp against a deterministic ESP/RTOS facade.
 
-Only platform include directives are replaced; every lifecycle, journal, recovery,
+Only platform include directives are replaced; every lifecycle, journal, reboot,
 HTTP request/acknowledgement, and scheduling function comes from the real source.
 Run from any directory after PlatformIO has installed ArduinoJson.
 """
@@ -33,22 +33,14 @@ with tempfile.TemporaryDirectory(prefix='water-test-backend-') as temp:
                  'fsync_failure', 'edge_fsync_failure', 'start_failure', 'queue_overflow', 'unexpected_output',
                  'upload_retry', 'all_pulses', 'slow_sensor_fault', 'slow_temperature_limit', 'slow_deadline', 'slow_on_edge',
                  'slow_phase', 'slow_storage_repair',
-                 'queue_snapshot', 'slow_queue_overflow', 'queued_unexpected_output', 'cleanup_ack_failure',
-                 'cleanup_resume_failure', 'cleanup_manifest_failure']:
+                 'queue_snapshot', 'slow_queue_overflow', 'queued_unexpected_output', 'cleanup_failure',
+                 'resume_pending_upload']:
         subprocess.run([str(binary), name, str(build / name)], check=True)
-    recovery = build / 'reboot'
-    subprocess.run([str(binary), 'active_before_reboot', str(recovery)], check=True)
-    subprocess.run([str(binary), 'after_reboot', str(recovery)], check=True)
-
-    upload_recovery = build / 'upload-reboot'
-    subprocess.run([str(binary), 'partial_upload_before_reboot', str(upload_recovery)], check=True)
-    subprocess.run([str(binary), 'after_partial_upload_reboot', str(upload_recovery)], check=True)
-
-    for before, after in [('foreign_markers', 'foreign_markers'), ('foreign_finish', 'foreign_finish'),
-                          ('foreign_boots', 'invalid_boots'), ('untagged_boots', 'invalid_boots'),
-                          ('submitted', 'submitted'), ('legacy_submitted', 'legacy_submitted'),
-                          ('legacy_active', 'legacy_active'), ('legacy_pending', 'legacy_pending'),
-                          ('cleanup_ack', 'cleanup'), ('cleanup_resume', 'cleanup'), ('cleanup_manifest', 'cleanup')]:
-        recovery = build / before
-        subprocess.run([str(binary), before + '_before_reboot', str(recovery)], check=True)
-        subprocess.run([str(binary), after + '_after_reboot', str(recovery)], check=True)
+    for before in ['active', 'stopped', 'pending', 'partial_upload', 'resumed_pending', 'submitted', 'corrupt']:
+        reboot = build / before
+        subprocess.run([str(binary), before + '_before_reboot', str(reboot)], check=True)
+        subprocess.run([str(binary), 'discarded_after_reboot', str(reboot)], check=True)
+    for before, after in [('active', 'cleanup_failure'), ('corrupt', 'metadata_cleanup_failure')]:
+        reboot = build / after
+        subprocess.run([str(binary), before + '_before_reboot', str(reboot)], check=True)
+        subprocess.run([str(binary), after + '_after_reboot', str(reboot)], check=True)

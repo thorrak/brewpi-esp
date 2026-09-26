@@ -5,6 +5,7 @@
 #include "EepromStructs.h"
 #include "GlycolParams.h"
 #include "GlycolCoolingController.h"
+#include "GlycolTuning.h"
 #include "ControlTypes.h"
 
 struct ControlContext;
@@ -12,6 +13,7 @@ struct HostDoor { bool sense() { return false; } };
 struct HostAutoOff : ValueActuator { void update() {} };
 extern ValueActuator cameraLightState;
 extern MinTimes minTimes;
+namespace WaterTest { extern bool owned; bool controlOwned(); }
 
 // The methods under test are copied from TempControl.cpp at build time. This
 // facade supplies their enclosing fields without unrelated board services.
@@ -33,12 +35,14 @@ struct TempControl {
     uint8_t state = IDLE;
     uint16_t lastIdleTime = 0, lastHeatTime = 0, lastCoolTime = 0, waitTime = 0;
     GlycolConfig glycolConfig;
+    GlycolTuningStore glycolTuning;
+    temperature storedBeerSetting = INVALID_TEMP;
     unsigned settingsWrites = 0;
     bool storedWithOutputActive = false;
-    void storeSettings() {
-        ++settingsWrites;
-        storedWithOutputActive = cooler->isActive() || heater->isActive() || light->isActive();
-    }
+    void storeSettings();
+    void initFilters();
+    void loadGlycolParams();
+    void resumeAfterWaterTest(const ControlSettings& saved);
     bool isDoorOpen() { return doorOpen; }
     bool stateIsHeating();
     bool stateIsCooling();

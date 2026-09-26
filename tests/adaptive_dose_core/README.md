@@ -12,7 +12,10 @@ c++ -std=c++11 -Wall -Wextra -Werror -pedantic -O2 -ffp-contract=off \
 The core is a direct port of `AdaptiveDoseController` and `_CoolingBase` in
 chillsim's frozen `src/chillsim/controllers/cooling.py`. It receives raw cached
 beer temperature in Celsius at one-second intervals. Its defaults match the
-simulator; it has no glycol input and no heap allocation. Learning is in RAM.
+simulator; it has no glycol input and no heap allocation. The core holds learning
+in memory and exposes its learned gain and update counter for saving and
+restoring. Firmware integration stores those values in flash across reboots;
+the portable core performs no storage I/O.
 
 Python reference SHA-256:
 `001d61e81b6ccdc8268b8dbff01896454876699a602ffbdcb1b8fdeaac7d9988`.
@@ -39,5 +42,6 @@ Firmware integration adds these boundary behaviors:
 
 These checks cover pulse duration, physical relay-edge timing, duplicate and
 fault ticks, setpoint cancellation, saturation interruption, retained learning,
-clock-wrap-era epochs, regression rebasing, measurement gaps, and invalid
-configuration. Independent parity checks compare full Python scenario traces.
+learned-tuning round trips and validation, clock-wrap-era epochs, regression
+rebasing, measurement gaps, and invalid configuration. Independent parity checks
+compare full Python scenario traces.

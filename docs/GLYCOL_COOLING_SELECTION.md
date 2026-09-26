@@ -24,8 +24,8 @@ The controller applies the change at an OFF boundary:
   has elapsed from the actual shared OFF edge. Normal defaults are two seconds
   for both intervals.
 - Incomplete observations and temperature histories are discarded. Each
-  algorithm retains its own learned response values in RAM; values are never
-  transferred between algorithms. Reboot resets both algorithms' learning.
+  algorithm retains its own learned response values; values are never
+  transferred between algorithms. Saved learning is restored after reboot.
 - Re-saving the same selection does not interrupt an experiment or reset learning.
 - Sensor faults, disabled control, and heating interlocks retain their existing
   immediate-stop behavior and cannot bypass the subsequent OFF minimum.
@@ -41,6 +41,21 @@ require a sensor or setpoint. Entering or leaving test mode switches outputs OFF
 before saving settings. Leaving test mode starts conservative cooling OFF,
 heating OFF and direction-switch guards: manually issued relay edges are not
 observed by the cooling cores. Learned values are retained.
+
+## Saving learned tuning
+
+Both algorithms save their learned tuning separately: predictive coast saves its
+coast duration, cooling-response gain and update counters; pulse-dose saves its
+cooling-response gain and update counter. Changed learning is saved to flash once
+the heating and cooling outputs are OFF. Both sets of tuning are stored together
+in `/glycolTuning.json`, with an atomic file replacement so an interrupted save
+does not overwrite the previous snapshot. Failed writes retry after 30 seconds
+while the outputs are OFF. A reboot restores the most recent saved values.
+Missing, malformed or unsupported-version tuning records use the initial defaults.
+
+Pump state, incomplete observations, temperature samples and elapsed timers are
+not restored. Normal startup and relay timing guards still apply. A Chill Test
+does not train either cooling algorithm.
 
 ## API and logging
 

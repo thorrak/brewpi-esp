@@ -73,6 +73,7 @@ ControlVariables TempControl::cv;
 
 // Glycol mode
 GlycolConfig TempControl::glycolConfig;
+GlycolTuningStore TempControl::glycolTuning;
 GlycolRuntimeState TempControl::glycolRuntime;
 	
 	// State variables
@@ -364,6 +365,10 @@ void TempControl::updateOutputs() {
 		: isDoorOpen() || (cc.lightAsHeater && heating) || cameraLightState.isActive();
 	light->setActive(lightActive);
 	fan->setActive(heating || cooling);
+    if (extendedSettings.glycol && !cooler->isActive() && !heater->isActive() &&
+        !(cc.lightAsHeater && light->isActive())) {
+        glycolTuning.saveIfChanged(glycolRuntime.cooling, ticks.millis());
+    }
 #ifdef ENABLE_GLYCOL_LOGGING
     if (extendedSettings.glycol) {
         glycolLog.logTransition(glycolRuntime, beerSensor->readRawCached(), cs.beerSetting);
@@ -444,6 +449,7 @@ void TempControl::loadConstants(){
  * The update functions only write to EEPROM if the value has changed
  */
 void TempControl::storeSettings(){
+	if (WaterTest::controlOwned()) return;
 	cs.storeToFilesystem();
 	storedBeerSetting = cs.beerSetting;
 }
@@ -522,8 +528,9 @@ void TempControl::setMode(char newMode, bool force){
 }
 
 void TempControl::resumeAfterWaterTest(const ControlSettings& saved) {
-    // Reset incomplete learning/filters, and conservatively begin fresh relay
-    // protection intervals at the handoff. This never emits an ON command.
+    // Keep learned tuning while clearing measurements and starting fresh relay
+    // protection intervals at the handoff.
+    const auto tuning = glycolRuntime.cooling.tuning();
     cooler->setActive(false);
     heater->setActive(false);
     light->setActive(false);
@@ -542,7 +549,9 @@ void TempControl::resumeAfterWaterTest(const ControlSettings& saved) {
     glycolRuntime.last_pump_active_s = nowMs / 1000.0;
     glycolRuntime.last_heater_active_s = nowMs / 1000.0;
     glycolRuntime.cooling.reset(extendedSettings.glycolCoolingAlgorithm);
+    glycolRuntime.cooling.restoreTuning(tuning);
     glycolRuntime.cooling.externalOff(nowMs / 1000.0);
+    glycolRuntime.cooling_output = glycolRuntime.cooling.output();
     lastCoolTime = lastHeatTime = lastIdleTime = ticks.seconds();
     initFilters();
 }
@@ -707,7 +716,7 @@ void TempControl::getControlVariablesDoc(JsonDocument& doc) {
     cooling["predictedEndpointC"] = output.predicted_endpoint_c;
     cooling["minOnSeconds"] = glycolRuntime.cooling.minOnSeconds();
     cooling["minOffSeconds"] = glycolRuntime.cooling.minOffSeconds();
-    cooling["learningPersistence"] = "RAM only";
+    cooling["learningPersistence"] = "flash";
   }
 }
 
@@ -978,4 +987,7 @@ void GlycolRuntimeState::reset() {
 void TempControl::loadGlycolParams() {
     glycolConfig.loadFromFilesystem();
     glycolRuntime.reset();
+    glycolRuntime.cooling.reset(extendedSettings.glycolCoolingAlgorithm);
+    glycolTuning.load(glycolRuntime.cooling);
+    glycolRuntime.cooling_output = glycolRuntime.cooling.output();
 }

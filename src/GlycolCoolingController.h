@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-3.0-or-later */
 #pragma once
 
 #include "GlycolCoolingAlgorithm.h"
@@ -28,7 +27,12 @@ struct Output {
     double actual_on_s;
 };
 
-// The algorithms retain separate RAM-only learning. This coordinator owns the
+struct Tuning {
+    PredictiveCooling::Tuning predictive;
+    AdaptiveCooling::Tuning pulse_dose;
+};
+
+// The algorithms retain separate learned estimates. This coordinator owns the
 // actual relay edge across algorithm changes; neither core sees fictitious ON
 // commands while a handoff or external heat/mode gate blocks the output.
 class Controller {
@@ -44,6 +48,8 @@ public:
     // observe the experiment's physical pulses.
     void externalOff(double time_s);
     void reset(Algorithm initial = Algorithm::PredictiveCoast);
+    Tuning tuning() const;
+    bool restoreTuning(const Tuning& tuning);
     const Output& output() const { return output_; }
     Algorithm selection() const { return active_; }
     Algorithm requestedSelection() const { return requested_; }

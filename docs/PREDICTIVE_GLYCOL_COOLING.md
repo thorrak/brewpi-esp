@@ -76,12 +76,18 @@ samples. The wrapping MCU clock is extended to a monotonic 64-bit elapsed clock.
 Existing boot and heat-to-cool guards run before the cooling controller so it
 cannot learn a pump interval that never occurred. Heating and mode interruptions
 discard the current cooling observation. Coast/gain learning survives those
-interruptions in RAM and resets to defaults on reboot. The normal heating PID,
+interruptions, and saved learning is restored after reboot. The normal heating PID,
 minimum heating slices, and cool-to-heat guard retain their inherited behavior.
 
 `/glycolConfig.json` stores the heating start `trigger_margin`, which defaults to
 0.1 degrees in the selected display unit. Predictive cooling defaults are explicit
 fields in `PredictiveCooling::Config`.
+
+Learned coast duration, cooling-response gain and their update counters are saved
+to flash after learning changes, once the heating and cooling outputs are OFF. Startup
+restores the latest saved tuning; missing, malformed or unsupported-version records
+use the initial defaults. Pump state, temperature history, incomplete observations
+and elapsed timers start fresh.
 
 ## Fermentrack and diagnostics
 
@@ -99,7 +105,7 @@ sensor validity, pump, relay timing, and actuator fields plus:
 - `actualOnSeconds`, `lastCompletedOnSeconds`, and `coastAgeSeconds`.
 
 The `c`/`C:` response exposes the active algorithm's defaults under `glycolCoolingConfig`.
-The optional chamber/glycol probe is diagnostic only. Learning is RAM-only.
+The optional chamber/glycol probe is diagnostic only.
 Clients that consume earlier `adaptiveCooling` or `predictiveCooling` objects
 must use the common name and check its algorithm identifier. Fermentrack's normal temperature/control interface is
 unchanged; 30-second graph samples still cannot show every short pump pulse.

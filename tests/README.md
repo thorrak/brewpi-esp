@@ -7,8 +7,9 @@ python3 tests/run_native.py
 ```
 
 This compiles and runs the portable cooling controllers, algorithm selection,
-settings persistence, firmware integration, water-test program and protocol,
-storage/recovery backend, static HTTP serving, and firmware serializer harness.
+settings and learned-tuning persistence, firmware integration, water-test program and protocol,
+storage and upload backend, test cancellation on reboot, static HTTP serving,
+and firmware serializer harness.
 It uses temporary files and simulated I/O; it does not contact a server or
 operate hardware. `CXX` can select another native C++ compiler.
 

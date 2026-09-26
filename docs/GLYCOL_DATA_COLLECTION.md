@@ -1,6 +1,6 @@
-# Contribute a glycol water test
+# Contribute a glycol Chill Test
 
-The `glycol-data-collection` branch adds a **Water test** page to the normal
+The `glycol-data-collection` branch adds a **Chill Test** page to the normal
 BrewPi web interface. Predictive and pulse-dose cooling remain available for
 normal brewing. The experiment temporarily owns the outputs and does not train
 either controller.
@@ -9,7 +9,7 @@ either controller.
 
 1. Enable glycol mode and configure the usual beer DS18B20 probe and wired cooling relay. Use a fermenter
    filled with water at the usual batch volume and run the glycol chiller normally.
-2. Open **Water test** in BrewPi's web UI. Enter fermenter model/capacity, water
+2. Open **Chill Test** in BrewPi's web UI. Enter fermenter model/capacity, water
    volume, cooling arrangement and beer-probe placement.
 3. If an existing chamber DS18B20 can be moved into the glycol bath, select that
    option and confirm its placement. Otherwise enter the chiller's setpoint or
@@ -22,6 +22,11 @@ either controller.
    `http://chill.fermentrack.net`. Follow the results link on the page.
    Normal control stays OFF until **Resume saved temperature control** is selected.
    Return a moved chamber probe to its normal location before resuming.
+
+Restarting the device cancels any test and discards its local results and pending
+uploads. The saved normal control mode and settings resume on startup. Return a
+moved chamber probe to its normal location before restarting. Closing the browser
+or losing WiFi does not cancel the test.
 
 Configuration changes and upstream/manual control are held during the experiment
 and until explicit resume. The existing Fermentrack connection does not carry this
@@ -61,7 +66,8 @@ the monotonic time when the command was actually applied, before storage work.
 There is no temperature reset between pulses and no assumption that a 20-minute
 observation proves every installation has reached equilibrium. Little or no
 observed cooling produces an inconclusive submission, not an indefinitely longer
-pump run. Stopped, failed and interrupted tests are retained too.
+pump run. Stopped and failed tests can also be submitted while the device remains
+powered.
 
 ## Measurements and delivery
 
@@ -78,22 +84,20 @@ survey, configuration, samples and events. Monotonic microseconds drive timing;
 builds with `ENABLE_GLYCOL_LOGGING` make one startup NTP attempt to supply a UTC
 anchor when available. Internet time is not required to run the experiment.
 
-A compact checksummed LittleFS journal retains the bounded run during network
-outages. Preflight checks free capacity. Uploads run on a separate task after
-recording ends, so DNS, HTTP retries and server processing cannot stretch a pulse.
+A compact checksummed LittleFS journal buffers the bounded run during network
+outages within the current boot. Preflight checks free capacity. Uploads run on a
+separate task after recording ends, so DNS, HTTP retries and server processing
+cannot stretch a pulse.
 Manifest, batch and finish identities remain stable across retries. The page shows
 **Test submitted** only after all records and the terminal declaration are accepted.
 An upload pending state is independent of whether the experiment completed.
 
-A reboot holds outputs OFF, preserves the recoverable journal and marks an active
-run interrupted. It never resumes a pulse sequence or invents the time when power
-was lost. A new run cannot replace a pending submission. Recovery markers are
-checked against the test UUID, and all prior test files must be removed successfully
-before a replacement starts. Existing untagged boot metadata is migrated only for
-legacy manifests; old untagged upload acknowledgements are re-confirmed with the
-receiver instead of being trusted locally. The journal occupies the
-same LittleFS partition as the web UI and device configuration; replacing that
-filesystem image removes those local files, including pending contributions.
+No test state is restored after reboot: active tests, local outcomes and pending
+submissions are discarded, and normal saved control resumes. Records already
+accepted by the remote service are not deleted. Within the same boot, uploads
+retry automatically and a new run cannot replace a pending submission. All prior
+test files must be removed successfully before a replacement starts. The journal
+occupies the same LittleFS partition as the web UI and device configuration.
 
 ## Device API
 
@@ -126,8 +130,8 @@ pio run -e esp32_wifi_iic -t buildfs
 
 Use `esp32_wifi_tft` for the TFT build or `esp32_s2_wifi` for the S2.
 The filesystem target builds the Vue UI and requires Node/npm. Firmware-only
-flashing does not update the web UI. Preserve installed configuration and any
-pending contribution when choosing an installation/update method.
+flashing does not update the web UI. Preserve installed configuration and let any
+pending contribution finish uploading before restarting for an update.
 
 This feature supports assigned DS18B20 probes and a directly wired cooling
 actuator. Wireless sensor/actuator timing is outside this experiment protocol.

@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "GlycolCoolingController.h"
 #include <algorithm>
 #include <cmath>
@@ -38,6 +37,27 @@ void Controller::reset(Algorithm initial) {
     copyActiveOutput();
 }
 
+Tuning Controller::tuning() const {
+    return {predictive_.tuning(), dose_.tuning()};
+}
+
+bool Controller::restoreTuning(const Tuning& tuning) {
+    if (!predictive_.tuningValid(tuning.predictive) || !dose_.tuningValid(tuning.pulse_dose))
+        return false;
+    predictive_.restoreTuning(tuning.predictive);
+    dose_.restoreTuning(tuning.pulse_dose);
+    if (active_ == Algorithm::PulseDose) {
+        output_.gain_c_per_on_s = tuning.pulse_dose.gain_c_per_on_s;
+        output_.learning_updates = tuning.pulse_dose.learning_updates;
+    } else {
+        output_.coast_s = tuning.predictive.coast_s;
+        output_.budget_gain_c_per_s = tuning.predictive.budget_gain_c_per_s;
+        output_.learning_updates = tuning.predictive.learning_updates;
+        output_.response_updates = tuning.predictive.response_updates;
+    }
+    return true;
+}
+
 void Controller::copyActiveOutput() {
     if (active_ == Algorithm::PulseDose) {
         const auto& o = dose_.output();
@@ -63,7 +83,7 @@ double Controller::minOffSeconds() const {
                                          : predictive_.configuration().min_off_s;
 }
 const char* Controller::algorithmVersion() const {
-    return active_ == Algorithm::PulseDose ? "adaptive-pulse-dose-v1" : "predictive-coast-v1";
+    return GlycolCooling::algorithmVersion(active_);
 }
 const char* Controller::phaseName(Phase phase) {
     switch (phase) {

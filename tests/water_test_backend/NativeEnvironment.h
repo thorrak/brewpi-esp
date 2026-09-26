@@ -20,7 +20,7 @@
 namespace Native {
 inline std::string root;
 inline uint64_t clock = 1000000, fsyncDelayUs = 0;
-inline std::string removeFailurePath;
+inline std::string removeFailurePath, openFailurePath;
 inline std::function<void()> fsyncHook, truncateHook;
 inline size_t freeBytes = 512000;
 inline int fsyncUntilFail = -1, delays = 0, nextHttpCode = 201;
@@ -129,7 +129,11 @@ inline bool fs_remove(const char *path) {
     return false;
   return ::remove((Native::root + path).c_str()) == 0;
 }
-inline FILE *fs_open(const char *path, const char *mode) { return fopen((Native::root + path).c_str(), mode); }
+inline FILE *fs_open(const char *path, const char *mode) {
+  if (Native::openFailurePath == path)
+    return nullptr;
+  return fopen((Native::root + path).c_str(), mode);
+}
 inline int native_fsync(int fd) {
   Native::clock += Native::fsyncDelayUs;
   if (Native::fsyncHook)

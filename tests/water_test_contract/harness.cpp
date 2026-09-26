@@ -11,10 +11,9 @@
 #include <vector>
 using namespace WaterTestCore;
 struct Sample { uint64_t address, conversion, read; int16_t raw; bool valid; };
-JsonDocument manifest, terminal, bootList;
+JsonDocument manifest, terminal;
 Program program;
 uint64_t nativeNow = 1000000;
-uint8_t bootIndex = 0;
 bool appliedPump = false;
 std::vector<Record> records;
 char guid[17] = "DE00000000000077";
@@ -39,7 +38,7 @@ struct { int cs = 0; struct { bool lightAsHeater = false; } cc; } tempControl;
 int savedControl = 0;
 void settingsToManifest(JsonObject o) { o["mode"] = "o"; o["fixture"] = true; }
 bool append(Record record) {
-    record.boot = bootIndex; record.seq = records.size();
+    record.boot = 0; record.seq = records.size();
     record.t_us = std::max(record.t_us ? record.t_us : nativeNow, records.empty() ? uint64_t(0) : records.back().t_us);
     seal(record); assert(valid(record)); records.push_back(record); return true;
 }

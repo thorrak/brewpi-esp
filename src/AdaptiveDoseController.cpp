@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "AdaptiveDoseController.h"
 
 #include <algorithm>
@@ -55,6 +54,25 @@ void Controller::reset() {
     coast_min_c_ = infinity();
     clearMeasurements();
     emit(Phase::Idle, nanValue());
+}
+
+Tuning Controller::tuning() const {
+    return {gain_, learning_updates_};
+}
+
+bool Controller::tuningValid(const Tuning& tuning) const {
+    return config_valid_ && std::isfinite(tuning.gain_c_per_on_s) &&
+        tuning.gain_c_per_on_s >= config_.minimum_gain_c_per_on_s &&
+        tuning.gain_c_per_on_s <= config_.maximum_gain_c_per_on_s;
+}
+
+bool Controller::restoreTuning(const Tuning& tuning) {
+    if (!tuningValid(tuning)) return false;
+    gain_ = tuning.gain_c_per_on_s;
+    learning_updates_ = tuning.learning_updates;
+    output_.gain_c_per_on_s = gain_;
+    output_.learning_updates = learning_updates_;
+    return true;
 }
 
 void Controller::resetTransient() {

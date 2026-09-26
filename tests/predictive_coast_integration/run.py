@@ -39,7 +39,7 @@ with tempfile.TemporaryDirectory(prefix='brewpi-integration-') as temp:
     build = Path(temp)
     for file in (HERE / 'shim').iterdir():
         shutil.copyfile(file, build / file.name)
-    names = ['PredictiveCoastController', 'AdaptiveDoseController', 'GlycolCoolingController', 'GlycolMode', 'GlycolLog', 'GlycolParams', 'TempSensor',
+    names = ['PredictiveCoastController', 'AdaptiveDoseController', 'GlycolCoolingController', 'GlycolTuning', 'GlycolMode', 'GlycolLog', 'GlycolParams', 'TempSensor',
              'FilterFixed', 'FilterCascaded', 'TemperatureFormats']
     for name in names:
         for suffix in ['.cpp', '.h']:
@@ -53,7 +53,7 @@ with tempfile.TemporaryDirectory(prefix='brewpi-integration-') as temp:
     control = (ROOT / 'src/TempControl.cpp').read_text()
     definitions = ('#include "TempControl.h"\n#include "Ticks.h"\n#include "PiLink.h"\n'
                    '#include "GlycolMode.h"\n#include "GlycolLog.h"\n#include "ChamberMode.h"\n'
-                   '#include <cmath>\nnamespace WaterTest { bool controlOwned() { return false; } }\n')
+                   '#include <cmath>\nnamespace WaterTest { bool owned = false; bool controlOwned() { return owned; } }\n')
     for signature in ['ControlConstants::ControlConstants()', 'void ControlConstants::setDefaults()',
                       'ControlSettings::ControlSettings()', 'void ControlSettings::setDefaults()']:
         definitions += body(constants, signature)
@@ -64,6 +64,9 @@ with tempfile.TemporaryDirectory(prefix='brewpi-integration-') as temp:
                       'ControlContext TempControl::makeControlContext()',
                       'void TempControl::reset()', 'void TempControl::resetGlycolControl()',
                       'void TempControl::updateState()', 'void TempControl::updateOutputs()',
+                      'void TempControl::storeSettings()', 'void TempControl::initFilters()',
+                      'void TempControl::loadGlycolParams()',
+                      'void TempControl::resumeAfterWaterTest(const ControlSettings& saved)',
                       'void TempControl::setMode(char newMode, bool force)',
                       'bool TempControl::stateIsCooling()', 'bool TempControl::stateIsHeating()',
                       'void TempControl::getControlVariablesDoc(JsonDocument& doc)',

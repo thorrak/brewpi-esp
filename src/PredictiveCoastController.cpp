@@ -1,4 +1,3 @@
-/* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "PredictiveCoastController.h"
 
 #include <algorithm>
@@ -59,6 +58,31 @@ void Controller::reset() {
     off_rate_ = start_s_ = off_s_ = pulse_budget_s_ = actual_on_s_ = 0.0;
     clearMeasurements();
     emit(Phase::Idle, nanValue());
+}
+
+Tuning Controller::tuning() const {
+    return {coast_s_, budget_gain_, learning_updates_, response_updates_};
+}
+
+bool Controller::tuningValid(const Tuning& tuning) const {
+    return config_valid_ && std::isfinite(tuning.coast_s) &&
+        tuning.coast_s >= config_.min_coast_estimate_s &&
+        tuning.coast_s <= config_.max_coast_estimate_s &&
+        std::isfinite(tuning.budget_gain_c_per_s) &&
+        tuning.budget_gain_c_per_s >= config_.minimum_budget_gain_c_per_s;
+}
+
+bool Controller::restoreTuning(const Tuning& tuning) {
+    if (!tuningValid(tuning)) return false;
+    coast_s_ = tuning.coast_s;
+    budget_gain_ = tuning.budget_gain_c_per_s;
+    learning_updates_ = tuning.learning_updates;
+    response_updates_ = tuning.response_updates;
+    output_.coast_s = coast_s_;
+    output_.budget_gain_c_per_s = budget_gain_;
+    output_.learning_updates = learning_updates_;
+    output_.response_updates = response_updates_;
+    return true;
 }
 
 void Controller::resetTransient() {

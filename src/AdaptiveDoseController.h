@@ -1,7 +1,6 @@
 /*
  * Adaptive pulse-dose cooling, ported from chillsim's frozen controller.
  * Copyright (C) 2026 BrewPi contributors
- * SPDX-License-Identifier: GPL-3.0-or-later
  *
  * This core uses only time, beer temperature, setpoint and pump history.
  * All temperatures are Celsius, rates Celsius/second, and times seconds.
@@ -59,6 +58,11 @@ struct Output {
     double actual_on_s;
 };
 
+struct Tuning {
+    double gain_c_per_on_s;
+    uint32_t learning_updates;
+};
+
 class Controller {
 public:
     explicit Controller(const Config& config = Config());
@@ -79,6 +83,10 @@ public:
     // Full reset is only for initialization/reconfiguration with outputs OFF.
     // Runtime inhibition must use inhibit() so relay timing is not forgotten.
     void reset();
+    Tuning tuning() const;
+    bool tuningValid(const Tuning& tuning) const;
+    // Restore only learned estimates, leaving relay timing and measurements intact.
+    bool restoreTuning(const Tuning& tuning);
     bool configurationValid() const { return config_valid_; }
     const Config& configuration() const { return config_; }
     const Output& output() const { return output_; }

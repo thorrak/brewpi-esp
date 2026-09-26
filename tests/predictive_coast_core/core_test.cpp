@@ -195,6 +195,78 @@ int main() {
         assert(controller.output().phase == Phase::DisabledOrSensorFault);
     }
     {
+        const Config config = shortObservation();
+        Controller trained(config);
+        const double samples[] = {21.0, 20.9, 20.5, 20.1, 19.9, 20.0, 20.2};
+        for (int t = 0; t <= 6; ++t) trained.step(t, samples[t], 20.0);
+        const auto tuning = trained.tuning();
+        assert(tuning.learning_updates == 1 && tuning.response_updates == 1);
+        assert(tuning.coast_s != config.initial_coast_s);
+        assert(tuning.budget_gain_c_per_s != config.startup_budget_c_per_s);
+        assert(trained.step(7, 25, 20).pump_on);
+
+        Controller restored(config);
+        assert(restored.restoreTuning(tuning));
+        assert(!restored.output().pump_on && restored.output().phase == Phase::Idle);
+        assert(std::isnan(restored.output().temperature_c));
+        assert(restored.output().actual_on_s == 0 && restored.output().pulse_budget_s == 0);
+        assert(restored.tuning().coast_s == tuning.coast_s);
+        assert(restored.tuning().budget_gain_c_per_s == tuning.budget_gain_c_per_s);
+        assert(restored.tuning().learning_updates == tuning.learning_updates);
+        assert(restored.tuning().response_updates == tuning.response_updates);
+        const auto decision = restored.step(0, 20.5, 20);
+        assert(decision.pump_on && decision.pulse_budget_s == config.startup_pulse_s);
+        assert(decision.pulse_budget_s != Controller(config).step(0, 20.5, 20).pulse_budget_s);
+
+        assert(restored.restoreTuning({5.0, 0.01, 7, 8}));
+        assert(restored.output().pump_on && restored.output().phase == decision.phase);
+        assert(restored.output().pulse_budget_s == decision.pulse_budget_s);
+        assert(restored.step(0, 19, 20).temperature_c == decision.temperature_c);
+        restored.inhibit(0.5);
+        assert(restored.restoreTuning(tuning));
+        assert(!restored.step(2, 21, 20).pump_on);
+        assert(restored.step(2.5, 21, 20).pump_on);
+
+        restored.reset();
+        assert(restored.tuning().learning_updates == 0 && restored.tuning().response_updates == 0);
+        assert(restored.tuning().coast_s == config.initial_coast_s);
+        assert(restored.tuning().budget_gain_c_per_s == config.startup_budget_c_per_s);
+    }
+    {
+        Controller controller;
+        const PredictiveCooling::Tuning saved = {600, 0.015, 7, 8};
+        assert(controller.restoreTuning(saved));
+        const double invalid_coasts[] = {std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::infinity(),
+            controller.configuration().min_coast_estimate_s - 1,
+            controller.configuration().max_coast_estimate_s + 1};
+        for (double coast : invalid_coasts) {
+            const PredictiveCooling::Tuning bad = {coast, 0.04, 99, 100};
+            assert(!controller.tuningValid(bad) && !controller.restoreTuning(bad));
+            assert(controller.tuning().coast_s == saved.coast_s);
+            assert(controller.tuning().budget_gain_c_per_s == saved.budget_gain_c_per_s);
+            assert(controller.tuning().learning_updates == saved.learning_updates);
+            assert(controller.tuning().response_updates == saved.response_updates);
+        }
+        const double invalid_gains[] = {std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::infinity(), 0.0,
+            controller.configuration().minimum_budget_gain_c_per_s / 2};
+        for (double gain : invalid_gains) {
+            const PredictiveCooling::Tuning bad = {900, gain, 99, 100};
+            assert(!controller.tuningValid(bad) && !controller.restoreTuning(bad));
+            assert(controller.tuning().coast_s == saved.coast_s);
+            assert(controller.tuning().budget_gain_c_per_s == saved.budget_gain_c_per_s);
+            assert(controller.tuning().learning_updates == saved.learning_updates);
+            assert(controller.tuning().response_updates == saved.response_updates);
+        }
+        assert(controller.restoreTuning({controller.configuration().min_coast_estimate_s,
+            controller.configuration().minimum_budget_gain_c_per_s, 0, 0}));
+        assert(controller.restoreTuning({controller.configuration().max_coast_estimate_s, 0.01, 1, 1}));
+        Config invalid_config;
+        invalid_config.min_on_s = 0;
+        assert(!Controller(invalid_config).restoreTuning(saved));
+    }
+    {
         double Config::* fields[] = {
             &Config::min_on_s, &Config::min_off_s, &Config::rate_window_s,
             &Config::measurement_window_s, &Config::deadband_c,

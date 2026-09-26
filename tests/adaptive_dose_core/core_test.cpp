@@ -100,6 +100,59 @@ int main() {
         assert(!controller.step(7201, std::numeric_limits<double>::quiet_NaN(), -20.0).pump_on);
     }
     {
+        Controller trained;
+        for (int t = 0; t <= 454; ++t) trained.step(t, 21.0, 20.0);
+        const auto tuning = trained.tuning();
+        assert(tuning.learning_updates == 1 && tuning.gain_c_per_on_s == 0.015);
+        assert(trained.output().pump_on);
+
+        Controller restored;
+        assert(restored.restoreTuning(tuning));
+        assert(!restored.output().pump_on && restored.output().phase == Phase::Idle);
+        assert(std::isnan(restored.output().temperature_c));
+        assert(restored.output().actual_on_s == 0 && restored.output().pulse_budget_s == 0);
+        assert(restored.tuning().gain_c_per_on_s == tuning.gain_c_per_on_s);
+        assert(restored.tuning().learning_updates == tuning.learning_updates);
+        const auto decision = restored.step(0, 21.0, 20.0);
+        assert(decision.pump_on);
+        assert(decision.pulse_budget_s == 0.5 / tuning.gain_c_per_on_s);
+        assert(decision.pulse_budget_s != Controller().step(0, 21.0, 20.0).pulse_budget_s);
+
+        const AdaptiveCooling::Tuning replacement = {0.04, 7};
+        assert(restored.restoreTuning(replacement));
+        assert(restored.output().pump_on && restored.output().phase == decision.phase);
+        assert(restored.output().pulse_budget_s == decision.pulse_budget_s);
+        assert(restored.step(0, 19, 20).temperature_c == decision.temperature_c);
+        restored.inhibit(0.5);
+        assert(restored.restoreTuning(tuning));
+        assert(!restored.step(2, 21, 20).pump_on);
+        assert(restored.step(2.5, 21, 20).pump_on);
+
+        restored.reset();
+        assert(restored.tuning().learning_updates == 0);
+        assert(restored.tuning().gain_c_per_on_s == restored.configuration().initial_gain_c_per_on_s);
+    }
+    {
+        Controller controller;
+        const AdaptiveCooling::Tuning saved = {0.04, 7};
+        assert(controller.restoreTuning(saved));
+        const double invalid[] = {std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::infinity(), 0.0,
+            controller.configuration().minimum_gain_c_per_on_s / 2,
+            controller.configuration().maximum_gain_c_per_on_s * 2};
+        for (double gain : invalid) {
+            const AdaptiveCooling::Tuning bad = {gain, 99};
+            assert(!controller.tuningValid(bad) && !controller.restoreTuning(bad));
+            assert(controller.tuning().gain_c_per_on_s == saved.gain_c_per_on_s);
+            assert(controller.tuning().learning_updates == saved.learning_updates);
+        }
+        assert(controller.restoreTuning({controller.configuration().minimum_gain_c_per_on_s, 0}));
+        assert(controller.restoreTuning({controller.configuration().maximum_gain_c_per_on_s, 1}));
+        Config invalid_config;
+        invalid_config.min_on_s = 0;
+        assert(!Controller(invalid_config).restoreTuning(saved));
+    }
+    {
         Config config;
         config.min_on_s = 1.0;
         Controller bad_minimum(config);

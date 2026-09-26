@@ -70,8 +70,11 @@ has the existing worker semantics.
 
 `/glycolConfig.json` stores the heating start `trigger_margin`, which defaults to
 0.1 degrees in the selected display unit. Adaptive cooling defaults are explicit,
-unit-labelled fields in `AdaptiveCooling::Config`. Gain learning is RAM-only and
-returns to the default after reboot.
+unit-labelled fields in `AdaptiveCooling::Config`. The learned cooling-response
+gain and its update counter are saved to flash after learning changes, once the
+heating and cooling outputs are OFF. Startup restores the latest saved tuning; missing,
+malformed or unsupported-version records use the initial defaults. Pump state,
+temperature history, incomplete observations and elapsed timers start fresh.
 
 The Telnet `v` control-variable response adds an `adaptiveCooling` object:
 
