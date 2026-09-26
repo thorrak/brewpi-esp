@@ -361,7 +361,7 @@ void ExtendedSettings::loadFromFilesystem() {
     if(json_doc[ExtendedSettingsKeys::invertTFT].is<bool>()) invertTFT = json_doc[ExtendedSettingsKeys::invertTFT];
     if(json_doc[ExtendedSettingsKeys::glycol].is<bool>()) glycol = json_doc[ExtendedSettingsKeys::glycol];
     if(json_doc[ExtendedSettingsKeys::glycolCoolingAlgorithm].is<const char *>()) {
-        // Missing or invalid values keep the predictive default used by older firmware.
+        // Missing or invalid values keep the predictive default.
         GlycolCooling::parseAlgorithm(json_doc[ExtendedSettingsKeys::glycolCoolingAlgorithm].as<const char *>(), glycolCoolingAlgorithm);
     }
     if(json_doc[ExtendedSettingsKeys::largeTFT].is<bool>()) largeTFT = json_doc[ExtendedSettingsKeys::largeTFT];

@@ -149,12 +149,8 @@ static void manualLifecycleChecks() {
                 for (unsigned i = 0; i < 3; ++i) {
                     ticks.now_ms = 1000000 + 1000 * i;
                     control.updateState(); control.updateOutputs();
-#ifdef BREWPI_CHILLSIM_TEST
-                    assert(!f.cooler.isActive() && !f.heater.isActive() && !f.light.isActive());
-#else
                     assert(f.cooler.isActive() && f.heater.isActive() && f.light.isActive());
                     assert(fan.isActive());
-#endif
                 }
                 if (manual_already_off) {
                     f.cooler.setActive(false); f.heater.setActive(false); f.light.setActive(false);
@@ -179,12 +175,8 @@ static void manualLifecycleChecks() {
                     if (!restart_heater) {
                         assert(f.cooler.isActive() == (elapsed >= 5));
                     } else {
-#ifdef BREWPI_CHILLSIM_TEST
-                        assert(!f.heater.isActive() && !f.light.isActive());
-#else
                         assert(f.light.isActive() == (elapsed >= 7));
                         assert(!f.heater.isActive());
-#endif
                     }
                 }
                 // Entering test mode also turns automatic outputs OFF before save.
@@ -393,18 +385,14 @@ int main() {
         f.update(130000); assert(f.pump());
         assert(f.runtime.pump_started_s==130);
     }
-    // Normal builds retain heating PID/window; test builds must never request heat.
+    // Heating uses the PID output and minimum window duration.
     {
         Fixture f; f.heater_present=true; f.input.value=q9(19);
         f.update(60000); f.update(61000);
-#ifdef BREWPI_CHILLSIM_TEST
-        assert(!f.heat());
-#else
         assert(f.heat());
         assert(f.runtime.heating_window_on_time_s>=10);
         auto count=f.integral_counter;
         f.update(61500,false); assert(f.integral_counter==count);
-#endif
     }
     // Runtime selection waits for the actual ON minimum, then observes OFF
     // timing even when UI callbacks, mode inhibition or clock wrap intervene.
@@ -445,8 +433,8 @@ int main() {
         assert(f.runtime.cooling_output.learning_updates==0);
         assert(f.runtime.cooling_output.response_updates==0);
     }
-    // Compile the actual diagnostic methods with real ArduinoJson. Both
-    // profiles expose the predictive identity and parameters in Celsius,
+    // Compile the actual diagnostic methods with real ArduinoJson. Diagnostics
+    // expose the predictive identity and parameters in Celsius,
     // preserve null continuous budgets, and fit the Telnet response buffer.
     {
         Fixture f; f.input.value=q9(25); f.update(60000);
@@ -514,13 +502,8 @@ int main() {
         variables.clear(); constants.clear();
         tempControl.getControlVariablesDoc(variables);
         tempControl.getControlConstantsDoc(constants);
-#ifdef BREWPI_CHILLSIM_TEST
-        assert(variables["glycolCooling"]["coolingOnlyBuild"].as<bool>());
-        assert(!constants["glycolCoolingConfig"].isNull());
-#else
         assert(variables["glycolCooling"].isNull());
         assert(constants["glycolCoolingConfig"].isNull());
-#endif
         extendedSettings.glycol=true;
     }
     // Pulse-dose uses the same envelope but reports only its own configuration

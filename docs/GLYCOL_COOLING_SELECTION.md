@@ -99,11 +99,7 @@ remain separate. Only the active core processes temperature samples. `GlycolMode
 and heating/cooling coordination; `TempControl` retains hardware output and
 persistence responsibilities. `ChamberMode` and `ControlContext` are unchanged.
 
-Firmware revision is `v17-glycol-select1`. Build the appropriate normal board
-target, or `esp32_chillsim_test` for the dedicated cooling-only D32 Pro image.
-The cooling-only image still disables heating and starts OFF after reboot; it
-supports both cooling selections. Normal images retain configured relay polarity
-and heating capability.
+Build the appropriate board target.
 
 The new selector also requires the updated on-device web UI. Firmware and UI
 filesystem images are separate artifacts: a firmware-only flash does not update
@@ -136,8 +132,8 @@ The selector tests compare 88,000 decisions against the original cores and cover
 switching, independent learning, faults, repeated requests, and differing relay
 minimums. The integration suite retains its historical directory name but now
 exercises both selections with real BrewPi temperature conversion, clock wrap,
-heating interlocks, and ArduinoJson diagnostics, in both normal and cooling-only
-builds, with optional logging both enabled and disabled. It also checks manual
+heating interlocks, and ArduinoJson diagnostics, with optional logging both enabled
+and disabled. It also checks manual
 relay ownership with absent sensors, conservative manual-to-automatic protection,
 OFF commands before storage access, CSV schema migration, and failed migration.
 The settings suite exercises actual persistence, HTTP, and Telnet methods.

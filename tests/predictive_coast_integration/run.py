@@ -72,12 +72,10 @@ with tempfile.TemporaryDirectory(prefix='brewpi-integration-') as temp:
     (build / 'Defaults.cpp').write_text(definitions)
     shutil.copyfile(HERE / 'integration.cpp', build / 'integration.cpp')
     compiler = os.environ.get('CXX', 'c++')
-    for cooling_only, logging in [(False, False), (True, False), (False, True), (True, True)]:
-        executable = build / ('test-' + ('cooling-only' if cooling_only else 'normal') + ('-logging' if logging else ''))
+    for logging in [False, True]:
+        executable = build / ('test' + ('-logging' if logging else ''))
         command = [compiler, '-std=c++17', '-O2', '-fwrapv', '-fno-fast-math',
                    '-ffp-contract=off', '-I', str(build), '-I', str(json_path)]
-        if cooling_only:
-            command.append('-DBREWPI_CHILLSIM_TEST')
         if logging:
             command.append('-DENABLE_GLYCOL_LOGGING')
         command += [str(p) for p in build.glob('*.cpp')] + ['-o', str(executable)]

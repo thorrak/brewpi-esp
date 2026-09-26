@@ -16,14 +16,9 @@ bool stateIsHeating(const GlycolMode::Context& ctx) {
 }
 
 bool heatingCapable(const GlycolMode::Context& ctx) {
-#ifdef BREWPI_CHILLSIM_TEST
-    (void) ctx;
-    return false; // This hardware run is explicitly cooling-only.
-#else
     return ctx.cc.lightAsHeater
         ? ctx.light != &defaultActuator
         : ctx.heater != &defaultActuator;
-#endif
 }
 
 void resetHeatingWindow(GlycolMode::Context& ctx) {

@@ -169,13 +169,6 @@ std::string EepromManager::fetchmDNSName()
 		}
 	}
 
-#ifdef BREWPI_CHILLSIM_TEST
-    // The config-file name is the source of truth for WiFi and mDNS. Setting
-    // only wifi_cfg's default variable would be overwritten by this fallback.
-    // A saved name above still takes precedence for an explicitly named board.
-    return std::string("chillsim");
-#endif
-
     // There isn't a straightforward "getChipId" function on an ESP32, so we'll have to make do
     char ssid[15]; //Create a Unique AP from MAC address
     uint8_t mac[6];

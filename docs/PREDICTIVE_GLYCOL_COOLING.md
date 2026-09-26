@@ -10,8 +10,7 @@ controller cores retain the behavior verified below.
 `f2f72322e166963199fd8ae257a6746faab941ab` and replaces its active glycol cooling
 policy with the frozen `PredictiveCoastController` tested in Chillsim. The
 portable C++ implementation is `src/PredictiveCoastController.cpp`; BrewPi uses it
-through `GlycolMode.cpp`. The original heating PID and heating windows remain in
-normal builds. The dedicated `esp32_chillsim_test` build remains cooling-only.
+through `GlycolMode.cpp`. The original heating PID and heating windows remain.
 
 Only the beer sensor, beer setpoint, elapsed time, and the controller's pump
 history are inputs. No glycol sensor, flow estimate, or simulator state is needed.
@@ -102,25 +101,17 @@ sensor validity, pump, relay timing, and actuator fields plus:
 
 The `c`/`C:` response exposes the active algorithm's defaults under `glycolCoolingConfig`.
 The optional chamber/glycol probe is diagnostic only. Learning is RAM-only.
-The test build exposes these objects even before glycol mode is enabled.
 Clients that consume earlier `adaptiveCooling` or `predictiveCooling` objects
 must use the common name and check its algorithm identifier. Fermentrack's normal temperature/control interface is
 unchanged; 30-second graph samples still cannot show every short pump pulse.
 
 ## Build and verify
 
-Firmware revision: `v17-glycol-select1`. Build a normal board image or the inherited
-cooling-only D32 Pro image:
+Build the appropriate board image:
 
 ```sh
 pio run -e esp32_wifi_iic
-pio run -e esp32_chillsim_test
 ```
-
-The test image fixes GPIO25/GPIO26 to active-low, holds heating OFF, and starts
-in OFF mode on boot. Normal board targets retain configured polarity and heating.
-WiFi uses existing provisioning; an optional ignored credentials header remains
-supported. Building this branch does not flash a device or change a running test.
 
 Portable and integration checks:
 
@@ -144,5 +135,5 @@ host integration checks do not measure GPIO edges or real probe timing.
 Port validation on 2026-09-22 passed: all 1,814,400 replay decisions agreed
 exactly, including numeric diagnostics; 46 new native parity regression tests
 and the complete 510-test Chillsim suite passed. The portable C++11 checks,
-both native integration profiles, and both ESP32 build targets above passed.
+native integration checks, and ESP32 build passed.
 The reference controller and physics model were unchanged.

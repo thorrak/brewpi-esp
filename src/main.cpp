@@ -5,7 +5,9 @@
 #include <esp_timer.h>
 #include <esp_littlefs.h>
 #include "WaterTest.h"
+#ifdef ENABLE_GLYCOL_LOGGING
 #include "ntp.h"
+#endif
 
 #include <thorlog.h>
 #include <thorlog_espidf.h>
@@ -140,8 +142,7 @@ void setup()
         esp_vfs_littlefs_conf_t conf = {};
         conf.base_path = "/littlefs";
         conf.partition_label = "spiffs";  // Partition table CSV uses "spiffs" as the label
-        // A failed mount must not erase configuration or an unacknowledged test.
-        conf.format_if_mount_failed = false;
+        conf.format_if_mount_failed = true;
         conf.dont_mount = false;
         esp_err_t ret = esp_vfs_littlefs_register(&conf);
         if (ret != ESP_OK) {
@@ -172,7 +173,9 @@ void setup()
   // calls NimBLEDevice::init() afterwards and re-attaches to the controller,
   // which is kept resident by .prov_ble.memory_policy = KEEP_ALL.
   initialize_wifi();
+#ifdef ENABLE_GLYCOL_LOGGING
   initNTP();
+#endif
 
 #ifdef HAS_BLUETOOTH
   bt_scanner.init();
@@ -211,12 +214,6 @@ void setup()
 	settingsManager.loadSettings();  // Also fully loads devices
   WaterTest::tick();
 
-#ifdef BREWPI_CHILLSIM_TEST
-    // A reboot never silently resumes an unattended hardware experiment.
-    tempControl.setMode(Modes::off, true);
-    tempControl.updateOutputs();
-#endif
-
 #if BREWPI_SIMULATE
 	simulator.step();
 	// initialize the filters with the assigned initial temp value
@@ -227,7 +224,7 @@ void setup()
 	// Once the WiFi and piLink are initialized, we want to display a screen with connection information
   display_connect_info_and_create_callback();
 
-  // NTP runs asynchronously once after the first WiFi association.
+  // Log reboot event (NTP sync happens in display_connect_info_and_create_callback)
 #ifdef ENABLE_GLYCOL_LOGGING
   glycolLog.logReboot();
 #endif
@@ -348,14 +345,6 @@ void loop() {
 }
 
 extern "C" void app_main(void) {
-#ifdef BREWPI_CHILLSIM_TEST
-    // Establish OFF before NVS recovery, filesystem or network initialization.
-    // The known shield is active-low even without persisted device settings.
-    gpio_set_level(GPIO_NUM_25, 1);
-    gpio_set_level(GPIO_NUM_26, 1);
-    gpio_set_direction(GPIO_NUM_25, GPIO_MODE_OUTPUT);
-    gpio_set_direction(GPIO_NUM_26, GPIO_MODE_OUTPUT);
-#endif
     // Initialize NVS (required for WiFi credential storage)
     esp_err_t nvs_ret = nvs_flash_init();
     if (nvs_ret == ESP_ERR_NVS_NO_FREE_PAGES || nvs_ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {

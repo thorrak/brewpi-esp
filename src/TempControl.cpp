@@ -270,9 +270,6 @@ void TempControl::resetGlycolControl() {
     cooler->setActive(false);
     heater->setActive(false);
     if (cc.lightAsHeater) light->setActive(false);
-#ifdef BREWPI_CHILLSIM_TEST
-    light->setActive(false);
-#endif
     fan->setActive(false);
     if (cs.mode == Modes::test) {
         // Manual commands bypass the cooling cores, including OFF commands
@@ -310,11 +307,9 @@ void TempControl::updateState(){
         piLink.printTemperatures(0, annotation);
     }
 
-#ifndef BREWPI_CHILLSIM_TEST
     // Manual commands own the relays until an explicit mode transition. Test
     // mode does not require temperature sensors or an automatic setpoint.
     if (cs.mode == Modes::test) return;
-#endif
 
     if(cs.mode == Modes::off){
         if (extendedSettings.glycol) resetGlycolControl();
@@ -356,16 +351,11 @@ void TempControl::updateState(){
 
 void TempControl::updateOutputs() {
     if (WaterTest::controlOwned()) return;
-#ifndef BREWPI_CHILLSIM_TEST
 	if (cs.mode==Modes::test)
 		return;
-#endif
 		
 	cameraLight.update();
 	bool heating = stateIsHeating();
-#ifdef BREWPI_CHILLSIM_TEST
-	heating = false; // Physical test build cannot energize either heating path.
-#endif
 	bool cooling = stateIsCooling();
 	cooler->setActive(cooling);		
 	heater->setActive(!cc.lightAsHeater && heating);	
@@ -373,9 +363,6 @@ void TempControl::updateOutputs() {
 	bool lightActive = extendedSettings.glycol && cc.lightAsHeater
 		? heating
 		: isDoorOpen() || (cc.lightAsHeater && heating) || cameraLightState.isActive();
-	#ifdef BREWPI_CHILLSIM_TEST
-	lightActive = false;
-	#endif
 	light->setActive(lightActive);
 	fan->setActive(heating || cooling);
 #ifdef ENABLE_GLYCOL_LOGGING
@@ -671,11 +658,7 @@ void TempControl::getControlVariablesDoc(JsonDocument& doc) {
   doc["posPeakEst"] = tempToDouble(cv.posPeakEstimate, Config::TempFormat::tempDecimals);
   doc["negPeak"] = tempToDouble(cv.negPeak, Config::TempFormat::tempDecimals);
   doc["posPeak"] = tempToDouble(cv.posPeak, Config::TempFormat::tempDecimals);
-#ifdef BREWPI_CHILLSIM_TEST
-  if (true) { // Identify the dedicated test image before enabling glycol mode.
-#else
   if (extendedSettings.glycol) {
-#endif
     // Explicit units: display format never changes these internal quantities.
     JsonObject cooling = doc["glycolCooling"].to<JsonObject>();
     const auto& output = glycolRuntime.cooling_output;
@@ -707,11 +690,6 @@ void TempControl::getControlVariablesDoc(JsonDocument& doc) {
     cooling["coolerActive"] = cooler != &defaultActuator && cooler->isActive();
     cooling["heaterActive"] = heater != &defaultActuator && heater->isActive();
     cooling["lightActive"] = light != &defaultActuator && light->isActive();
-#ifdef BREWPI_CHILLSIM_TEST
-    cooling["coolingOnlyBuild"] = true;
-#else
-    cooling["coolingOnlyBuild"] = false;
-#endif
     cooling["rateCPerSecond"] = output.rate_c_per_s;
     if (glycolRuntime.cooling.selection() == GlycolCooling::Algorithm::PredictiveCoast) {
         cooling["coastSeconds"] = output.coast_s;
@@ -772,11 +750,7 @@ void TempControl::getControlConstantsDoc(JsonDocument& doc) {
   doc["KiHeat"] = fixedPointToDouble(cc.Ki_heat, Config::TempFormat::fixedPointDecimals);
   doc["KdHeat"] = fixedPointToDouble(cc.Kd_heat, Config::TempFormat::fixedPointDecimals);
   doc["pidMaxHeat"] = tempDiffToDouble(cc.pidMax_heat, Config::TempFormat::tempDiffDecimals);
-#ifdef BREWPI_CHILLSIM_TEST
-  if (true) {
-#else
   if (extendedSettings.glycol) {
-#endif
     JsonObject cooling = doc["glycolCoolingConfig"].to<JsonObject>();
     cooling["algorithm"] = glycolRuntime.cooling.algorithmVersion();
     cooling["selection"] = GlycolCooling::selectionName(glycolRuntime.cooling.selection());

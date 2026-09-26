@@ -75,8 +75,8 @@ Every actual logical pump/heater command transition has its own record, independ
 of temperature sampling. These commands do not prove relay contact state or flow.
 Device GUID, test UUID, boot UUID and per-boot sequence identify the immutable
 survey, configuration, samples and events. Monotonic microseconds drive timing;
-one startup NTP attempt supplies a UTC anchor when available. Internet time is
-not required to run the experiment.
+builds with `ENABLE_GLYCOL_LOGGING` make one startup NTP attempt to supply a UTC
+anchor when available. Internet time is not required to run the experiment.
 
 A compact checksummed LittleFS journal retains the bounded run during network
 outages. Preflight checks free capacity. Uploads run on a separate task after
