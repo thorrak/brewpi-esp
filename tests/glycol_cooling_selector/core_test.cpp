@@ -20,6 +20,22 @@ static void sharedEqual(const GlycolCooling::Output& a, const Original& b) {
     assert(a.learning_updates == b.learning_updates);
 }
 int main() {
+    // Experiment pulses are external to both cooling cores. Even a fresh core
+    // must honor the handoff OFF interval, including after another inhibit.
+    for (Algorithm algorithm : {Algorithm::PredictiveCoast, Algorithm::PulseDose}) {
+        PredictiveCooling::Config predictive;
+        AdaptiveCooling::Config dose;
+        predictive.min_off_s = dose.min_off_s = 7;
+        Controller c(algorithm, predictive, dose);
+        c.externalOff(1000);
+        assert(!c.output().pump_on);
+        for (unsigned t = 1000; t < 1007; ++t) {
+            if (t == 1003) c.inhibit(t);
+            assert(!c.step(t, 25, 21).pump_on);
+        }
+        assert(c.step(1007, 25, 21).pump_on);
+        assert(c.output().learning_updates == 0);
+    }
     // With no selection changes the wrapper is exactly transparent, including
     // learning, missing ticks, setpoint changes, invalid inputs and duplicate ticks.
     for (Algorithm algorithm : {Algorithm::PredictiveCoast, Algorithm::PulseDose}) {

@@ -104,6 +104,14 @@ Output Controller::inhibit(double t) {
     last_time_s_ = t;
     return output_;
 }
+void Controller::externalOff(double t) {
+    t = validClock(t);
+    inhibitCores(t);
+    copyActiveOutput();
+    last_time_s_ = last_edge_s_ = t;
+    off_minimum_s_ = minOffSeconds();
+    handoff_wait_ = true;
+}
 Output Controller::step(double t, double sensor, double setpoint, bool connected) {
     // Faults override even a duplicate tick or a pending minimum-ON switch.
     if (validClock(t) != t || !connected || !validTemperature(sensor) ||

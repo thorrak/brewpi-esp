@@ -39,6 +39,10 @@ public:
     void request(Algorithm algorithm) { requested_ = algorithm; }
     Output step(double time_s, double sensor_c, double setpoint_c, bool connected = true);
     Output inhibit(double time_s);
+    // Re-enter normal control after a separately owned experiment. Establish a
+    // conservative OFF interval at handoff even though these cores did not
+    // observe the experiment's physical pulses.
+    void externalOff(double time_s);
     void reset(Algorithm initial = Algorithm::PredictiveCoast);
     const Output& output() const { return output_; }
     Algorithm selection() const { return active_; }

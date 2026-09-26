@@ -4,6 +4,7 @@ import UpstreamSettings from "@/components/UpstreamSettings.vue";
 import ConfigSensorsActuators from "@/components/ConfigSensorsActuators.vue";
 import About from "@/components/About.vue";
 import ExtendedSettings from "@/components/ExtendedSettings.vue";
+import WaterTest from "@/components/WaterTest.vue";
 
 // NOTE - The below paths MUST also be set up in the relevant firmware!
 const routes = [
@@ -31,6 +32,11 @@ const routes = [
         path: "/settings",
         name: "ExtendedSettings",
         component: ExtendedSettings,
+    },
+    {
+        path: "/water-test",
+        name: "WaterTest",
+        component: WaterTest,
     },
 ];
 

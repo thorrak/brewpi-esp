@@ -9,6 +9,7 @@ This project ports the BrewPi firmware to the ESP8266, ESP32, and ESP32-S2 contr
 > **Note:** ESP8266 support is deprecated as of the upcoming release. Existing ESP8266 builds will continue to receive bug fixes for a limited time, but new features will only target the ESP32 and ESP32-S2. For existing builds using the LoLin D1 Mini, the LoLin S2 Mini (ESP32-S2) is a pin-compatible replacement. See the [ESP8266 pinout](#esp8266) section below for more details.
 
 ### Documentation:
+* [Contribute a glycol water test](docs/GLYCOL_DATA_COLLECTION.md)
 * [Selecting the glycol cooling algorithm](docs/GLYCOL_COOLING_SELECTION.md)
 * [Selecting your Hardware](docs/source/Selecting%20an%20ESP%20Board.md)  
 * [Building a "Solder Free" BrewPi](docs/source/Solder%20Free%20BrewPi.md)  

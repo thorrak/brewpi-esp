@@ -1,0 +1,31 @@
+{
+  "device_guid": "DE00000000000001",
+  "active": false,
+  "control_owned": false,
+  "phase": "idle",
+  "pulse_number": 0,
+  "elapsed_s": 0,
+  "max_duration_s": 5400,
+  "pump_on": false,
+  "heater_on": false,
+  "beer_c": 21.5,
+  "glycol_c": null,
+  "test_id": "",
+  "outcome": "",
+  "reason": "",
+  "upload_status": "idle",
+  "upload_error": "",
+  "result_url": "http://chill.fermentrack.net/DE00000000000001/",
+  "preflight": {
+    "ready": true,
+    "reason": "",
+    "beer_available": true,
+    "chamber_available": true,
+    "cooler_available": true,
+    "free_bytes": 2000000,
+    "required_bytes": 500000
+  },
+  "moved_chamber_probe": false,
+  "can_start": true,
+  "can_resume": false
+}

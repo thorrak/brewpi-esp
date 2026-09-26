@@ -338,6 +338,7 @@ public:
 	TEMP_CONTROL_METHOD temperature getRoomTemp();
 
 	TEMP_CONTROL_METHOD void setMode(char newMode, bool force=false);
+    TEMP_CONTROL_METHOD void resumeAfterWaterTest(const ControlSettings& saved);
 
   /**
    * Get current temp control mode

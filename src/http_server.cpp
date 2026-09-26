@@ -25,6 +25,7 @@
 #include "SettingsManager.h"
 #include "ESP_BP_WiFi.h"
 #include "GlycolLog.h"
+#include "WaterTest.h"
 
 
 httpServer http_server;
@@ -86,6 +87,12 @@ static esp_err_t get_json_handler(httpd_req_t *req) {
 
 template<bool (*Handler)(const JsonDocument&, bool)>
 static esp_err_t put_json_handler(httpd_req_t *req) {
+    if (WaterTest::controlOwned()) {
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req,
+            "{\"status\":false,\"error\":\"Water test owns control. Stop the test and explicitly resume control from the Water test page.\"}");
+    }
     JsonDocument doc;
     if (httpServer::parseJsonBody(req, doc) != ESP_OK) {
         httpd_resp_set_type(req, "application/json");
@@ -282,6 +289,7 @@ bool processDeviceUpdateJson(const JsonDocument& json, bool triggerUpstreamUpdat
 
 
 void httpServer::processQueuedDeviceDefinition() {
+    if (WaterTest::controlOwned()) return;
     if(device_definition_update_requested) {
         deviceManager.updateDeviceDefinition(dev);
         device_definition_update_requested = false;
@@ -290,6 +298,7 @@ void httpServer::processQueuedDeviceDefinition() {
 
 
 void httpServer::processQueuedActions() {
+    if (WaterTest::controlOwned()) return;
     if(config_reset_requested) {
         Log.notice("Processing config reset request\r\n");
         vTaskDelay(pdMS_TO_TICKS(500));
@@ -979,6 +988,11 @@ const char* httpServer::getContentType(const char* filename) {
 }
 
 esp_err_t httpServer::handleFileRead(httpd_req_t *req, const char* path) {
+    // Research journals and recovery metadata are private runtime files, not
+    // web assets. Encoded/path-traversal variants must not reach the VFS either.
+    if (strncmp(path, "/water-test-", 12) == 0 || strstr(path, "..") || strchr(path, '%')) {
+        return ESP_FAIL;
+    }
     char fullPath[256];
     strlcpy(fullPath, path, sizeof(fullPath));
 
@@ -1047,6 +1061,44 @@ esp_err_t httpServer::not_found_handler(httpd_req_t *req, httpd_err_code_t err) 
 // Route registration
 // ============================================================================
 
+static esp_err_t water_test_action(httpd_req_t *req) {
+    JsonDocument body;
+    JsonDocument response;
+    std::string error;
+    if (req->content_len > 0 && httpServer::parseJsonBody(req, body) != ESP_OK) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        response["status"] = false;
+        response["error"] = "Expected a JSON object smaller than 4096 bytes.";
+        return httpServer::sendJsonDoc(req, response);
+    }
+    bool accepted = false;
+    if (strcmp(req->uri, "/api/water-test/start/") == 0) {
+        if (http_server.device_definition_update_requested || http_server.config_reset_requested ||
+            http_server.restart_requested || http_server.wifi_reset_requested ||
+            http_server.ota_update_requested) {
+            error = "A configuration change is pending. Wait for it to finish before starting.";
+        } else {
+            accepted = WaterTest::requestStart(body.as<JsonVariantConst>(), error);
+        }
+    } else if (strcmp(req->uri, "/api/water-test/stop/") == 0) {
+        accepted = WaterTest::requestStop(error);
+    } else {
+        accepted = WaterTest::requestResume(body.as<JsonVariantConst>(), error);
+    }
+    response["status"] = accepted;
+    if (!accepted) response["error"] = error;
+    httpd_resp_set_status(req, accepted ? "202 Accepted" : "409 Conflict");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpServer::sendJsonDoc(req, response);
+}
+
+static esp_err_t water_test_status(httpd_req_t *req) {
+    JsonDocument doc;
+    WaterTest::status(doc);
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpServer::sendJsonDoc(req, doc);
+}
+
 void httpServer::setStaticPages() {
     // Root and index
     const httpd_uri_t uri_root = { .uri = "/", .method = HTTP_GET, .handler = static_file_handler, .user_ctx = nullptr };
@@ -1065,6 +1117,8 @@ void httpServer::setStaticPages() {
     httpd_register_uri_handler(server_handle, &uri_about);
     const httpd_uri_t uri_settings = { .uri = "/settings", .method = HTTP_GET, .handler = static_file_handler, .user_ctx = nullptr };
     httpd_register_uri_handler(server_handle, &uri_settings);
+    const httpd_uri_t uri_water_test = { .uri = "/water-test", .method = HTTP_GET, .handler = static_file_handler, .user_ctx = nullptr };
+    httpd_register_uri_handler(server_handle, &uri_water_test);
 }
 
 
@@ -1135,6 +1189,13 @@ void httpServer::registerRoutes() {
     setStaticPages();
     setJsonPages();
     setPutPages();
+
+    const httpd_uri_t water_status = { .uri = "/api/water-test/", .method = HTTP_GET, .handler = water_test_status, .user_ctx = nullptr };
+    httpd_register_uri_handler(server_handle, &water_status);
+    for (const char* path : {"/api/water-test/start/", "/api/water-test/stop/", "/api/water-test/resume/"}) {
+        const httpd_uri_t action = { .uri = path, .method = HTTP_POST, .handler = water_test_action, .user_ctx = nullptr };
+        httpd_register_uri_handler(server_handle, &action);
+    }
 
     // Register 404 handler for file serving fallback
     httpd_register_err_handler(server_handle, HTTPD_404_NOT_FOUND, not_found_handler);

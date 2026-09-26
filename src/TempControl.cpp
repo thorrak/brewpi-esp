@@ -37,6 +37,7 @@
 #include "GlycolMode.h"
 #include <cmath>
 #include "GlycolLog.h"
+#include "WaterTest.h"
 
 TempControl tempControl;
 MinTimes minTimes;
@@ -206,6 +207,7 @@ void TempControl::updateTemperatures(){
 }
 
 void TempControl::updatePID(){
+    if (WaterTest::controlOwned()) return;
     static unsigned char integralUpdateCounter = 0;
     if(isBeerMode(cs)){
         if(cs.beerSetting == INVALID_TEMP){
@@ -279,6 +281,10 @@ void TempControl::resetGlycolControl() {
 }
 
 void TempControl::updateState(){
+    if (WaterTest::controlOwned()) {
+        state = cooler->isActive() ? COOLING : STATE_OFF;
+        return;
+    }
     //update state
     bool stayIdle = false;
     bool newDoorOpen = door->sense();
@@ -331,6 +337,7 @@ void TempControl::updateState(){
 
 
 void TempControl::updateOutputs() {
+    if (WaterTest::controlOwned()) return;
 #ifndef BREWPI_CHILLSIM_TEST
 	if (cs.mode==Modes::test)
 		return;
@@ -357,6 +364,7 @@ void TempControl::updateOutputs() {
 
 
 void TempControl::detectPeaks(){
+    if (WaterTest::controlOwned()) return;
     // Peak detection auto-tuning is designed for compressor mode
     // In glycol mode, use overshoot prediction instead
     if(extendedSettings.glycol) {
@@ -502,6 +510,32 @@ void TempControl::setMode(char newMode, bool force){
 		if (extendedSettings.glycol) updateOutputs();
 		TempControl::storeSettings();
 	}
+}
+
+void TempControl::resumeAfterWaterTest(const ControlSettings& saved) {
+    // Reset incomplete learning/filters, and conservatively begin fresh relay
+    // protection intervals at the handoff. This never emits an ON command.
+    cooler->setActive(false);
+    heater->setActive(false);
+    light->setActive(false);
+    fan->setActive(false);
+    cs = saved;
+    state = STATE_OFF;
+    cv.p = cv.i = cv.d = 0;
+    cv.diffIntegral = 0;
+    waitTime = 0;
+    reset();
+    glycolRuntime.reset();
+    const uint32_t nowMs = ticks.millis();
+    glycolRuntime.clock_initialized = true;
+    glycolRuntime.clock_last_ms = nowMs;
+    glycolRuntime.clock_elapsed_ms = nowMs;
+    glycolRuntime.last_pump_active_s = nowMs / 1000.0;
+    glycolRuntime.last_heater_active_s = nowMs / 1000.0;
+    glycolRuntime.cooling.reset(extendedSettings.glycolCoolingAlgorithm);
+    glycolRuntime.cooling.externalOff(nowMs / 1000.0);
+    lastCoolTime = lastHeatTime = lastIdleTime = ticks.seconds();
+    initFilters();
 }
 
 

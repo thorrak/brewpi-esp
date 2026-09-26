@@ -60,6 +60,7 @@
       "min_heat_time":"Min. Heat Time"
     },
     "sidebar_options":{
+      "water_test": "Contribute a water test",
       "dashboard":"@:dashboard.dashboard",
       "fermentrack_settings":"@:upstream_settings.fermentrack_settings",
       "set_up_sensors":"@:sensors.config_sensors_header",

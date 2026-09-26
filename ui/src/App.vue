@@ -115,6 +115,7 @@ import {
   CloudArrowUpIcon,
   CpuChipIcon,
   LightBulbIcon,
+  BeakerIcon,
   Cog8ToothIcon
 } from '@heroicons/vue/24/outline'
 // import brewpiespLogoUrl from "@/assets/brewpiesp_logo.svg";
@@ -128,6 +129,7 @@ const navigation = [
   { name: i18n.global.t('sitewide.sidebar_options.fermentrack_settings'), icon: CloudArrowUpIcon, route_name: 'UpstreamSettings' },
   { name: i18n.global.t('sitewide.sidebar_options.set_up_sensors'), icon: CpuChipIcon, route_name: 'ConfigSensorsActuators' },
   { name: i18n.global.t('sitewide.sidebar_options.controller_settings'), icon: Cog8ToothIcon, route_name: 'ExtendedSettings' },
+  { name: i18n.global.t('sitewide.sidebar_options.water_test'), icon: BeakerIcon, route_name: 'WaterTest' },
   { name: i18n.global.t('sitewide.sidebar_options.about_controller'), icon: LightBulbIcon, route_name: 'About' },
 ]
 

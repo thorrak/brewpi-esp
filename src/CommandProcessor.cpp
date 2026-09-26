@@ -36,6 +36,7 @@
 #include "JsonKeys.h"
 
 #include "ESP_BP_WiFi.h"
+#include "WaterTest.h"
 
 #if BREWPI_SIMULATE == 1
 #include "Simulator.h"
@@ -49,6 +50,20 @@ extern void handleReset();
  * Continuously reads data from PiStream and processes the command strings.
  */
 void CommandProcessor::receiveCommand() {
+  if (WaterTest::controlOwned()) {
+    // Do not parse potentially incomplete JSON on the timing loop, or leave
+    // conflicting commands queued to execute when normal control resumes.
+    int discarded = 0;
+    while (discarded < 4096 && piLink.available() > 0) {
+      piLink.read();
+      ++discarded;
+    }
+    if (discarded) {
+      piLink.print_fmt("Water test owns control. Use the Water test web page to stop or resume.");
+      piLink.printNewLine();
+    }
+    return;
+  }
   while (piLink.available() > 0) {
     char inByte = piLink.read();
 

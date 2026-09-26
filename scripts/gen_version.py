@@ -25,6 +25,10 @@ git_rev = (
 
 
 
+git_sha = subprocess.check_output(["git", "rev-parse", "HEAD"]).strip().decode("utf-8")
+git_dirty = bool(subprocess.check_output(["git", "status", "--porcelain", "--untracked-files=normal"]).strip())
+
+
 template = f"""
 #pragma once
 /******************************************************************************
@@ -40,6 +44,8 @@ namespace Config {{
         constexpr auto release = "{release}";
         constexpr auto git_tag = "{tag_name}";
         constexpr auto git_rev = "{git_rev}";
+        constexpr auto git_sha = "{git_sha}";
+        constexpr bool git_dirty = {str(git_dirty).lower()};
     }}
 }};
 """
