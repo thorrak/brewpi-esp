@@ -20,7 +20,7 @@ esp_err_t httpEvent(esp_http_client_event_t *e) {
   return ESP_OK;
 }
 } // namespace
-bool send(const std::string &path, bool post, const std::string &body, JsonDocument &response,
+bool send(const std::string &path, bool post, std::string_view body, JsonDocument &response,
           std::string &error) {
   if (!bp_wifi_is_connected()) {
     error = "WiFi disconnected; original data retained.";

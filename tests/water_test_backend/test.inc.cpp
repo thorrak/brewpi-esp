@@ -615,10 +615,116 @@ int main(int argc, char **argv) {
     FILE *f = fs_open(WaterTest::journalPath, "ab");
     fwrite("torn", 1, 4, f);
     fclose(f);
+  } else if (scenario == "upload_pacing") {
+    unsigned initialWaits = 0, completedWaits = 0;
+    size_t requests = 0;
+    uint32_t acknowledged = 0;
+    Native::delays = 1000;
+    Native::delayHook = [&](int milliseconds) {
+      assert(Native::uploadBuffer == nullptr && !WaterTest::uploaderBusy);
+      if (initialWaits < 2) {
+        assert(milliseconds == 1500 && Native::payloads.empty());
+        if (++initialWaits == 2) {
+          start();
+          finishEligibleStopped();
+        }
+        return;
+      }
+      if (WaterTest::uploadState == "submitted") {
+        assert(milliseconds == 1500 && WaterTest::uploadedRecords == WaterTest::recordCount);
+        assert(acknowledged == WaterTest::recordCount);
+        assert(Native::payloads.size() == requests + 1);
+        assert(!fs_exists(WaterTest::journalPath));
+        if (++completedWaits == 2)
+          throw Native::Yield{};
+        return;
+      }
+      assert(milliseconds == 50 && WaterTest::uploadState == "pending");
+      assert(Native::payloads.size() == requests + 1);
+      JsonDocument sent;
+      assert(deserializeJson(sent, Native::payloads.back()) == DeserializationError::Ok);
+      if (requests == 0) {
+        assert(WaterTest::manifestUploaded && !sent["records"].is<JsonArray>());
+      } else {
+        auto records = sent["records"].as<JsonArrayConst>();
+        assert(records.size() > 0 && records.size() <= 12);
+        assert(sent["first_seq"] == acknowledged);
+        for (JsonObjectConst record : records)
+          assert(record["seq"] == acknowledged++);
+        assert(sent["last_seq"] == acknowledged - 1);
+      }
+      assert(WaterTest::uploadedRecords == acknowledged);
+      ++requests;
+    };
+    try {
+      WaterTest::uploader(nullptr);
+    } catch (const Native::Yield &) {
+    }
+    assert(initialWaits == 2 && completedWaits == 2);
+    assert(requests == 1 + (WaterTest::recordCount + 11) / 12);
+  } else if (scenario == "upload_pacing_http_retry" || scenario == "upload_pacing_ack_retry" ||
+             scenario == "upload_pacing_preparation_retry") {
+    start();
+    finishEligibleStopped();
+    const bool preparationFailure = scenario == "upload_pacing_preparation_retry";
+    unsigned step = 0, completedWaits = 0;
+    Native::delays = 1000;
+    Native::delayHook = [&](int milliseconds) {
+      assert(Native::uploadBuffer == nullptr && !WaterTest::uploaderBusy);
+      if (step == 0) {
+        assert(milliseconds == 1500 && Native::payloads.empty());
+        step = 1;
+      } else if (step == 1) {
+        assert(milliseconds == 50 && Native::payloads.size() == 1);
+        assert(WaterTest::manifestUploaded && WaterTest::uploadedRecords == 0);
+        Native::nextHttpCode = scenario == "upload_pacing_http_retry" ? 500 : 201;
+        Native::invalidUploadAcknowledgement = scenario == "upload_pacing_ack_retry";
+        Native::failUploadAllocation = preparationFailure;
+        step = 2;
+      } else if (step == 2) {
+        assert(milliseconds == (preparationFailure ? 1500 : 30000));
+        assert(Native::payloads.size() == (preparationFailure ? 1u : 2u));
+        assert(WaterTest::uploadState == "error" && WaterTest::uploadedRecords == 0);
+        assert(fs_exists(WaterTest::journalPath));
+        Native::nextHttpCode = 201;
+        Native::invalidUploadAcknowledgement = false;
+        Native::failUploadAllocation = false;
+        step = preparationFailure ? 4 : 3;
+      } else if (step == 3) {
+        assert(milliseconds == 1500 && Native::payloads.size() == 2);
+        assert(WaterTest::uploadedRecords == 0 && WaterTest::uploadState == "error");
+        step = 4;
+      } else if (step == 4) {
+        assert(milliseconds == 50 && WaterTest::uploadedRecords == 12);
+        assert(Native::payloads.size() == (preparationFailure ? 2u : 3u));
+        if (!preparationFailure)
+          assert(Native::payloads[1] == Native::payloads[2]);
+        step = 5;
+      } else if (WaterTest::uploadState == "submitted") {
+        assert(milliseconds == 1500 && WaterTest::uploadedRecords == WaterTest::recordCount);
+        assert(!fs_exists(WaterTest::journalPath));
+        if (++completedWaits == 2)
+          throw Native::Yield{};
+      } else {
+        assert(milliseconds == 50 && WaterTest::uploadState == "pending");
+      }
+    };
+    try {
+      WaterTest::uploader(nullptr);
+    } catch (const Native::Yield &) {
+    }
+    assert(step == 5 && completedWaits == 2);
   } else if (scenario == "upload_retry") {
     start();
     finishEligibleStopped();
     assert(fs_exists(WaterTest::journalPath));
+    unsigned backoffs = 0;
+    Native::delayHook = [&](int milliseconds) {
+      if (milliseconds == 30000) {
+        assert(Native::uploadBuffer == nullptr);
+        ++backoffs;
+      }
+    };
     Native::nextHttpCode = 500;
     uploadOnce();
     assert(WaterTest::uploadState == "error" && fs_exists(WaterTest::journalPath));
@@ -638,6 +744,34 @@ int main(int argc, char **argv) {
     assert(WaterTest::uploadState == "submitted");
     assert(!fs_exists(WaterTest::journalPath));
     assert(std::filesystem::is_empty(Native::root));
+    assert(backoffs == 2);
+  } else if (scenario == "upload_allocation_failure") {
+    start();
+    finishEligibleStopped();
+    auto failAndRetry = [] {
+      const size_t sent = Native::payloads.size();
+      const uint32_t acknowledged = WaterTest::uploadedRecords;
+      const bool manifestAcknowledged = WaterTest::manifestUploaded;
+      Native::failUploadAllocation = true;
+      uploadOnce();
+      assert(WaterTest::uploadState == "error" && !WaterTest::uploaderBusy);
+      assert(WaterTest::uploadedRecords == acknowledged);
+      assert(WaterTest::manifestUploaded == manifestAcknowledged);
+      assert(Native::payloads.size() == sent && Native::uploadBuffer == nullptr);
+      assert(fs_exists(WaterTest::journalPath));
+      Native::failUploadAllocation = false;
+      uploadOnce();
+      assert(Native::payloads.size() == sent + 1 && Native::uploadBuffer == nullptr);
+    };
+    failAndRetry();
+    assert(WaterTest::manifestUploaded && WaterTest::uploadedRecords == 0);
+    failAndRetry();
+    assert(WaterTest::uploadedRecords == 12);
+    for (unsigned n = 0; n < 100 && WaterTest::uploadedRecords < WaterTest::recordCount; ++n)
+      uploadOnce();
+    assert(WaterTest::uploadedRecords == WaterTest::recordCount);
+    failAndRetry();
+    assert(WaterTest::uploadState == "submitted" && !fs_exists(WaterTest::journalPath));
   } else if (scenario == "stopped_before_reboot" || scenario == "pending_before_reboot" ||
              scenario == "partial_upload_before_reboot" || scenario == "resumed_pending_before_reboot") {
     start();

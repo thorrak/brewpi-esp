@@ -6,14 +6,17 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <filesystem>
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <memory>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <sys/time.h>
 #include <unistd.h>
 #include <vector>
@@ -22,6 +25,11 @@ inline std::string root;
 inline uint64_t clock = 1000000, fsyncDelayUs = 0;
 inline std::string removeFailurePath, openFailurePath;
 inline std::function<void()> fsyncHook, truncateHook;
+inline std::function<void(int)> delayHook;
+inline bool failUploadAllocation = false;
+inline bool invalidUploadAcknowledgement = false;
+inline void *uploadBuffer = nullptr;
+inline size_t uploadAllocationSize = 0;
 inline size_t freeBytes = 512000;
 inline int fsyncUntilFail = -1, delays = 0, nextHttpCode = 201;
 inline bool connected = true;
@@ -29,6 +37,22 @@ inline unsigned randomCounter = static_cast<unsigned>(getpid()), resumes = 0;
 inline std::vector<std::string> payloads;
 struct Yield {};
 } // namespace Native
+constexpr unsigned MALLOC_CAP_8BIT = 1;
+inline void *heap_caps_malloc(size_t size, unsigned capabilities) {
+  assert(capabilities == MALLOC_CAP_8BIT);
+  assert(Native::uploadBuffer == nullptr);
+  Native::uploadAllocationSize = size;
+  if (Native::failUploadAllocation)
+    return nullptr;
+  void *memory = std::malloc(size);
+  Native::uploadBuffer = memory;
+  return memory;
+}
+inline void heap_caps_free(void *memory) {
+  if (memory == Native::uploadBuffer)
+    Native::uploadBuffer = nullptr;
+  std::free(memory);
+}
 using temperature = int16_t;
 struct ControlSettings {
   char mode = 'b';
@@ -197,7 +221,9 @@ inline int xQueueReceive(Queue *q, void *p, int) {
 }
 inline int xTaskCreate(void (*)(void *), const char *, unsigned, void *, unsigned, void *) { return pdPASS; }
 inline int pdMS_TO_TICKS(int n) { return n; }
-inline void vTaskDelay(int) {
+inline void vTaskDelay(int milliseconds) {
+  if (Native::delayHook)
+    Native::delayHook(milliseconds);
   if (Native::delays-- <= 0)
     throw Native::Yield{};
 }
@@ -219,7 +245,7 @@ struct esp_http_client_config_t {
 };
 struct Http {
   esp_http_client_config_t config;
-  std::string body;
+  std::string_view body;
 };
 using esp_http_client_handle_t = Http *;
 inline Http *esp_http_client_init(const esp_http_client_config_t *c) {
@@ -229,14 +255,18 @@ inline Http *esp_http_client_init(const esp_http_client_config_t *c) {
 }
 inline int esp_http_client_set_header(Http *, const char *, const char *) { return ESP_OK; }
 inline int esp_http_client_set_post_field(Http *c, const char *data, int n) {
-  c->body.assign(data, n);
+  c->body = std::string_view(data, n);
   return ESP_OK;
 }
 inline int esp_http_client_perform(Http *c) {
-  Native::payloads.push_back(c->body);
+  assert(c->body.data() == Native::uploadBuffer);
+  assert(c->body.size() == Native::uploadAllocationSize);
+  Native::payloads.emplace_back(c->body);
   JsonDocument payload, response;
   assert(deserializeJson(payload, c->body) == DeserializationError::Ok);
   response["test_id"] = payload["test_id"];
+  if (Native::invalidUploadAcknowledgement)
+    response["test_id"] = "unacknowledged-test";
   response["device_guid"] = payload["device_guid"];
   response["status"] = "stored";
   if (payload["batch_id"].is<const char *>()) {

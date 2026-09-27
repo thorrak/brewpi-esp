@@ -16,6 +16,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <memory>
+#include <esp_heap_caps.h>
 #include <esp_random.h>
 #include <esp_system.h>
 #include <esp_timer.h>
@@ -561,16 +563,36 @@ void processSample(const Sample &sample) {
   persistProgram(phase, changed, r.t_us);
 }
 
+struct UploadBufferDeleter {
+  void operator()(char *buffer) const { heap_caps_free(buffer); }
+};
+using UploadBuffer = std::unique_ptr<char[], UploadBufferDeleter>;
+
+UploadBuffer serializeUpload(const JsonDocument &doc, size_t &length) {
+  if (doc.overflowed())
+    return nullptr;
+  length = measureJson(doc);
+  UploadBuffer body(static_cast<char *>(heap_caps_malloc(length, MALLOC_CAP_8BIT)));
+  if (body && serializeJson(doc, body.get(), length) != length)
+    body.reset();
+  return body;
+}
+
 // This worker never touches actuators. It starts only after acquisition is closed;
 // upload/response delays cannot change an experiment's timing or sample cadence.
 void uploader(void *) {
+  uint32_t delayMs = 1500;
   for (;;) {
-    vTaskDelay(pdMS_TO_TICKS(1500));
-    std::string id, body, path, error;
+    vTaskDelay(pdMS_TO_TICKS(delayMs));
+    delayMs = 1500;
+    std::string id, path, error;
+    UploadBuffer body;
+    size_t bodyLength = 0;
     uint32_t next = 0, end = 0;
+    uint32_t firstSequence = 0, lastSequence = 0;
     bool isManifest = false, isFinish = false;
     std::string batchId;
-    JsonDocument request, response;
+    JsonDocument response;
     {
       Guard lock;
       if (running || !queuedStart.empty() || terminal.isNull() || !program.submissionEligible() ||
@@ -581,8 +603,9 @@ void uploader(void *) {
       path = "/api/v1/water-tests/" + id;
       if (!manifestUploaded) {
         isManifest = true;
-        serializeJson(manifest, body);
+        body = serializeUpload(manifest, bodyLength);
       } else if (next < recordCount) {
+        JsonDocument request;
         FILE *f = fs_open(journalPath, "rb");
         if (!f) {
           uploadState = "error";
@@ -597,9 +620,12 @@ void uploader(void *) {
         while (end < recordCount && end - next < batchSize && fread(&r, sizeof(r), 1, f) == 1) {
           if (!valid(r) || r.boot != 0)
             break;
-          if (end == next)
-            request["first_seq"] = r.seq;
-          request["last_seq"] = r.seq;
+          if (end == next) {
+            firstSequence = r.seq;
+            request["first_seq"] = firstSequence;
+          }
+          lastSequence = r.seq;
+          request["last_seq"] = lastSequence;
           WaterTestProtocol::recordToJson(list.add<JsonObject>(), r, currentBoot,
                                           manifest["sensors"][r.role ? "glycol" : "beer"]["calibration_offset_c"] |
                                               0.0);
@@ -614,28 +640,35 @@ void uploader(void *) {
         batchId = WaterTestProtocol::batchIdentifier(id, next);
         request["batch_id"] = batchId;
         request["boot_id"] = currentBoot;
-        serializeJson(request, body);
+        body = serializeUpload(request, bodyLength);
         path += "/batches";
       } else {
         isFinish = true;
-        serializeJson(terminal, body);
+        body = serializeUpload(terminal, bodyLength);
         path += "/finish";
+      }
+      if (!body) {
+        uploadState = "error";
+        uploadError = "Low memory.";
+        continue;
       }
       uploadState = "uploading";
       uploaderBusy = true;
     }
-    bool ok = WaterTestTransport::send(path, !isManifest && !isFinish, body, response, error);
+    bool ok = WaterTestTransport::send(path, !isManifest && !isFinish,
+                                       std::string_view(body.get(), bodyLength), response, error);
+    body.reset();
     if (ok) {
       ok = WaterTestProtocol::acknowledged(response.as<JsonVariantConst>(), id, guid);
       if (!isManifest && !isFinish)
         ok = WaterTestProtocol::batchAcknowledged(response.as<JsonVariantConst>(), id, guid, batchId,
-                                                  request["first_seq"].as<uint32_t>(),
-                                                  request["last_seq"].as<uint32_t>());
+                                                  firstSequence, lastSequence);
       if (isFinish)
         ok = WaterTestProtocol::finishAcknowledged(response.as<JsonVariantConst>(), id, guid);
       if (!ok)
         error = "Server did not acknowledge this complete immutable request; retrying original data.";
     }
+    response.clear();
     {
       Guard lock;
       if (ok) {
@@ -645,6 +678,8 @@ void uploader(void *) {
           uploadedRecords = end;
         uploadError.clear();
         uploadState = isFinish ? "submitted" : "pending";
+        if (!isFinish)
+          delayMs = 50;
         if (isFinish)
           fs_remove(journalPath);
       } else {

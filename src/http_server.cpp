@@ -26,6 +26,8 @@
 #include "ESP_BP_WiFi.h"
 #include "GlycolLog.h"
 #include "WaterTest.h"
+#include "CrashDump.h"
+#include "HttpJsonResponse.h"
 
 
 httpServer http_server;
@@ -36,10 +38,7 @@ httpServer http_server;
 // ============================================================================
 
 esp_err_t httpServer::sendJsonDoc(httpd_req_t *req, JsonDocument &doc) {
-    std::string output;
-    serializeJson(doc, output);
-    httpd_resp_set_type(req, "application/json");
-    return httpd_resp_send(req, output.c_str(), output.length());
+    return HttpJsonResponse::send(req, doc);
 }
 
 esp_err_t httpServer::parseJsonBody(httpd_req_t *req, JsonDocument &doc) {
@@ -1197,6 +1196,10 @@ void httpServer::registerRoutes() {
     setStaticPages();
     setJsonPages();
     setPutPages();
+
+    if (CrashDump::registerRoutes(server_handle) != ESP_OK) {
+        Log.error("Failed to register crash dump routes.\r\n");
+    }
 
     const httpd_uri_t water_status = { .uri = "/api/water-test/", .method = HTTP_GET, .handler = water_test_status, .user_ctx = nullptr };
     httpd_register_uri_handler(server_handle, &water_status);
