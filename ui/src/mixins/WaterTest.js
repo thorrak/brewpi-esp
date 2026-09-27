@@ -1,6 +1,12 @@
 import { i18n } from '@/i18n';
 
 const LITERS_PER_US_GALLON = 3.785411784;
+const FLOW_LITERS_PER_MINUTE = {
+    us_gph: LITERS_PER_US_GALLON / 60,
+    us_gpm: LITERS_PER_US_GALLON,
+    lph: 1 / 60,
+    lpm: 1,
+};
 
 export function convertVolume(value, from, to) {
     if (value === '' || value === null || value === undefined) return '';
@@ -41,6 +47,27 @@ export function buildWaterTestPayload(form) {
     const setpoint = source === 'reported_setpoint' ? requiredNumber(form.glycolSetpoint, 'enter_setpoint') : null;
     const setpointC = setpoint === null ? null : convertTemperature(setpoint, form.temperatureUnit, 'C');
     if (setpointC !== null && (setpointC < -60 || setpointC > 100)) throw new Error(i18n.global.t('water_test.errors.setpoint_range'));
+    const flowSource = form.flowSource === undefined ? 'unknown' : form.flowSource;
+    if (!['unknown', 'pump_rating', 'measured_at_fermenter'].includes(flowSource)) {
+        throw new Error(i18n.global.t('water_test.errors.select_flow_source'));
+    }
+    let flowValue = null;
+    let flowUnit = null;
+    if (flowSource !== 'unknown') {
+        if (!['number', 'string'].includes(typeof form.flowValue)) {
+            throw new Error(i18n.global.t('water_test.errors.enter_flow'));
+        }
+        flowValue = requiredNumber(form.flowValue, 'enter_flow');
+        if (flowValue <= 0) throw new Error(i18n.global.t('water_test.errors.enter_flow'));
+        if (typeof form.flowUnit !== 'string' || !Object.prototype.hasOwnProperty.call(FLOW_LITERS_PER_MINUTE, form.flowUnit)) {
+            throw new Error(i18n.global.t('water_test.errors.select_flow_units'));
+        }
+        flowUnit = form.flowUnit;
+        const litersPerMinute = flowValue * FLOW_LITERS_PER_MINUTE[flowUnit];
+        if (!Number.isFinite(litersPerMinute) || litersPerMinute <= 0) {
+            throw new Error(i18n.global.t('water_test.errors.flow_range'));
+        }
+    }
     return {
         consent: true,
         water_confirmed: true,
@@ -51,6 +78,9 @@ export function buildWaterTestPayload(form) {
         probe_mounting: form.probeMounting,
         glycol_temperature_source: source,
         reported_chiller_setpoint_c: setpointC,
+        glycol_flow_source: flowSource,
+        glycol_flow_value: flowValue,
+        glycol_flow_unit: flowUnit,
         follow_up: false,
         reported_input: {
             volume_unit: form.volumeUnit,

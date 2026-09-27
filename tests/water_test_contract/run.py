@@ -97,6 +97,10 @@ def check_snapshots(requests):
     initial = requests[0]["payload"]["test_program"]["controller"]
     final = requests[-1]["payload"]["controller"]
     selected = initial["selection"]
+    installation = requests[0]["payload"]["installation"]
+    expected_flow = (("measured_at_fermenter", 2.25, "lpm") if selected == "pulse_dose"
+                     else ("pump_rating", 200.5, "us_gph"))
+    assert tuple(installation[key] for key in ("glycol_flow_source", "glycol_flow_value", "glycol_flow_unit")) == expected_flow
     header = ROOT / "src" / ("AdaptiveDoseController.h" if selected == "pulse_dose" else "PredictiveCoastController.h")
     config = re.search(r"struct Config \{(.*?)\n\};", header.read_text(), re.S).group(1)
     fields = dict(re.findall(r"double (\w+) = ([0-9.eE+-]+);", config))

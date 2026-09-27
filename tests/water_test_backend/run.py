@@ -37,7 +37,7 @@ with tempfile.TemporaryDirectory(prefix='water-test-backend-') as temp:
                     str(translation), str(root / 'src/GlycolCoolingController.cpp'),
                     str(root / 'src/PredictiveCoastController.cpp'), str(root / 'src/AdaptiveDoseController.cpp'),
                     '-o', str(binary)], check=True)
-    for name in ['normal_stop', 'baseline_stop', 'minimum_stop', 'full_pulse_stop',
+    for name in ['flow_validation', 'flow_retention', 'normal_stop', 'baseline_stop', 'minimum_stop', 'full_pulse_stop',
                  'transient_sensor_errors', 'transient_bad_start', 'prolonged_invalid', 'silent_sensor',
                  'minimum_water_limit', 'bath_fault', 'status_freshness',
                  'fsync_failure', 'edge_fsync_failure', 'start_failure', 'queue_overflow', 'unexpected_output',
@@ -57,7 +57,8 @@ with tempfile.TemporaryDirectory(prefix='water-test-backend-') as temp:
     for before, after in [('active', 'recovered_active'), ('stopped', 'recovered_ended'),
                           ('pending', 'recovered_ended'), ('partial_upload', 'recovered_ended'),
                           ('resumed_pending', 'recovered_resumed'), ('submitted', 'idle'),
-                          ('corrupt', 'blocked'), ('controller_snapshot', 'recovered_snapshot')]:
+                          ('corrupt', 'blocked'), ('controller_snapshot', 'recovered_snapshot'),
+                          ('flow', 'recovered_flow')]:
         reboot = build / before
         subprocess.run([str(binary), before + '_before_reboot', str(reboot)], check=True)
         subprocess.run([str(binary), after + '_after_reboot', str(reboot)], check=True)

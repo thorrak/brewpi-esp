@@ -111,6 +111,19 @@
               <p v-if="form.unknownSetpoint" class="hint">{{ t('water_test.unknown_setpoint_help') }}</p>
             </div>
           </div>
+          <div role="group" aria-labelledby="flow-question">
+            <h2 id="flow-question" class="question">{{ t('water_test.flow_question') }}</h2>
+            <label class="check-row mt-3"><input v-model="form.flowSource" type="radio" name="flow-source" value="unknown" class="radio" /><span>{{ t('water_test.flow_unknown') }}</span></label>
+            <label class="check-row mt-3"><input v-model="form.flowSource" type="radio" name="flow-source" value="pump_rating" class="radio" /><span>{{ t('water_test.flow_pump_rating') }}</span></label>
+            <label class="check-row mt-3"><input v-model="form.flowSource" type="radio" name="flow-source" value="measured_at_fermenter" class="radio" /><span>{{ t('water_test.flow_measured_at_fermenter') }}</span></label>
+            <div v-if="form.flowSource !== 'unknown'" class="mt-4">
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 max-w-md">
+                <div><label for="glycol-flow" class="field-label">{{ t(form.flowSource === 'pump_rating' ? 'water_test.flow_rating_label' : 'water_test.flow_measured_label') }}</label><input id="glycol-flow" v-model="form.flowValue" type="number" min="0" step="any" inputmode="decimal" required class="input" :aria-describedby="flowUnitsMixed ? 'flow-unit-warning' : undefined" /></div>
+                <div><label for="flow-unit" class="field-label">{{ t('water_test.flow_units') }}</label><select id="flow-unit" v-model="form.flowUnit" class="input"><option value="us_gph">{{ t('water_test.us_gallons_per_hour') }}</option><option value="us_gpm">{{ t('water_test.us_gallons_per_minute') }}</option><option value="lph">{{ t('water_test.liters_per_hour') }}</option><option value="lpm">{{ t('water_test.liters_per_minute') }}</option></select></div>
+              </div>
+              <p v-if="flowUnitsMixed" id="flow-unit-warning" class="notice notice-warning mt-3" role="status">{{ t('water_test.flow_mixed_units') }}</p>
+            </div>
+          </div>
           <div class="border-t border-gray-200 pt-5 space-y-4">
             <label class="check-row"><input v-model="form.waterConfirmed" type="checkbox" required class="checkbox" /><span>{{ t('water_test.water_confirmation') }}</span></label>
             <label class="check-row"><input v-model="form.consent" type="checkbox" required class="checkbox" /><span>{{ t('water_test.consent') }}</span></label>
@@ -138,8 +151,15 @@ const status = computed(() => store.status);
 const requiredHardwareAvailable = computed(() => status.value?.preflight?.beer_configured === true && status.value?.preflight?.cooler_available === true);
 const busy = ref('');
 const actionError = ref('');
-const form = reactive({ model: '', capacity: '', waterVolume: '', volumeUnit: 'us_gal', coolingType: '', probeMounting: '', glycolChoice: '', glycolSetpoint: '', unknownSetpoint: false, temperatureUnit: 'F', consent: false, waterConfirmed: false });
+const form = reactive({ model: '', capacity: '', waterVolume: '', volumeUnit: 'us_gal', coolingType: '', probeMounting: '', glycolChoice: '', glycolSetpoint: '', unknownSetpoint: false, temperatureUnit: 'F', flowSource: 'pump_rating', flowValue: '', flowUnit: 'us_gpm', consent: false, waterConfirmed: false });
 const volumeLabel = computed(() => t(`water_test.${form.volumeUnit === 'us_gal' ? 'us_gallons' : 'liters'}`));
+const flowUnitsMixed = computed(() => form.flowSource !== 'unknown' && (
+  (form.volumeUnit === 'l' && ['us_gph', 'us_gpm'].includes(form.flowUnit)) ||
+  (form.volumeUnit === 'us_gal' && ['lph', 'lpm'].includes(form.flowUnit))
+));
+watch(() => form.flowSource, () => {
+  form.flowValue = '';
+});
 const resultLink = computed(() => resultsUrl(status.value?.device_guid, status.value?.result_url));
 
 const phaseLabel = computed(() => statusLabel('phases', status.value?.phase, (status.value?.phase || '').replaceAll('_', ' ')));
@@ -165,6 +185,7 @@ function displayDuration(value) {
 function changeVolumeUnit(next) {
   form.waterVolume = convertVolume(form.waterVolume, form.volumeUnit, next);
   form.capacity = convertVolume(form.capacity, form.volumeUnit, next);
+  if (form.flowValue === '') form.flowUnit = next === 'us_gal' ? 'us_gpm' : 'lpm';
   form.volumeUnit = next;
 }
 let temperatureUnitChosen = false;

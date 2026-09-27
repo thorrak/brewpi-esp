@@ -474,6 +474,9 @@ void startRun(const std::string &payload) {
   for (auto key : {"fermenter_model", "fermenter_capacity_l", "water_volume_l", "cooling_type", "probe_mounting",
                    "glycol_temperature_source", "reported_chiller_setpoint_c"})
     install[key] = input[key];
+  install["glycol_flow_source"] = input["glycol_flow_source"] | "unknown";
+  install["glycol_flow_value"] = input["glycol_flow_value"];
+  install["glycol_flow_unit"] = input["glycol_flow_unit"];
   if (input["reported_input"].is<JsonObject>())
     for (auto key : {"volume_unit", "water_volume", "fermenter_capacity", "temperature_unit", "glycol_setpoint"})
       install["reported_input"][key] = input["reported_input"][key];
@@ -1084,6 +1087,38 @@ bool requestStart(JsonVariantConst body, std::string &error) {
   if (strcmp(source, "reported_setpoint") != 0 && !body["reported_chiller_setpoint_c"].isNull()) {
     error = "Only reported-setpoint mode accepts a static glycol temperature.";
     return false;
+  }
+  const auto flowSource = body["glycol_flow_source"];
+  const auto flowValue = body["glycol_flow_value"];
+  const auto flowUnit = body["glycol_flow_unit"];
+  const bool legacyFlow = flowSource.isUnbound() && flowValue.isNull() && flowUnit.isNull();
+  if (!legacyFlow) {
+    if (!flowSource.is<const char *>() ||
+        !oneOf(flowSource.as<const char *>(), {"unknown", "pump_rating", "measured_at_fermenter"})) {
+      error = "Select whether glycol flow is unknown, a pump rating, or measured at the fermenter.";
+      return false;
+    }
+    if (flowSource == "unknown") {
+      if (!flowValue.isNull() || !flowUnit.isNull()) {
+        error = "Unknown glycol flow must not include a rate or unit.";
+        return false;
+      }
+    } else {
+      if (!flowValue.is<double>() || !std::isfinite(flowValue.as<double>()) || flowValue.as<double>() <= 0 ||
+          !flowUnit.is<const char *>() || !oneOf(flowUnit.as<const char *>(), {"us_gph", "us_gpm", "lph", "lpm"})) {
+        error = "Enter a positive glycol flow rate and select its unit.";
+        return false;
+      }
+      const double factor = flowUnit == "us_gph" ? 3.785411784 / 60.
+                            : flowUnit == "us_gpm" ? 3.785411784
+                            : flowUnit == "lph"    ? 1. / 60.
+                                                  : 1.;
+      const double litersPerMinute = flowValue.as<double>() * factor;
+      if (!std::isfinite(litersPerMinute) || litersPerMinute <= 0) {
+        error = "The glycol flow rate cannot be represented in liters per minute.";
+        return false;
+      }
+    }
   }
   serializeJson(body, queuedStart);
   if (queuedStart.size() > 4096) {

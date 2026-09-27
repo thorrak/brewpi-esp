@@ -56,6 +56,9 @@ void start() {
   assert(!WaterTest::physicalPump());
   assert(WaterTest::manifest["test_id"].as<std::string>().size() == 36);
   assert(WaterTest::manifest["test_id"].as<std::string>().find('\0') == std::string::npos);
+  assert(WaterTest::manifest["installation"]["glycol_flow_source"] == "unknown");
+  assert(WaterTest::manifest["installation"]["glycol_flow_value"].isNull());
+  assert(WaterTest::manifest["installation"]["glycol_flow_unit"].isNull());
   assert(std::distance(std::filesystem::directory_iterator(Native::root),
                        std::filesystem::directory_iterator{}) == 3);
   assert(fs_exists(WaterTest::journalPath));
@@ -182,6 +185,12 @@ void verifyControllerSnapshot(JsonVariantConst metadata, bool dose) {
     assert(tuning["learning_updates"] == 7 && tuning["response_updates"] == 11);
   }
 }
+void verifyFlow(JsonVariantConst installation, const char *source, double value, const char *unit) {
+  assert(installation["glycol_flow_source"] == source);
+  assert(installation["glycol_flow_value"].is<double>());
+  assert(installation["glycol_flow_value"].as<double>() == value);
+  assert(installation["glycol_flow_unit"] == unit);
+}
 int main(int argc, char **argv) {
   assert(argc == 3);
   Native::root = argv[2];
@@ -196,7 +205,116 @@ int main(int argc, char **argv) {
   }
   initializeHardware();
   std::string error;
-  if (scenario == "slow_sensor_fault" || scenario == "slow_temperature_limit") {
+  if (scenario == "flow_validation") {
+    auto check = [&](JsonDocument &request, bool expected) {
+      std::string failure;
+      assert(WaterTest::requestStart(request, failure) == expected);
+      if (expected) {
+        JsonDocument queued;
+        assert(deserializeJson(queued, WaterTest::queuedStart) == DeserializationError::Ok);
+        assert(queued["glycol_flow_value"] == request["glycol_flow_value"]);
+        assert(queued["glycol_flow_unit"] == request["glycol_flow_unit"]);
+        WaterTest::queuedStart.clear();
+        WaterTest::owned = false;
+      } else {
+        assert(!failure.empty() && WaterTest::queuedStart.empty() && !WaterTest::owned);
+      }
+    };
+    auto request = survey();
+    check(request, true); // Legacy clients omit all three fields.
+    request["glycol_flow_source"] = "unknown";
+    check(request, true);
+    request["glycol_flow_value"] = nullptr;
+    request["glycol_flow_unit"] = nullptr;
+    check(request, true);
+    request["glycol_flow_value"] = 12;
+    check(request, false); // Stale values cannot survive a switch to unknown.
+    request["glycol_flow_value"] = nullptr;
+    request["glycol_flow_unit"] = "lpm";
+    check(request, false);
+    request.remove("glycol_flow_source");
+    check(request, false); // A supplied unit requires an explicit source.
+    request["glycol_flow_unit"] = nullptr;
+    check(request, true); // Legacy omitted source with null companions is unknown.
+    for (const char *source : {"pump_rating", "measured_at_fermenter"}) {
+      for (const char *unit : {"us_gph", "us_gpm", "lph", "lpm"}) {
+        request["glycol_flow_source"] = source;
+        request["glycol_flow_value"] = 37.5;
+        request["glycol_flow_unit"] = unit;
+        check(request, true);
+      }
+    }
+    for (const char *field : {"glycol_flow_source", "glycol_flow_value", "glycol_flow_unit"}) {
+      const char *invalids[] = {"null", "true", "[]", "{}", "\"invalid\""};
+      for (const char *invalid : invalids) {
+        request["glycol_flow_source"] = "pump_rating";
+        request["glycol_flow_value"] = 37.5;
+        request["glycol_flow_unit"] = "lpm";
+        JsonDocument wrong;
+        assert(deserializeJson(wrong, invalid) == DeserializationError::Ok);
+        request[field] = wrong.as<JsonVariantConst>();
+        check(request, false);
+      }
+      request["glycol_flow_source"] = "pump_rating";
+      request["glycol_flow_value"] = 37.5;
+      request["glycol_flow_unit"] = "lpm";
+      request.remove(field);
+      check(request, false);
+    }
+    request["glycol_flow_source"] = "measured_at_fermenter";
+    request["glycol_flow_unit"] = "lpm";
+    for (double invalid : {0., -1., double(NAN), double(INFINITY)}) {
+      request["glycol_flow_value"] = invalid;
+      check(request, false);
+    }
+    request["glycol_flow_value"] = "12.5";
+    check(request, false);
+    JsonDocument parsed;
+    assert(deserializeJson(parsed, "{\"flow\":1e999}") == DeserializationError::Ok);
+    request["glycol_flow_value"] = parsed["flow"];
+    check(request, false);
+    for (const char *unit : {"us_gph", "lph", "lpm"}) {
+      request["glycol_flow_value"] = 1e308;
+      request["glycol_flow_unit"] = unit;
+      check(request, true); // No arbitrary ceiling, or intermediate multiply overflow.
+    }
+    request["glycol_flow_unit"] = "us_gpm";
+    check(request, false); // Converting this value to L/min overflows binary64.
+    request["glycol_flow_value"] = 1e-200;
+    check(request, true);
+    request["glycol_flow_value"] = std::numeric_limits<double>::denorm_min();
+    request["glycol_flow_unit"] = "lph";
+    check(request, false); // Conversion must remain positive, including subnormal input.
+  } else if (scenario == "flow_retention" || scenario == "flow_before_reboot") {
+    fresh(2);
+    auto request = survey();
+    request["glycol_flow_source"] = "measured_at_fermenter";
+    request["glycol_flow_value"] = 12.75;
+    request["glycol_flow_unit"] = "us_gph";
+    assert(WaterTest::requestStart(request, error));
+    WaterTest::tick();
+    assert(WaterTest::active());
+    verifyFlow(WaterTest::manifest["installation"], "measured_at_fermenter", 12.75, "us_gph");
+    JsonDocument stored;
+    assert(WaterTest::loadDocument(WaterTest::manifestPath, stored));
+    verifyFlow(stored["installation"], "measured_at_fermenter", 12.75, "us_gph");
+    assert(WaterTest::requestStop(error));
+    WaterTest::tick();
+    if (scenario == "flow_before_reboot") return 0;
+    submit();
+    assert(deserializeJson(stored, Native::payloads.front()) == DeserializationError::Ok);
+    verifyFlow(stored["installation"], "measured_at_fermenter", 12.75, "us_gph");
+  } else if (scenario == "recovered_flow_after_reboot") {
+    assert(WaterTest::terminalDurable && WaterTest::uploadState == "pending");
+    verifyFlow(WaterTest::manifest["installation"], "measured_at_fermenter", 12.75, "us_gph");
+    std::string original;
+    assert(WaterTest::loadDocumentPayload(WaterTest::manifestPath, original));
+    submit();
+    assert(Native::payloads.front() == original);
+    JsonDocument uploaded;
+    assert(deserializeJson(uploaded, Native::payloads.front()) == DeserializationError::Ok);
+    verifyFlow(uploaded["installation"], "measured_at_fermenter", 12.75, "us_gph");
+  } else if (scenario == "slow_sensor_fault" || scenario == "slow_temperature_limit") {
     if (scenario == "slow_sensor_fault")
       tempControl.glycolRuntime.cooling.minOn = 60;
     start();

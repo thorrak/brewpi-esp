@@ -29,12 +29,13 @@ describe('water-test setup and resume UI', () => {
         waterTest.status = JSON.parse(JSON.stringify(fixture));
     });
 
-    function render(glycolChoice = '') {
+    function render(glycolChoice = '', formValues = {}) {
         const page = {
             ...WaterTest,
             setup(props, context) {
                 const state = WaterTest.setup(props, context);
                 state.form.glycolChoice = glycolChoice;
+                Object.assign(state.form, formValues);
                 return state;
             },
         };
@@ -49,7 +50,7 @@ describe('water-test setup and resume UI', () => {
         waterTest.status.preflight.cooler_available = cooler;
         waterTest.status.can_start = false;
         const html = await render();
-        expect(html).toContain('Prepare once, then let the test run');
+        expect(html).toContain(i18n.global.t('water_test.prepare_title'));
         expect(html).not.toContain('<fieldset');
         expect(html).not.toContain('id="water-volume"');
         expect(html).toContain('notice-warning');
@@ -63,7 +64,7 @@ describe('water-test setup and resume UI', () => {
         expect(html).toContain('<fieldset');
         expect(html).toContain('id="fermenter-capacity"');
         expect(html).toContain('id="water-volume"');
-        expect(html.match(/step="any"/g)).toHaveLength(2);
+        expect(html.match(/step="any"/g)).toHaveLength(3);
         expect(html).not.toContain('notice-warning');
         expect(html).toContain('10 seconds');
         expect(html).toContain('up to 30 minutes');
@@ -76,6 +77,52 @@ describe('water-test setup and resume UI', () => {
         const html = await render();
         expect(html).toMatch(/<fieldset[^>]*disabled/);
         expect(html).toContain(waterTest.status.preflight.reason);
+    });
+
+    it('offers three flow choices after the bath question, with pump rating selected by default', async () => {
+        const html = await render();
+        expect(html.indexOf('id="flow-question"')).toBeGreaterThan(html.indexOf('name="glycol-source"'));
+        expect(html.match(/name="flow-source"/g)).toHaveLength(3);
+        expect(html).toMatch(/name="flow-source"[^>]*value="pump_rating"[^>]*checked/);
+        expect(html).toContain('id="glycol-flow"');
+        expect(html).not.toContain('id="flow-unit-warning"');
+        const unknown = await render('', { flowSource: 'unknown' });
+        expect(unknown).not.toContain('id="glycol-flow"');
+        expect(unknown).not.toContain('id="flow-unit"');
+    });
+
+    it.each([
+        ['pump_rating', 'Rated pump flow'],
+        ['measured_at_fermenter', 'Measured flow at the fermenter'],
+    ])('shows the source-specific decimal input and all four units for %s', async (flowSource, label) => {
+        const html = await render('', { flowSource });
+        expect(html).toContain(label);
+        expect(html).toMatch(/id="glycol-flow"[^>]*type="number"[^>]*step="any"[^>]*required/);
+        expect(html).toContain('US GPH (gal/hour)');
+        expect(html).toContain('US GPM (gal/min)');
+        expect(html).toContain('LPH (L/hour)');
+        expect(html).toContain('LPM (L/min)');
+        expect(html).toContain('grid-cols-1 sm:grid-cols-2');
+    });
+
+    it.each([
+        ['l', 'us_gph'], ['l', 'us_gpm'], ['us_gal', 'lph'], ['us_gal', 'lpm'],
+    ])('warns without disabling submission for %s volume and %s flow', async (volumeUnit, flowUnit) => {
+        const html = await render('', { flowSource: 'pump_rating', volumeUnit, flowUnit });
+        expect(html).toContain('id="flow-unit-warning"');
+        expect(html).toContain('Mixed units are fine if intentional; you can continue.');
+        expect(html).toMatch(/<fieldset(?![^>]*disabled)[^>]*>/);
+        expect(html).toMatch(/<button[^>]*type="submit"(?![^>]*disabled)[^>]*>/);
+        expect(html.match(/type="checkbox"/g)).toHaveLength(2);
+    });
+
+    it.each([
+        ['pump_rating', 'l', 'lph'], ['measured_at_fermenter', 'l', 'lpm'],
+        ['pump_rating', 'us_gal', 'us_gph'], ['measured_at_fermenter', 'us_gal', 'us_gpm'],
+        ['unknown', 'l', 'us_gpm'], ['unknown', 'us_gal', 'lpm'],
+    ])('does not warn for %s with %s volume and %s flow', async (flowSource, volumeUnit, flowUnit) => {
+        const html = await render('', { flowSource, volumeUnit, flowUnit });
+        expect(html).not.toContain('id="flow-unit-warning"');
     });
 
     it('shows the reading warning for a configured but stale beer probe', async () => {
@@ -190,7 +237,7 @@ describe('water-test page lifecycle', () => {
         Object.assign(page.form, {
             capacity: 7.25, waterVolume: 5.5, coolingType: 'immersion_coil',
             probeMounting: 'thermowell', glycolChoice: 'chamber_probe',
-            consent: true, waterConfirmed: true,
+            flowSource: 'unknown', consent: true, waterConfirmed: true,
         });
         await page.startTest();
         expect(global.fetch).toHaveBeenCalledTimes(1);
@@ -214,6 +261,64 @@ describe('water-test page lifecycle', () => {
         expect(JSON.parse(options.body)).toEqual({});
         expect(page.actionError).toBe('');
         expect(refresh).toHaveBeenCalledTimes(2);
+    });
+
+    it('matches flow units to volume units while the current flow entry is blank, including after deletion', async () => {
+        const page = mount();
+        expect(page.form.flowSource).toBe('pump_rating');
+        expect(page.form.flowValue).toBe('');
+        expect(page.form.flowUnit).toBe('us_gpm');
+        page.changeVolumeUnit('l');
+        expect(page.form.flowUnit).toBe('lpm');
+        page.form.flowUnit = 'lph';
+        page.changeVolumeUnit('us_gal');
+        expect(page.form.flowUnit).toBe('us_gpm');
+        page.form.flowValue = 1.25;
+        page.form.flowUnit = 'us_gph';
+        page.changeVolumeUnit('l');
+        expect(page.form.flowUnit).toBe('us_gph');
+        page.form.flowValue = '';
+        page.changeVolumeUnit('us_gal');
+        expect(page.form.flowUnit).toBe('us_gpm');
+        page.changeVolumeUnit('l');
+        expect(page.form.flowUnit).toBe('lpm');
+        await flush();
+    });
+
+    it.each([1.25, 0])('preserves an entered flow value of %s and its units when volume units change', async (flowValue) => {
+        const page = mount();
+        expect(page.form.flowUnit).toBe('us_gpm');
+        page.form.flowValue = flowValue;
+        page.form.flowSource = 'pump_rating';
+        await nextTick();
+        page.changeVolumeUnit('l');
+        expect(page.form.flowValue).toBe(flowValue);
+        expect(page.form.flowUnit).toBe('us_gpm');
+        expect(page.flowUnitsMixed).toBe(true);
+        page.form.flowUnit = 'lph';
+        expect(page.flowUnitsMixed).toBe(false);
+        page.changeVolumeUnit('us_gal');
+        expect(page.form.flowValue).toBe(flowValue);
+        expect(page.form.flowUnit).toBe('lph');
+        expect(page.flowUnitsMixed).toBe(true);
+        await flush();
+    });
+
+    it.each([
+        ['pump_rating', 'measured_at_fermenter'], ['measured_at_fermenter', 'pump_rating'],
+        ['pump_rating', 'unknown'], ['measured_at_fermenter', 'unknown'],
+        ['unknown', 'pump_rating'], ['unknown', 'measured_at_fermenter'],
+    ])('clears the entered flow when its source changes from %s to %s', async (previous, next) => {
+        const page = mount();
+        page.form.flowSource = previous;
+        await nextTick();
+        Object.assign(page.form, { flowValue: 2.5, flowUnit: 'lpm' });
+        page.form.flowSource = next;
+        await nextTick();
+        expect(page.form.flowValue).toBe('');
+        expect(page.flowUnitsMixed).toBe(next !== 'unknown');
+        expect(page.form.flowUnit).toBe('lpm');
+        await flush();
     });
 
     it('uses an already loaded preference on mount and ignores temporarily unavailable preferences', async () => {

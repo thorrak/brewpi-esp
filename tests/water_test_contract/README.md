@@ -43,3 +43,5 @@ integration and data meaning, not simulator accuracy on physical hardware.
 Both algorithms are submitted as separate experiments. Their complete manifest,
 finish, and raw-record payloads must survive unchanged in retained data; each
 analysis must preserve the exact controller snapshots in its immutable inputs.
+The fixtures also retain a reported pump rating and a measured fermenter flow,
+respectively, without changing their entered values or units.

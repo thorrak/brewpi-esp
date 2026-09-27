@@ -64,6 +64,10 @@ void makeManifest() {
     input["fermenter_capacity_l"] = 26.5; input["water_volume_l"] = 18.927;
     input["cooling_type"] = "immersion_coil"; input["probe_mounting"] = "thermowell";
     input["glycol_temperature_source"] = "chamber_probe"; input["reported_chiller_setpoint_c"] = nullptr;
+    const bool dose = extendedSettings.glycolCoolingAlgorithm == GlycolCooling::Algorithm::PulseDose;
+    input["glycol_flow_source"] = dose ? "measured_at_fermenter" : "pump_rating";
+    input["glycol_flow_value"] = dose ? 2.25 : 200.5;
+    input["glycol_flow_unit"] = dose ? "lpm" : "us_gph";
     input["reported_input"]["volume_unit"] = "gal"; input["reported_input"]["water_volume"] = 5.0;
     input["reported_input"]["fermenter_capacity"] = 7.0; input["reported_input"]["temperature_unit"] = "F";
     input["reported_input"]["glycol_setpoint"] = nullptr;

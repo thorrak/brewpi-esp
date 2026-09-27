@@ -14,7 +14,9 @@ challenge starts with fresh estimates and leaves normal brewing tuning unchanged
    when glycol mode is enabled. The survey appears when a beer probe and local
    cooling relay are configured; otherwise the page shows setup warnings.
    Enter fermenter model/capacity, water volume, cooling arrangement and
-   beer-probe placement.
+   beer-probe placement. Optionally report the glycol pump's rated flow or flow
+   measured at the fermenter, with the entered rate and unit. Leave it unknown
+   when neither is available; no flow measurement is required.
 3. Select the configured **Glycol Temp** DS18B20 probe to measure the bath, if
    available. Otherwise enter the chiller's setpoint or explicitly mark it unknown.
    No additional probe is required.
@@ -207,6 +209,20 @@ would run to completion. Predictions outside the installation's tested operating
 range are identified separately.
 
 ## Device API
+
+The optional flow survey uses `glycol_flow_source`: `unknown`, `pump_rating`, or
+`measured_at_fermenter`. Either known source requires a positive numeric
+`glycol_flow_value` and `glycol_flow_unit`: `us_gph`, `us_gpm`, `lph`, or `lpm`.
+Gallons are US gallons (3.785411784 liters). Both the entered value and its L/min
+conversion must be positive and finite. An omitted source is accepted for older
+clients when rate and unit are absent or null. Explicit `unknown` also requires
+absent/null rate and unit; conflicting stale values are rejected.
+
+These fields are retained in `manifest.installation` with the original rate and
+unit; omitted legacy flow becomes `unknown` with null rate/unit. A pump rating
+and a measurement at the fermenter remain distinct. The survey is descriptive
+metadata and does not alter controller settings, test sequencing, or simulator
+inputs. It does not establish installed glycol mass flow.
 
 - `GET /api/water-test/`: current progress, preflight, temperatures and upload state.
 - `POST /api/water-test/start/`: consent and the normalized survey; accepted work

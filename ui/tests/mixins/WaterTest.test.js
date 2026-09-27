@@ -29,6 +29,41 @@ describe('water-test questionnaire', () => {
         expect(payload.reported_chiller_setpoint_c).toBeNull();
         expect(payload.reported_input.glycol_setpoint).toBeNull();
     });
+    it.each(['pump_rating', 'measured_at_fermenter'])('retains the source and entered decimal flow for %s in every unit', (flowSource) => {
+        for (const flowUnit of ['us_gph', 'us_gpm', 'lph', 'lpm']) {
+            const payload = JSON.parse(JSON.stringify(buildWaterTestPayload(form({
+                flowSource, flowValue: '12.375', flowUnit,
+            }))));
+            expect(payload.glycol_flow_source).toBe(flowSource);
+            expect(payload.glycol_flow_value).toBe(12.375);
+            expect(payload.glycol_flow_unit).toBe(flowUnit);
+        }
+    });
+    it('discards stale flow entries when the participant chooses No', () => {
+        const payload = buildWaterTestPayload(form({ flowSource: 'unknown', flowValue: 'not a number', flowUnit: 'old-unit' }));
+        expect(payload.glycol_flow_source).toBe('unknown');
+        expect(payload.glycol_flow_value).toBeNull();
+        expect(payload.glycol_flow_unit).toBeNull();
+        expect(buildWaterTestPayload(form()).glycol_flow_source).toBe('unknown');
+    });
+    it.each([
+        ['l', 'us_gph'], ['l', 'us_gpm'], ['us_gal', 'lph'], ['us_gal', 'lpm'],
+    ])('accepts accurately reported mixed units: fermenter %s and flow %s', (volumeUnit, flowUnit) => {
+        expect(buildWaterTestPayload(form({ volumeUnit, flowUnit, flowValue: '2.75', flowSource: 'pump_rating' })).glycol_flow_value).toBe(2.75);
+    });
+    it.each(['', ' ', null, undefined, 'bad', Infinity, NaN, -1, 0, true, false, [], [5], {}])('rejects invalid known flow %p', (flowValue) => {
+        expect(() => buildWaterTestPayload(form({ flowSource: 'pump_rating', flowUnit: 'lpm', flowValue }))).toThrow();
+    });
+    it.each(['', 'gph', 'gpm', 'imperial_gpm', 'rpm', 'toString', null, undefined, ['lpm'], {}])('requires an explicit supported flow unit instead of %p', (flowUnit) => {
+        expect(() => buildWaterTestPayload(form({ flowSource: 'measured_at_fermenter', flowUnit, flowValue: 2 }))).toThrow();
+    });
+    it.each(['', null, 'yes', 'rpm'])('rejects unsupported flow source %p', (flowSource) => {
+        expect(() => buildWaterTestPayload(form({ flowSource }))).toThrow();
+    });
+    it('rejects overflow and underflow when interpreting a flow rate', () => {
+        expect(() => buildWaterTestPayload(form({ flowSource: 'pump_rating', flowUnit: 'us_gpm', flowValue: Number.MAX_VALUE }))).toThrow();
+        expect(() => buildWaterTestPayload(form({ flowSource: 'pump_rating', flowUnit: 'lph', flowValue: Number.MIN_VALUE }))).toThrow();
+    });
     it.each(['l', 'us_gal'])('preserves decimal volumes entered in %s', (volumeUnit) => {
         const payload = JSON.parse(JSON.stringify(buildWaterTestPayload(form({
             capacity: '7.25', waterVolume: '5.5', volumeUnit,
