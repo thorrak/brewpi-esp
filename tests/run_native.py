@@ -18,6 +18,7 @@ def run(*args):
 
 
 def main():
+    run(sys.executable, ROOT / "tests/controller_identity/test.py")
     json_headers = next((path for path in (ROOT / ".pio/libdeps").glob("*/ArduinoJson/src")
                          if (path / "ArduinoJson.h").is_file()), None)
     if json_headers is None:

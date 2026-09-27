@@ -42,6 +42,7 @@ bool Controller::validate(const Config& c) {
 }
 
 void Controller::reset() {
+    estimates_frozen_ = false;
     pump_on_ = false;
     restart_required_ = false;
     last_edge_s_ = -infinity();
@@ -171,14 +172,14 @@ Output Controller::control(double t) {
             if (off_rate_ < -cfg.rate_floor_c_per_s && drop >= 0.04) {
                 const double observed = std::min(cfg.max_coast_estimate_s,
                     std::max(cfg.min_coast_estimate_s, drop / -off_rate_));
-                coast_s_ += cfg.learning_fraction * (observed - coast_s_);
+                if (!estimates_frozen_) coast_s_ += cfg.learning_fraction * (observed - coast_s_);
                 ++learning_updates_;
             }
             const double total_drop = std::max(0.0, start_c_ - temperature_c_);
             if (actual_on_s_ >= cfg.min_on_s) {
                 double observed_gain = total_drop / actual_on_s_;
                 observed_gain = std::max(cfg.minimum_budget_gain_c_per_s, observed_gain);
-                budget_gain_ += cfg.budget_learning_fraction * (observed_gain - budget_gain_);
+                if (!estimates_frozen_) budget_gain_ += cfg.budget_learning_fraction * (observed_gain - budget_gain_);
                 ++response_updates_;
             }
             phase_ = Phase::Idle;

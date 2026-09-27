@@ -2,8 +2,8 @@
 
 The `glycol-data-collection` branch adds a **Chill Test** page to the normal
 BrewPi web interface. Predictive and pulse-dose cooling remain available for
-normal brewing. The experiment temporarily owns the outputs and does not train
-either controller.
+normal brewing. The experiment temporarily owns the outputs. Its final controller
+challenge starts with fresh estimates and leaves normal brewing tuning unchanged.
 
 ## Participant flow
 
@@ -22,15 +22,15 @@ either controller.
    Be sure the pump runs during the first test and glycol is circulating.
 5. The device runs and records the sequence without needing the browser open.
    The page shows progress, temperatures and a **Stop test** button.
-6. Completed tests upload automatically over **HTTP** to
-   `http://chill.fermentrack.net`. A stopped test also uploads if at
-   least one planned pump pulse ran for its full duration. Follow the results
-   link on the page.
+6. Every outcome uploads automatically over **HTTP** to
+   `http://chill.fermentrack.net`: completed, stopped, inconclusive, failed, or
+   interrupted by a restart. Follow the results link on the page.
    Normal control stays OFF until **Resume saved temperature control** is selected.
 
-Restarting the device cancels any test and discards its local results and pending
-uploads. The saved normal control mode and settings resume on startup. Closing the
-browser or losing WiFi does not cancel the test.
+Closing the browser or losing WiFi does not cancel the test. Restarting the device
+ends an active test, preserves its durable recording, and queues the recovered
+result for upload. A restart never resumes a test pulse. Normal control remains
+OFF until explicit resume unless that resume was already saved before the restart.
 
 Configuration changes and upstream/manual control are held during the experiment
 and until explicit resume. The existing Fermentrack connection does not carry this
@@ -39,75 +39,172 @@ background research telemetry is collected during ordinary brewing.
 
 ## Versioned test program
 
-`cooling-water-v1` uses a five-minute pump-OFF baseline, up to three cooling pulses and
-20 minutes of pump-OFF observation after each pulse. Typical duration is about
-65–67 minutes, with a planned 90-minute ceiling. The heater is always OFF.
+`adaptive-campaign-v1` is one continuous experiment with a twelve-hour upper
+limit. It advances when the measurements are informative; twelve hours is not a
+target duration. The heater stays OFF throughout.
 
-Start with water between 8 and 35°C, at least 2°C warmer than the glycol
-input when that input is available. Unknown glycol input remains explicitly
-unknown in the submission.
+1. **Baseline.** With the pump OFF, collect at least 60 seconds of fresh readings.
+   Advance when the observed drift and noise are consistent. The nominal upper
+   baseline window is five minutes; inadequate sample coverage cannot qualify it.
+2. **Calibration pulses.** Start with a ten-second pulse. If cooling is too weak,
+   escalate through 30, 90, 270, 810, and 1,800 seconds. A calibration pulse ends
+   early once cooling exceeds the larger of 0.20°C and four times the measured
+   baseline noise, subject to the relay minimum ON time. Once useful cooling is
+   found, a shorter contrast pulse supplies a different input duration. Its
+   duration and the validation pulses also reserve temperature range for later
+   phases, using the response observed so far; five seconds and the configured
+   relay minimum form their lower bound.
+3. **Reserved validation pattern.** Use two shorter pulses separated by at least
+   30 seconds OFF and the configured relay minimum. This portion is reserved for
+   checking the fitted response model. Hose, jacket, and water temperatures retain
+   their history across every phase; no phase pretends the installation reset.
+4. **Controller challenge.** Where enough measured temperature budget remains,
+   run the selected production glycol cooling algorithm with fresh estimates and
+   a target 0.25°C below the current reading. This phase ends after an actual pump
+   cycle and three minutes of stable readings within 0.08°C of target, after
+   allowing at least the cooling tail already observed during calibration. It
+   otherwise ends after one hour. A timeout is reported explicitly. The controller used for normal
+   brewing keeps its existing learned values.
 
-The pilot is 10 seconds. Later pulses last 5–60 seconds according to the preceding
-observed response. The configured relay minimum ON time may lengthen a pulse,
-up to 60 seconds. Total planned pump time is at most three minutes. Ordinary
-transitions respect at least two seconds ON/OFF and the selected glycol
-controller's effective minimum intervals. Unsupported minimum intervals block preflight.
+After an isolated pulse, the test looks for the cooling rate to return near the
+measured baseline. It requires two sufficiently populated windows of 90–1,800
+seconds each (longer for a slower observed response), at least 180 seconds OFF,
+and at least twice the observed response delay. A flat trace without detected
+cooling does not count as settled. An uninformative pilot can escalate after
+five minutes, provided credible cooling has not started. A detected drop of at least 0.125°C, or at least 0.0625°C
+with a continuing downward trend, extends observation. Unsettled state and
+thermal history remain in the recording. An observation otherwise has a
+six-hour upper limit within the overall twelve-hour cap. It still ends as soon
+as the response meets the measured completion criteria. These rules describe
+measured probe behavior and do not prove that all water, hose, and jacket temperatures have equilibrated. Final
+validation also waits at least as long as the settled calibration tail already
+observed, preventing a shorter flat interval from hiding a known slow response.
 
-The test stops at a 3°C drop from its initial water reading or a 4°C water reading.
-As in normal OneWire control, a failed read can use the last good beer reading for
-up to 30 seconds. More than 30 seconds without a good beer reading, a recording
-failure or unaccounted sample loss terminates the experiment. A detected fault or
-temperature limit switches outputs OFF before diagnostic records are written.
-A normal user Stop may wait for the current minimum ON interval. These are limits
-on the measured probe, not guarantees of spatially uniform water.
+Start with water between 8 and 35°C, at least 2°C warmer than the glycol input when
+that input is available. Unknown glycol input remains explicitly unknown. The
+relay's configured minimum ON/OFF intervals apply, with an absolute minimum of
+two seconds. A single pulse is bounded by 30 minutes and total pump operation by
+two hours, including the controller challenge. A continuous controller pump run
+also stops at 30 minutes, with the `pulse_time_limit` reason. Unsupported minimum
+intervals block preflight.
 
-Pulse, freshness and runtime deadlines are checked between journal writes, and each
-control tick consumes a fixed snapshot of the sample queue. Durable flash writes
-are synchronous: an operation already in progress can delay a deadline or processing
-of a newly arrived fault until that operation returns. The durations above are
-therefore scheduling limits, not hard real-time cutoffs. Output records preserve
-the monotonic time when the command was actually applied, before storage work.
+The test stops at a 3°C measured drop from its initial water reading or a 4°C
+water reading. As in normal OneWire control, a failed read can use the last good
+beer reading for up to 30 seconds. More than 30 seconds without a good beer
+reading, a recording failure, unaccounted sample loss, or an unexpected output
+ends the experiment. A fault or temperature limit switches outputs OFF before
+diagnostic records are written. A user Stop may wait for the current minimum ON
+interval. These are probe limits, not guarantees of uniform water temperature.
 
-There is no temperature reset between pulses and no assumption that a 20-minute
-observation proves every installation has reached equilibrium. Little or no
-observed cooling ends the test as inconclusive.
+Pulse, freshness, and runtime deadlines are checked between journal writes, and
+each control tick consumes a fixed snapshot of the sample queue. Flash writes are
+synchronous: an operation already in progress can delay a deadline or processing
+of a newly arrived fault. Durations are scheduling limits, not hard real-time
+cutoffs. Output records preserve the monotonic time when a command was actually
+applied, before storage work.
 
 ## Measurements and delivery
 
-The OneWire worker records each fresh conversion attempt at approximately two-second
-cadence. Raw Celsius/sixteenth-degree values, calibration offsets, validity and
-per-probe acquisition times remain separate. Failed reads are recorded as invalid;
-they are not replaced by the cached reading used for control. In glycol mode,
-sensor setup labels the firmware's chamber sensor role **Glycol Temp**. When
-selected, that configured probe supplies the test's `glycol` measurements. A
-reported setpoint is metadata and never becomes a fabricated sensor sample.
+The OneWire worker acquires fresh conversion attempts approximately every two
+seconds. Every fresh beer reading updates the sequencer. The controller consumes
+the most recent reading once per second, matching normal glycol control; fast
+main-loop calls still check freshness, faults, and protective output limits.
+The same once-per-second limit applies to statistical phase decisions; relay
+pulse deadlines and protective stops are checked on every call. Statistical
+history keeps 2,048 compact readings at least 1.9 seconds apart, with timestamps
+relative to the start of the test. This covers both long settling windows while
+keeping memory bounded; durable sample timestamps retain their original
+microsecond precision. The
+**durable recording normally keeps one reading per probe every ten seconds**,
+with up to 2,500 additional readings across both probes at approximately two-second
+spacing during the first two minutes and after pump edges. Invalid reads may
+also use that additional-record budget. Once that budget is consumed, recording
+continues at the normal ten-second cadence. The manifest declares these limits;
+the uploaded data does not contain every acquisition attempt.
 
-Every actual logical pump/heater command transition has its own record, independent
-of temperature sampling. These commands do not prove relay contact state or flow.
-Device GUID, test UUID, boot UUID and per-boot sequence identify the immutable
-survey, configuration, samples and events. Monotonic microseconds drive timing;
-builds with `ENABLE_GLYCOL_LOGGING` make one startup NTP attempt to supply a UTC
-anchor when available. Internet time is not required to run the experiment.
+Each retained sample preserves its raw Celsius/sixteenth-degree value, calibration
+offset, validity, acquisition time, and conversion duration. Invalid readings
+remain invalid rather than becoming cached values. In glycol mode the configured
+chamber sensor is labeled **Glycol Temp**; selecting it provides actual bath
+measurements. A reported chiller setpoint remains metadata, never a fabricated
+sensor sample.
 
-A compact checksummed LittleFS journal buffers the bounded run during network
-outages within the current boot. Preflight checks free capacity. Uploads run on a
-separate task after recording ends, so DNS, HTTP retries and server processing
-cannot stretch a pulse.
-Manifest, batch and finish identities remain stable across retries. The page shows
-**Test submitted** only after all records and the terminal declaration are accepted.
-An upload pending state is independent of whether the experiment completed.
+Every applied logical pump/heater transition has its own record, independent of
+sample cadence. These commands do not prove relay contact state or glycol flow.
+Phase records identify the analysis role and block. Controller records preserve
+the selected algorithm, controller phase, target, predicted endpoint, cooling
+rate, coast estimate, gain estimate, and applied pump state at most once per
+minute plus pump transitions. Device GUID, test UUID, recording boot UUID, and
+sequence identify immutable survey, measurements, and events. Monotonic
+microseconds drive timing; a startup NTP anchor is recorded when available.
 
-Only completed tests and stopped tests with at least one full planned pump
-pulse are submitted. Failed tests, inconclusive tests and tests stopped before a
-full pulse show `not_submitted`. After explicitly resuming normal control, another
-test can start without restarting the device.
+The LittleFS journal has a hard ceiling of 12,500 checksummed 40-byte records.
+Preflight requires 532,768 free bytes for the 500,000-byte journal and metadata
+allowance; 16 KiB is reserved physically for finish/recovery metadata. The
+sampling budget accommodates twelve hours offline plus event records. Extremely
+frequent output events, another component consuming flash, or a write failure
+can still end acquisition early; the recorded prefix and declared loss remain
+available. The journal shares the filesystem with the web UI and settings.
 
-No test state is restored after reboot: active tests, local outcomes and pending
-submissions are discarded, and normal saved control resumes. Records already
-accepted by the remote service are not deleted. Within the same boot, uploads
-retry automatically and a new run cannot replace a pending submission. All prior
-test files must be removed successfully before a replacement starts. The journal
-occupies the same LittleFS partition as the web UI and device configuration.
+Manifest and finish documents are checksummed and committed by writing a complete
+temporary file followed by rename. The manifest is durable before the first pump
+command. Uploads begin only after acquisition ends and its finish details are
+saved, so network retries cannot stretch a pulse. Every outcome is submitted,
+including no measurable response, failure, and stopping during the baseline.
+The page shows **Test submitted** only after the server accepts the complete
+immutable records and finish, and its receipt has been saved locally.
+
+After a restart, recovery scans the existing journal's valid prefix. An unfinished
+run becomes `interrupted`, with any torn tail declared lost. Recovery records
+that the shutdown time was unobserved; it never invents an OFF transition in the
+previous boot's clock. Pending uploads retry the same manifest, batches, and
+finish, including records the server may already have accepted. Local records
+are removed only after a durable server receipt. Saved metadata remains until
+normal control has been explicitly resumed. A new test cannot overwrite pending
+data. Damaged metadata or a changed completed recording blocks replacement and
+holds outputs OFF, with a visible error; its files remain available for recovery.
+
+## Controller snapshots
+
+The durable manifest's `test_program.controller` contains the selected algorithm,
+its version, all 19 effective configuration fields, and its numeric initial
+tuning. The selection is pinned when the campaign starts. `initialization` is
+`fresh_defaults`; normal brewing estimates are neither copied into the challenge
+nor changed by it. The same constructor and relay limits build the manifest
+preview and the controller used later in the test.
+
+The finish document's `controller` object records final tuning directly from the
+actual test-controller instance, including learning/response counts. Sparse
+controller diagnostic samples are not used to reconstruct those values. An
+initialized controller also records `started_us`, `captured_at_us`, `target_c`,
+and `target_c_exact`. The snapshot's `learning_status` distinguishes:
+
+- `learned`: at least one relevant learning or response update occurred.
+- `no_updates`: the controller initialized but retained its initial estimates.
+- `not_started`: the run ended before the controller was initialized.
+- `unavailable_after_restart`: an active run was interrupted before a finish
+  snapshot could be saved; final tuning and initialization state are unknown.
+
+A finish snapshot already saved before a restart retains its original values.
+Both snapshot objects carry `implementation_id`, a SHA-256 identity of the exact
+portable cooling implementation sources, plus `tuning_schema_version: 1` and
+`numeric_encoding: "binary64-decimal-v1"`.
+
+Readable JSON numbers accompany `configuration_exact`, `initial_tuning_exact`,
+and `final_tuning_exact`. Those matching objects store each floating-point value
+as a 17-digit decimal string that recovers the original binary64 value; integer
+update counts remain in the numeric tuning object. Analysis must use these exact
+strings for reproducible comparisons. This avoids the precision loss in ordinary
+ArduinoJson numeric output. Manifest and finish uploads send their original
+checksummed stored JSON bytes, including after a restart, so parsing and
+reserializing metadata cannot change an immutable retry.
+
+The portal's starting-versus-learned comparison simulates the selected cooling
+algorithm over the observed challenge duration. It applies the controller's
+relay limits but excludes the campaign safety-stop wrapper, including the total
+temperature-drop and pump-time limits. It cannot certify that a physical replay
+would run to completion. Predictions outside the installation's tested operating
+range are identified separately.
 
 ## Device API
 

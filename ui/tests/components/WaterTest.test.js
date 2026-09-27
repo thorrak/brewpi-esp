@@ -66,7 +66,8 @@ describe('water-test setup and resume UI', () => {
         expect(html.match(/step="any"/g)).toHaveLength(2);
         expect(html).not.toContain('notice-warning');
         expect(html).toContain('10 seconds');
-        expect(html).toContain('5–60 seconds');
+        expect(html).toContain('up to 30 minutes');
+        expect(html).toContain('12-hour limit');
     });
 
     it('keeps the survey visible but disabled for other preflight restrictions', async () => {
@@ -95,29 +96,14 @@ describe('water-test setup and resume UI', () => {
         expect(html.match(/type="checkbox"/g)).toHaveLength(2);
     });
 
-    it.each([
-        ['failed', 1], ['inconclusive', 3], ['stopped', 0],
-    ])('explains why %s tests are not submitted without linking to a current result', async (outcome, completedPulses) => {
-        Object.assign(waterTest.status, {
-            test_id: 'test-not-submitted', phase: 'finished', outcome,
-            completed_pulses: completedPulses, upload_status: 'not_submitted',
-            control_owned: true, can_resume: true, can_start: false,
-        });
-        const html = await render();
-        expect(html).toContain('Data submission: Not submitted');
-        expect(html).toContain('Failed or inconclusive tests and tests stopped before a full pump run are not submitted.');
-        expect(html).not.toContain(`href="${fixture.result_url}"`);
-        expect(html).not.toContain('It will retry automatically');
-    });
-
-    it.each(['completed', 'stopped'])('keeps automatic upload information and result links for eligible %s tests', async (outcome) => {
+    it.each(['completed', 'stopped', 'failed', 'inconclusive', 'interrupted'])('keeps automatic upload information and result links for eligible %s tests', async (outcome) => {
         Object.assign(waterTest.status, {
             test_id: 'test-eligible', phase: 'finished', outcome, completed_pulses: 1,
             upload_status: 'pending', control_owned: true, can_resume: true, can_start: false,
         });
         const pending = await render();
         expect(pending).toContain('Data submission: Upload pending');
-        expect(pending).toContain('It will retry automatically');
+        expect(pending).toContain('It retries automatically');
         expect(pending).toContain(`href="${fixture.result_url}"`);
         waterTest.status.upload_status = 'submitted';
         const submitted = await render();

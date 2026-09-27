@@ -3,6 +3,9 @@
 #include <ArduinoJson.h>
 #include "WaterTestCore.h"
 #include "WaterTestProtocol.h"
+#include "GlycolCoolingController.h"
+#include "WaterTestControllerSnapshot.h"
+#include <memory>
 #include <cassert>
 #include <cstdio>
 #include <cstring>
@@ -13,14 +16,26 @@ using namespace WaterTestCore;
 struct Sample { uint64_t address, conversion, read; int16_t raw; bool valid; };
 JsonDocument manifest, terminal;
 Program program;
+Role recordedRole = Role::Baseline;
+std::unique_ptr<GlycolCooling::Controller> testController;
+GlycolCooling::Algorithm testAlgorithm = GlycolCooling::Algorithm::PredictiveCoast;
+uint64_t denseUntilUs=0, lastControllerRecordUs=0, recordStartUs=1000000;
+bool recordedControllerPump=false;
+constexpr uint64_t edgeWindowUs=120000000, sparseSampleUs=10000000, denseSampleUs=2000000;
+constexpr uint32_t denseRecordBudget=2500, maxRecords=12500;
+struct { GlycolCooling::Algorithm glycolCoolingAlgorithm=GlycolCooling::Algorithm::PredictiveCoast; } extendedSettings;
 uint64_t nativeNow = 1000000;
 bool appliedPump = false;
 std::vector<Record> records;
 char guid[17] = "DE00000000000077";
 char currentBoot[37] = "610f857b-2877-43b2-a2a2-cfbd1df121e8";
+char recordingBoot[37] = "610f857b-2877-43b2-a2a2-cfbd1df121e8";
 uint64_t nowUs() { return nativeNow; }
 bool physicalPump() { return appliedPump; }
-void uuid(char* output) { std::strcpy(output, "fc73f39a-2222-4000-8888-000000000077"); }
+void uuid(char* output) {
+    std::strcpy(output, extendedSettings.glycolCoolingAlgorithm == GlycolCooling::Algorithm::PulseDose
+        ? "fc73f39b-2222-4000-8888-000000000078" : "fc73f39a-2222-4000-8888-000000000077");
+}
 bool isNtpSynced() { return true; }
 uint32_t minimumOn() { return 2; }
 uint32_t minimumOff() { return 2; }
@@ -57,6 +72,7 @@ void makeManifest() {
     DeviceConfig cool{{{},0,26,true}};
     bool bath = true;
     // @@MANIFEST_SOURCE@@
+    recordingMetadata();
 }
 void sample(bool beer, int16_t raw, bool validSample) {
     // Exercise the production sample-record builder injected at build time.
@@ -85,28 +101,48 @@ int main(int argc, char** argv) {
         }
         std::cout<<"Actual firmware acknowledgement helpers accepted "<<count<<" portal responses.\n";return 0;
     }
+    if (argc==2 && std::string(argv[1])=="--pulse-dose")
+        extendedSettings.glycolCoolingAlgorithm=GlycolCooling::Algorithm::PulseDose;
     makeManifest();
     assert(program.start(nowUs()/1e6,22.0625,minimumOn(),minimumOff()));
     Record boot{}; boot.kind=0;boot.code=static_cast<uint8_t>(Reason::Start);append(boot);
     Record clock{};clock.kind=1;clock.read_us=1790416800000000ULL;append(clock);
     recordOutput(true,false,false,Reason::Start);recordOutput(false,false,false,Reason::Start);recordPhase();
+    double water=22., rate=0.;
+    bool badBathRecorded=false;
     for (unsigned elapsed=1;program.active()&&elapsed<maximumSeconds;++elapsed) {
         nativeNow=1000000ULL+elapsed*1000000ULL;
+        // Known illustrative plant for serializer integration, not a physical calibration claim.
+        rate += ((appliedPump ? .006 : 0.)-rate)/25.;
+        water -= rate;
         if(elapsed%2==0) {
-            // This is illustrative input, never evidence of physical accuracy.
-            int16_t raw=static_cast<int16_t>(std::lround((22.0-std::max(0.,double(elapsed)-300)*.00025)*16));
-            sample(true,raw,true);
+            sample(true,static_cast<int16_t>(std::lround(water*16)),true);
             int16_t bathRaw=static_cast<int16_t>(std::lround((7.5+.4*std::sin(elapsed/300.0))*16));
-            sample(false,bathRaw,elapsed!=306); // Invalid bath conversion during pilot pulse.
+            const bool bad = appliedPump && !badBathRecorded;
+            sample(false,bathRaw,!bad);
+            badBathRecorded = badBathRecorded || bad;
         }
         auto previousPhase=program.phase;
+        auto previousRole=program.role;
         program.tick(nowUs()/1e6);
+        if(previousPhase==Phase::Controller && program.phase==Phase::Controller) {
+            if(!testController) {
+                PredictiveCooling::Config predictive; AdaptiveCooling::Config dose;
+                predictive.min_on_s=dose.min_on_s=program.minimumOn;
+                predictive.min_off_s=dose.min_off_s=program.minimumOff;
+                testController.reset(new GlycolCooling::Controller(extendedSettings.glycolCoolingAlgorithm,predictive,dose));
+                testController->externalOff(program.switched);
+            }
+            const auto decision=testController->step(nowUs()/1e6,program.latestC,program.targetC,true);
+            program.setControllerPump(nowUs()/1e6,decision.pump_on);
+        }
         if(appliedPump!=program.pump) {
             appliedPump=program.pump;recordOutput(true,program.pump,true,program.reason);
         }
-        if(previousPhase!=program.phase&&program.active()) recordPhase();
+        if((previousPhase!=program.phase || previousRole!=program.role)&&program.active()) recordPhase();
+        recordController();
     }
-    assert(!program.active()); assert(program.outcome==End::Completed);assert(program.pulse==3);
+    assert(!program.active()); assert(program.outcome==End::Completed);assert(program.pulse>=4);
     recordOutput(true,false,false,program.reason);recordOutput(false,false,false,program.reason);recordPhase();
     // @@FINISH_SOURCE@@
     bounds[currentBoot]=static_cast<int64_t>(records.size())-1;

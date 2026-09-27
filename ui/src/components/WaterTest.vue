@@ -20,6 +20,7 @@
           <div>
             <h2 id="progress-heading" class="text-lg font-semibold text-gray-900">{{ outcomeTitle }}</h2>
             <p class="mt-1 text-gray-600" aria-live="polite">{{ phaseLabel }}</p>
+            <p v-if="status.active && status.analysis_role" class="mt-1 text-sm text-gray-600">{{ statusLabel('roles', status.analysis_role) }}</p>
           </div>
           <button v-if="status.active" type="button" class="button button-stop" :disabled="busy === 'stop' || status.phase === 'stopping'" @click="sendAction('stop')">
             {{ busy === 'stop' || status.phase === 'stopping' ? t('water_test.stopping') : t('water_test.stop') }}
@@ -39,8 +40,8 @@
           <template v-else>{{ t('water_test.unmeasured_temperature') }}</template>
         </p>
         <div v-if="status.active" class="mt-4">
-          <label for="test-progress" class="metric-label">{{ t('water_test.pulse_progress', { number: status.pulse_number || 0, duration: displayDuration(status.max_duration_s || 5400) }) }}</label>
-          <progress id="test-progress" class="mt-2 w-full accent-indigo-600" :value="status.elapsed_s || 0" :max="status.max_duration_s || 5400"></progress>
+          <label for="test-progress" class="metric-label">{{ t('water_test.pulse_progress', { number: status.pulse_number || 0, duration: displayDuration(status.max_duration_s || 43200) }) }}</label>
+          <progress id="test-progress" class="mt-2 w-full accent-indigo-600" :value="status.elapsed_s || 0" :max="status.max_duration_s || 43200"></progress>
         </div>
         <p v-if="status.reason" class="mt-4 text-sm text-gray-700">{{ reasonLabel }}</p>
         <div class="mt-5 border-t border-gray-200 pt-4">
@@ -158,6 +159,7 @@ function displayTemperature(value) {
 function displayDuration(value) {
   if (typeof value !== 'number' || !Number.isFinite(value)) return '—';
   const seconds = Math.max(0, Math.floor(value));
+  if (seconds >= 3600) return t('water_test.duration_hours', { hours: Math.floor(seconds / 3600), minutes: Math.floor(seconds % 3600 / 60), seconds: String(seconds % 60).padStart(2, '0') });
   return t('water_test.duration', { minutes: Math.floor(seconds / 60), seconds: String(seconds % 60).padStart(2, '0') });
 }
 function changeVolumeUnit(next) {

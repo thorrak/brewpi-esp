@@ -55,6 +55,17 @@ void adaptive_reset(void* p) { static_cast<Controller*>(p)->reset(); }
 void adaptive_reset_runtime(void* p, double t) {
     static_cast<Controller*>(p)->resetRuntime(t);
 }
+void adaptive_freeze_estimates(void* p, std::uint8_t frozen) {
+    static_cast<Controller*>(p)->freezeEstimates(frozen != 0);
+}
+bool adaptive_restore_tuning(void* p, double gain, std::uint32_t updates) {
+    return static_cast<Controller*>(p)->restoreTuning({gain, updates});
+}
+void adaptive_tuning(void* p, double* gain, std::uint32_t* updates) {
+    const auto tuning = static_cast<Controller*>(p)->tuning();
+    *gain = tuning.gain_c_per_on_s;
+    *updates = tuning.learning_updates;
+}
 const char* adaptive_phase_name(std::uint32_t phase) {
     return Controller::phaseName(static_cast<AdaptiveCooling::Phase>(phase));
 }

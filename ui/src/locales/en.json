@@ -265,7 +265,7 @@
     "connecting": "Connecting to your device...",
     "stopping": "Stopping...",
     "stop": "Stop test",
-    "active_help": "The device runs the entire sequence. You may close this page. Restarting this device cancels the test and resumes your saved temperature control. Stop may wait for the relay's minimum ON time before switching the pump off.",
+    "active_help": "The device advances when it has useful measurements. You may close this page. A restart stops the experiment and keeps its recording; normal control remains off until you resume it. Stop may wait for the relay minimum ON time.",
     "beer_probe": "Water / beer probe",
     "glycol_bath": "Glycol bath",
     "pump_command": "Pump command",
@@ -276,16 +276,16 @@
     "reported_temperature": "Glycol temperature not measured — using reported setpoint {temperature}.",
     "unknown_temperature": "Glycol temperature not measured — input unknown.",
     "unmeasured_temperature": "Glycol temperature is not being measured during this test.",
-    "pulse_progress": "Pulse {number} of 3 · maximum {duration}",
+    "pulse_progress": "Pulse {number} · time limit {duration} (the test can finish earlier)",
     "submission_status": "Data submission: {status}",
-    "upload_help": "Keep this device powered and connected to WiFi. It will retry automatically; you can close this page. Restarting this device discards local test results and pending uploads. Results already submitted remain available.",
+    "upload_help": "Keep the device connected to WiFi to upload. It retries automatically, and recordings survive a restart. You can close this page.",
     "view_results": "View this device's submissions and simulator comparisons",
     "processing": "Processing may take a little longer.",
-    "not_submitted_help": "Failed or inconclusive tests and tests stopped before a full pump run are not submitted.",
+    "not_submitted_help": "No recording is available to submit. Check the test message for details.",
     "control_off": "Normal temperature control is OFF.",
     "resuming": "Resuming...",
     "resume": "Resume saved temperature control",
-    "cannot_start": "A new test is not available yet. Pending submissions are retained until uploaded or the device restarts.",
+    "cannot_start": "A new test is not available yet. The previous recording is retained until its upload finishes.",
     "configure_beer_probe": "Configure a DS18B20 beer probe before starting.",
     "configure_cooling_relay": "Configure a Cooling Switch/Relay before starting.",
     "prepare_title": "Prepare once, then let the test run",
@@ -293,8 +293,8 @@
     "water": "water",
     "prepare_circuit": "Connect the normal glycol circuit and run your chiller at its usual setpoint. Leave the heater off.",
     "prepare_nearby": "Be sure the pump runs during the first test and glycol is circulating.",
-    "sequence_help": "This device records a baseline, runs up to three bounded cooling pulses, and observes the response between pulses. Allow about 60–90 minutes; no reheating or temperature resets are needed. Control stays OFF when the test ends until you choose to resume it or restart this device.",
-    "pump_timing": "The first pump run is 10 seconds; later runs last 5–60 seconds depending on the measured response. Your relay's minimum ON time may extend a run, up to 60 seconds. Each run is followed by 20 minutes of observation, and total pump time is limited to 3 minutes.",
+    "sequence_help": "One continuous test measures starting temperature drift, adjusts cooling pulses to your fermenter, then runs separate pulses to check the simulator. If enough temperature range remains, it also tests the selected BrewPi cooling algorithm. It moves on as soon as useful measurements are available, with a 12-hour limit. Normal control stays off until you resume it.",
+    "pump_timing": "The first pulse is 10 seconds, or your relay minimum. Pulses grow only when needed, up to 30 minutes, and can end early once a clear response is measured. Observation waits shorten when the response has settled. Water cooling is limited to 3 °C (5.4 °F), with a 4 °C (39.2 °F) minimum.",
     "setup": "Your test setup",
     "fermenter_question": "1. What fermenter are you using?",
     "fermenter_model": "Make / model (or a short description)",
@@ -319,7 +319,7 @@
     "outside": "Attached outside the fermenter",
     "other_probe": "Another position",
     "chamber_question": "5. Do you have a probe measuring the glycol bath?",
-    "probe_optional": "Optional — you do not need to add a probe.",
+    "probe_optional": "A bath probe is strongly recommended for a simulator we can check against this test. Without it, we can still measure your cooling response, but the model has to assume a glycol temperature.",
     "use_chamber_probe": "Yes, use my glycol probe to measure the bath",
     "chamber_unavailable": "No usable glycol probe is currently available. You can use a reported setpoint below.",
     "no_chamber_probe": "No / I do not have a glycol probe",
@@ -338,6 +338,7 @@
     "in_progress": "Chill Test in progress",
     "unavailable": "Unavailable",
     "duration": "{minutes}m {seconds}s",
+    "duration_hours": "{hours}h {minutes}m {seconds}s",
     "phases": {
       "idle": "Ready for a Chill Test",
       "preflight": "Checking sensors and recording space",
@@ -348,7 +349,8 @@
       "observation": "Observing the delayed cooling response",
       "stopping": "Stopping after the relay minimum ON time",
       "finished": "Test ended",
-      "complete": "Test ended"
+      "complete": "Test ended",
+      "controller": "Testing the selected cooling algorithm"
     },
     "reasons": {
       "program_complete": "The cooling sequence completed.",
@@ -360,10 +362,11 @@
       "runtime_limit": "The test reached its maximum running time.",
       "recording_failure": "The device could not continue saving readings. Available data was retained.",
       "sample_queue_overflow": "The device could not keep up with recording. The test was stopped.",
-      "reboot_interrupted": "A device restart cancelled the test and discarded its local data.",
+      "reboot_interrupted": "A restart stopped the experiment. Its available recording was retained.",
       "recording_gap": "Part of the recording is missing. The available data was retained.",
       "relay_minimum_limit": "The relay minimum times exceed this test’s pulse limits.",
       "pump_time_limit": "The test reached its total pump-time limit.",
+      "pulse_time_limit": "The cooling algorithm reached the limit for one continuous pump run. The pump was switched off.",
       "unexpected_output": "An unexpected output state ended the test."
     },
     "outcomes": {
@@ -399,6 +402,13 @@
       "select_chamber": "Select whether to use your glycol probe to measure the bath.",
       "enter_setpoint": "Enter the chiller's setpoint, or select unknown.",
       "setpoint_range": "Check the chiller setpoint and its units."
+    },
+    "roles": {
+      "baseline": "Measuring the starting drift",
+      "calibration": "Measuring the cooling response",
+      "validation": "Checking predictions with separate pulses",
+      "controller": "Testing the selected cooling algorithm",
+      "complete": "Test ended"
     }
   }
 }

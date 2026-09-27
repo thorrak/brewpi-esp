@@ -91,6 +91,10 @@ public:
     bool tuningValid(const Tuning& tuning) const;
     // Restore only learned estimates, leaving relay timing and measurements intact.
     bool restoreTuning(const Tuning& tuning);
+    // Offline comparisons may hold numeric estimates fixed while completed
+    // response observations still advance normal startup/cycle bookkeeping.
+    // Normal firmware operation leaves this false. reset() re-enables learning.
+    void freezeEstimates(bool freeze = true) { estimates_frozen_ = freeze; }
     bool configurationValid() const { return config_valid_; }
     const Config& configuration() const { return config_; }
     const Output& output() const { return output_; }
@@ -100,6 +104,7 @@ private:
 
     Config config_;
     bool config_valid_;
+    bool estimates_frozen_;
     bool pump_on_;
     bool restart_required_;
     double last_edge_s_;

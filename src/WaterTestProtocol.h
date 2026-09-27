@@ -2,6 +2,8 @@
 #include "WaterTestCore.h"
 #include <ArduinoJson.h>
 #include <string>
+#include <cstring>
+#include <cmath>
 
 // Shared by firmware and host contract tests. No network or hardware dependencies.
 namespace WaterTestProtocol {
@@ -61,7 +63,32 @@ inline void recordToJson(JsonObject out, const WaterTestCore::Record &r, const c
     out["phase"] = phaseName(static_cast<Phase>(r.code));
     out["pulse_number"] = r.pulse;
     out["planned_remaining_s"] = r.detail;
+    out["block_id"] = r.raw;
+    {
+      const char *roles[] = {"baseline", "calibration", "validation", "controller", "complete"};
+      out["analysis_role"] = r.flags < 5 ? roles[r.flags] : "unknown";
+    }
     break;
+  case 7: {
+    out["type"] = "controller";
+    out["algorithm"] = r.code == 0 ? "predictive_coast" : "pulse_dose";
+    out["controller_phase"] = r.pulse;
+    out["target_c"] = r.raw / 16.0;
+    out["pump_on"] = bool(r.flags & 2);
+    auto number = [&](const char *key, uint32_t bits) {
+      float value;
+      memcpy(&value, &bits, sizeof(value));
+      if (std::isfinite(value))
+        out[key] = value;
+      else
+        out[key] = nullptr;
+    };
+    number("predicted_endpoint_c", r.conversion_us);
+    number("cooling_rate_c_per_s", uint32_t(r.read_us));
+    number("coast_s", uint32_t(r.read_us >> 32));
+    number("gain_c_per_on_s", r.detail);
+    break;
+  }
   default:
     out["type"] = r.kind == 6 ? "gap" : "fault";
     out["reason"] = reasonName(static_cast<Reason>(r.code));

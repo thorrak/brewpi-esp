@@ -30,7 +30,7 @@ inline bool failUploadAllocation = false;
 inline bool invalidUploadAcknowledgement = false;
 inline void *uploadBuffer = nullptr;
 inline size_t uploadAllocationSize = 0;
-inline size_t freeBytes = 512000;
+inline size_t freeBytes = 650000;
 inline int fsyncUntilFail = -1, delays = 0, nextHttpCode = 201;
 inline bool connected = true;
 inline unsigned randomCounter = static_cast<unsigned>(getpid()), resumes = 0;
@@ -84,12 +84,7 @@ constexpr bool git_dirty = true;
 namespace Modes {
 constexpr char off = 'o';
 }
-namespace GlycolCooling {
-enum class Algorithm { PredictiveCoast, PulseDose };
-inline const char *selectionName(Algorithm a) {
-  return a == Algorithm::PredictiveCoast ? "predictive_coast" : "pulse_dose";
-}
-} // namespace GlycolCooling
+#include "GlycolCoolingController.h"
 struct Cooling {
   double minOn = 2, minOff = 2;
   double minOnSeconds() { return minOn; }

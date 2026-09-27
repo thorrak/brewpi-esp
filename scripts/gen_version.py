@@ -3,6 +3,7 @@
 
 import subprocess
 import os
+from controller_identity import controller_identity
 
 # This is permanently pinned to 0.2.4 for legacy reasons. The proper version incrementing happens in platformio.ini as FIRMWARE_REVISION
 release = "0.2.4"
@@ -38,6 +39,8 @@ This file is auto-generated.  Any changes made here will be destroyed during
 the next build.  To make persistent changes, edit the template in
 /scripts/gen_version.py
 ******************************************************************************/
+
+#define COOLING_IMPLEMENTATION_ID "{controller_identity()}"
 
 namespace Config {{
     namespace Version {{

@@ -40,6 +40,7 @@ bool Controller::validate(const Config& c) {
 }
 
 void Controller::reset() {
+    estimates_frozen_ = false;
     pump_on_ = false;
     restart_required_ = false;
     last_edge_s_ = -infinity();
@@ -162,10 +163,10 @@ Output Controller::control(double t) {
                 const double gain = std::min(cfg.maximum_gain_c_per_on_s,
                     std::max(cfg.minimum_gain_c_per_on_s, drop / actual_on_s_));
                 const double alpha = learning_updates_ == 0 ? 1.0 : cfg.learning_fraction;
-                gain_ += alpha * (gain - gain_);
+                if (!estimates_frozen_) gain_ += alpha * (gain - gain_);
                 ++learning_updates_;
             } else if (actual_on_s_ >= cfg.min_on_s && error > cfg.unresolved_error_c) {
-                gain_ = std::max(cfg.minimum_gain_c_per_on_s, gain_ * 0.5);
+                if (!estimates_frozen_) gain_ = std::max(cfg.minimum_gain_c_per_on_s, gain_ * 0.5);
                 ++learning_updates_;
             }
             phase_ = Phase::Idle;

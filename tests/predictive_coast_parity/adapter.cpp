@@ -57,6 +57,20 @@ void predictive_reset(void* p) { static_cast<Controller*>(p)->reset(); }
 void predictive_reset_runtime(void* p, double t) {
     static_cast<Controller*>(p)->resetRuntime(t);
 }
+void predictive_freeze_estimates(void* p, std::uint8_t frozen) {
+    static_cast<Controller*>(p)->freezeEstimates(frozen != 0);
+}
+bool predictive_restore_tuning(void* p, double coast, double gain,
+                               std::uint32_t learning, std::uint32_t responses) {
+    return static_cast<Controller*>(p)->restoreTuning({coast, gain, learning, responses});
+}
+void predictive_tuning(void* p, double* values, std::uint32_t* counts) {
+    const auto tuning = static_cast<Controller*>(p)->tuning();
+    values[0] = tuning.coast_s;
+    values[1] = tuning.budget_gain_c_per_s;
+    counts[0] = tuning.learning_updates;
+    counts[1] = tuning.response_updates;
+}
 const char* predictive_phase_name(std::uint32_t phase) {
     return Controller::phaseName(static_cast<PredictiveCooling::Phase>(phase));
 }
