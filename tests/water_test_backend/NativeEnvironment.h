@@ -34,8 +34,13 @@ inline size_t freeBytes = 650000;
 inline int fsyncUntilFail = -1, delays = 0, nextHttpCode = 201;
 inline bool connected = true;
 inline unsigned randomCounter = static_cast<unsigned>(getpid()), resumes = 0;
+inline unsigned taskCreates = 0, taskDeletes = 0;
+inline bool failTaskCreation = false;
+inline void (*scheduledTask)(void *) = nullptr;
+inline void *scheduledTaskArgument = nullptr;
 inline std::vector<std::string> payloads;
 struct Yield {};
+struct TaskDeleted : Yield {};
 } // namespace Native
 constexpr unsigned MALLOC_CAP_8BIT = 1;
 inline void *heap_caps_malloc(size_t size, unsigned capabilities) {
@@ -214,7 +219,23 @@ inline int xQueueReceive(Queue *q, void *p, int) {
   q->items.pop_front();
   return pdPASS;
 }
-inline int xTaskCreate(void (*)(void *), const char *, unsigned, void *, unsigned, void *) { return pdPASS; }
+inline int xTaskCreate(void (*entry)(void *), const char *, unsigned stackSize, void *argument, unsigned, void *) {
+  ++Native::taskCreates;
+  assert(stackSize == 12288);
+  if (Native::failTaskCreation)
+    return 0;
+  assert(Native::scheduledTask == nullptr);
+  Native::scheduledTask = entry;
+  Native::scheduledTaskArgument = argument;
+  return pdPASS;
+}
+inline void vTaskDelete(void *handle) {
+  assert(handle == nullptr);
+  ++Native::taskDeletes;
+  Native::scheduledTask = nullptr;
+  Native::scheduledTaskArgument = nullptr;
+  throw Native::TaskDeleted{};
+}
 inline int pdMS_TO_TICKS(int n) { return n; }
 inline void vTaskDelay(int milliseconds) {
   if (Native::delayHook)

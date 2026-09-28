@@ -70,6 +70,18 @@ void uploadOnce() {
   } catch (const Native::Yield &) {
   }
 }
+void runScheduledUpload() {
+  assert(Native::scheduledTask && WaterTest::uploaderTaskActive);
+  const auto deleted = Native::taskDeletes;
+  Native::delays = 10000;
+  try {
+    Native::scheduledTask(Native::scheduledTaskArgument);
+    assert(false); // FreeRTOS task entry must delete itself, never return.
+  } catch (const Native::TaskDeleted &) {
+  }
+  assert(Native::taskDeletes == deleted + 1 && Native::scheduledTask == nullptr);
+  assert(!WaterTest::uploaderTaskActive && !WaterTest::uploaderBusy && Native::uploadBuffer == nullptr);
+}
 void finishEligibleStopped() {
   advance(WaterTest::program.started + 72);
   assert(WaterTest::active() && !WaterTest::physicalPump());
@@ -202,10 +214,97 @@ int main(int argc, char **argv) {
   } else if (scenario == "metadata_cleanup_failure_after_reboot") {
     Native::removeFailurePath = "/water-test-manifest.json";
     tempControl.heater->setActive(true);
+  } else if (scenario == "orphan_unreadable_after_reboot") {
+    Native::openFailurePath = WaterTest::journalPath;
   }
   initializeHardware();
   std::string error;
-  if (scenario == "flow_validation") {
+  if (scenario == "uploader_lifecycle") {
+    assert(Native::taskCreates == 0 && !WaterTest::backgroundServicesReady);
+    WaterTest::tick(); // The setup-time tick must not reserve an upload stack.
+    assert(Native::taskCreates == 0);
+    WaterTest::startBackgroundServices();
+    WaterTest::startBackgroundServices();
+    start();
+    advance(64);
+    assert(Native::taskCreates == 0 && WaterTest::active());
+    finishEligibleStopped();
+    assert(Native::taskCreates == 1 && WaterTest::uploaderTaskActive);
+    for (unsigned n = 0; n < 20; ++n) WaterTest::tick();
+    assert(Native::taskCreates == 1);
+    Native::delayHook = [&](int) {
+      const auto created = Native::taskCreates;
+      WaterTest::tick(); // Main-loop service during every pacing delay.
+      assert(Native::taskCreates == created);
+    };
+    runScheduledUpload();
+    Native::delayHook = {};
+    assert(WaterTest::uploadState == "submitted" && !fs_exists(WaterTest::journalPath));
+    WaterTest::tick();
+    assert(Native::taskCreates == 1);
+    JsonDocument resume;
+    assert(WaterTest::requestResume(resume, error));
+    WaterTest::tick();
+    start();
+    assert(Native::taskCreates == 1 && WaterTest::active());
+  } else if (scenario == "uploader_allocation_retry") {
+    assert(Native::taskCreates == 0);
+    start();
+    finishEligibleStopped();
+    WaterTest::tick();
+    assert(Native::taskCreates == 0); // Pending work still waits for the actual loop.
+    WaterTest::startBackgroundServices();
+    assert(Native::taskCreates == 0);
+    Native::failTaskCreation = true;
+    WaterTest::tick();
+    assert(Native::taskCreates == 1 && !WaterTest::uploaderTaskActive);
+    assert(WaterTest::uploadState == "error" && fs_exists(WaterTest::journalPath));
+    const auto firstRetry = WaterTest::nextUploaderAttemptUs;
+    assert(firstRetry == Native::clock + 30000000);
+    for (unsigned n = 0; n < 30; ++n) WaterTest::tick();
+    Native::clock = firstRetry - 1;
+    WaterTest::tick();
+    assert(Native::taskCreates == 1);
+    Native::clock = firstRetry;
+    WaterTest::tick();
+    assert(Native::taskCreates == 2 && !WaterTest::uploaderTaskActive);
+    Native::failTaskCreation = false;
+    Native::clock = WaterTest::nextUploaderAttemptUs;
+    WaterTest::tick();
+    assert(Native::taskCreates == 3 && WaterTest::uploaderTaskActive);
+    runScheduledUpload();
+    assert(WaterTest::uploadState == "submitted");
+  } else if (scenario == "uploader_network_backoff") {
+    WaterTest::startBackgroundServices();
+    start();
+    finishEligibleStopped();
+    Native::nextHttpCode = 500;
+    runScheduledUpload();
+    assert(Native::taskCreates == 1 && Native::taskDeletes == 1);
+    assert(WaterTest::uploadState == "error" && !WaterTest::manifestUploaded);
+    assert(WaterTest::nextUploaderAttemptUs == Native::clock + 30000000);
+    const std::string original = Native::payloads.front();
+    Native::clock = WaterTest::nextUploaderAttemptUs - 1;
+    WaterTest::tick();
+    assert(Native::taskCreates == 1);
+    Native::clock += 1;
+    Native::nextHttpCode = 201;
+    WaterTest::tick();
+    assert(Native::taskCreates == 2);
+    runScheduledUpload();
+    assert(Native::payloads[1] == original && WaterTest::uploadState == "submitted");
+    assert(Native::taskDeletes == 2 && WaterTest::nextUploaderAttemptUs == 0);
+  } else if (scenario == "recovered_lazy_after_reboot") {
+    assert(Native::taskCreates == 0 && WaterTest::terminalDurable);
+    WaterTest::tick();
+    assert(Native::taskCreates == 0 && WaterTest::controlOwned());
+    WaterTest::startBackgroundServices();
+    WaterTest::tick();
+    assert(Native::taskCreates == 1);
+    runScheduledUpload();
+    assert(WaterTest::uploadState == "submitted" && WaterTest::controlOwned());
+    assert(!WaterTest::physicalPump() && !WaterTest::physicalHeat());
+  } else if (scenario == "flow_validation") {
     auto check = [&](JsonDocument &request, bool expected) {
       std::string failure;
       assert(WaterTest::requestStart(request, failure) == expected);
@@ -485,6 +584,68 @@ int main(int argc, char **argv) {
     assert(!WaterTest::requestStart(d, error));
     uploadOnce();
     assert(Native::payloads.empty());
+  } else if (scenario == "orphan_retry_after_reboot") {
+    assert(WaterTest::startupHold && !WaterTest::recoveryBlocked && !WaterTest::owned);
+    assert(WaterTest::controlOwned() && !WaterTest::active());
+    assert(fs_exists(WaterTest::journalPath) && fs_exists("/water-test-manifest.json.tmp"));
+    assert(!fs_exists(WaterTest::manifestPath));
+    // Settings load after recovery. Holding outputs must preserve those settings
+    // for a new test's eventual prior_control snapshot.
+    tempControl.cs.mode = 'b';
+    tempControl.cooler->setActive(true);
+    fresh(2);
+    assert(!WaterTest::physicalPump() && !WaterTest::physicalHeat());
+    assert(tempControl.cs.mode == 'b');
+    JsonDocument state;
+    WaterTest::status(state);
+    assert(state["startup_interrupted"] == true && state["control_owned"] == true);
+    assert(state["can_start"] == true && state["can_resume"] == false);
+    assert(state["upload_status"] == "not_submitted" && WaterTest::manifest.isNull());
+    auto d = survey();
+    d["consent"] = false;
+    assert(!WaterTest::requestStart(d, error));
+    assert(fs_exists("/water-test-manifest.json.tmp"));
+    d["consent"] = true;
+    assert(WaterTest::requestStart(d, error));
+    assert(WaterTest::requestStop(error));
+    WaterTest::tick();
+    assert(WaterTest::startupHold && WaterTest::controlOwned() && !WaterTest::owned);
+    assert(fs_exists("/water-test-manifest.json.tmp"));
+    Native::openFailurePath = WaterTest::journalPath;
+    assert(WaterTest::requestStart(d, error));
+    WaterTest::tick();
+    assert(WaterTest::startupHold && WaterTest::controlOwned() && !WaterTest::active());
+    assert(tempControl.cs.mode == 'b');
+    Native::openFailurePath.clear();
+    assert(WaterTest::requestStart(d, error));
+    WaterTest::tick();
+    assert(WaterTest::active() && !WaterTest::startupHold);
+    assert(WaterTest::manifest["prior_control"]["mode"] == "b");
+    assert(!fs_exists("/water-test-manifest.json.tmp"));
+  } else if (scenario == "orphan_blocked_after_reboot" || scenario == "orphan_unreadable_after_reboot") {
+    const auto files = std::distance(std::filesystem::directory_iterator(Native::root),
+                                     std::filesystem::directory_iterator{});
+    assert(WaterTest::recoveryBlocked && WaterTest::controlOwned() && !WaterTest::startupHold);
+    assert(!WaterTest::active() && !WaterTest::physicalPump() && !WaterTest::physicalHeat());
+    auto d = survey();
+    assert(!WaterTest::requestStart(d, error));
+    JsonDocument state;
+    WaterTest::status(state);
+    assert(state["can_start"] == false && state["can_resume"] == false);
+    uploadOnce();
+    assert(Native::payloads.empty());
+    assert(files == std::distance(std::filesystem::directory_iterator(Native::root),
+                                  std::filesystem::directory_iterator{}));
+  } else if (scenario.rfind("orphan_", 0) == 0) {
+    writeFile(WaterTest::journalPath, scenario == "orphan_nonempty_before_reboot" ? "x" : "");
+    writeFile("/water-test-manifest.json.tmp", "partial startup metadata");
+    writeFile(WaterTest::reservePath, "reserved");
+    if (scenario == "orphan_manifest_before_reboot") writeFile(WaterTest::manifestPath, "invalid");
+    if (scenario == "orphan_finish_before_reboot") writeFile(WaterTest::finishPath, "invalid");
+    if (scenario == "orphan_finish_tmp_before_reboot") writeFile("/water-test-finish.json.tmp", "invalid");
+    if (scenario == "orphan_ack_tmp_before_reboot") writeFile("/water-test-ack.json.tmp", "invalid");
+    if (scenario == "orphan_resumed_tmp_before_reboot") writeFile("/water-test-resumed.json.tmp", "invalid");
+    if (scenario == "orphan_boots_tmp_before_reboot") writeFile("/water-test-boots.json.tmp", "invalid");
   } else if (scenario == "corrupt_before_reboot") {
     writeFile(WaterTest::journalPath, "torn");
     for (auto path : {"/water-test-manifest.json", "/water-test-boots.json", "/water-test-finish.json",
@@ -997,27 +1158,18 @@ int main(int argc, char **argv) {
     fwrite("torn", 1, 4, f);
     fclose(f);
   } else if (scenario == "upload_pacing") {
-    unsigned initialWaits = 0, completedWaits = 0;
+    start();
+    finishEligibleStopped();
+    unsigned initialWaits = 0;
     size_t requests = 0;
     uint32_t acknowledged = 0;
+    const auto deleted = Native::taskDeletes;
     Native::delays = 1000;
     Native::delayHook = [&](int milliseconds) {
       assert(Native::uploadBuffer == nullptr && !WaterTest::uploaderBusy);
-      if (initialWaits < 2) {
+      if (!initialWaits) {
         assert(milliseconds == 1500 && Native::payloads.empty());
-        if (++initialWaits == 2) {
-          start();
-          finishEligibleStopped();
-        }
-        return;
-      }
-      if (WaterTest::uploadState == "submitted") {
-        assert(milliseconds == 1500 && WaterTest::uploadedRecords == WaterTest::recordCount);
-        assert(acknowledged == WaterTest::recordCount);
-        assert(Native::payloads.size() == requests + 1);
-        assert(!fs_exists(WaterTest::journalPath));
-        if (++completedWaits == 2)
-          throw Native::Yield{};
+        ++initialWaits;
         return;
       }
       assert(milliseconds == 50 && WaterTest::uploadState == "pending");
@@ -1039,72 +1191,71 @@ int main(int argc, char **argv) {
     };
     try {
       WaterTest::uploader(nullptr);
-    } catch (const Native::Yield &) {
+    } catch (const Native::TaskDeleted &) {
     }
-    assert(initialWaits == 2 && completedWaits == 2);
+    assert(initialWaits == 1 && Native::taskDeletes == deleted + 1);
+    assert(WaterTest::uploadState == "submitted" && !fs_exists(WaterTest::journalPath));
+    assert(acknowledged == WaterTest::recordCount);
     assert(requests == 1 + (WaterTest::recordCount + 11) / 12);
+    assert(Native::payloads.size() == requests + 1);
   } else if (scenario == "upload_pacing_http_retry" || scenario == "upload_pacing_ack_retry" ||
              scenario == "upload_pacing_preparation_retry") {
     start();
     finishEligibleStopped();
     const bool preparationFailure = scenario == "upload_pacing_preparation_retry";
-    unsigned step = 0, completedWaits = 0;
+    unsigned step = 0;
+    const auto deleted = Native::taskDeletes;
     Native::delays = 1000;
     Native::delayHook = [&](int milliseconds) {
       assert(Native::uploadBuffer == nullptr && !WaterTest::uploaderBusy);
       if (step == 0) {
         assert(milliseconds == 1500 && Native::payloads.empty());
         step = 1;
-      } else if (step == 1) {
-        assert(milliseconds == 50 && Native::payloads.size() == 1);
+      } else {
+        assert(step == 1 && milliseconds == 50 && Native::payloads.size() == 1);
         assert(WaterTest::manifestUploaded && WaterTest::uploadedRecords == 0);
         Native::nextHttpCode = scenario == "upload_pacing_http_retry" ? 500 : 201;
         Native::invalidUploadAcknowledgement = scenario == "upload_pacing_ack_retry";
         Native::failUploadAllocation = preparationFailure;
         step = 2;
-      } else if (step == 2) {
-        assert(milliseconds == (preparationFailure ? 1500 : 30000));
-        assert(Native::payloads.size() == (preparationFailure ? 1u : 2u));
-        assert(WaterTest::uploadState == "error" && WaterTest::uploadedRecords == 0);
-        assert(fs_exists(WaterTest::journalPath));
-        Native::nextHttpCode = 201;
-        Native::invalidUploadAcknowledgement = false;
-        Native::failUploadAllocation = false;
-        step = preparationFailure ? 4 : 3;
+      }
+    };
+    try { WaterTest::uploader(nullptr); } catch (const Native::TaskDeleted &) {}
+    assert(step == 2 && Native::taskDeletes == deleted + 1);
+    assert(WaterTest::uploadState == "error" && WaterTest::uploadedRecords == 0);
+    assert(Native::payloads.size() == (preparationFailure ? 1u : 2u));
+    assert(fs_exists(WaterTest::journalPath));
+    assert(WaterTest::nextUploaderAttemptUs == Native::clock + 30000000);
+    Native::nextHttpCode = 201;
+    Native::invalidUploadAcknowledgement = false;
+    Native::failUploadAllocation = false;
+    Native::clock = WaterTest::nextUploaderAttemptUs;
+    Native::delayHook = [&](int milliseconds) {
+      assert(Native::uploadBuffer == nullptr && !WaterTest::uploaderBusy);
+      if (step == 2) {
+        assert(milliseconds == 1500 && WaterTest::uploadedRecords == 0);
+        step = 3;
       } else if (step == 3) {
-        assert(milliseconds == 1500 && Native::payloads.size() == 2);
-        assert(WaterTest::uploadedRecords == 0 && WaterTest::uploadState == "error");
-        step = 4;
-      } else if (step == 4) {
         assert(milliseconds == 50 && WaterTest::uploadedRecords == 12);
         assert(Native::payloads.size() == (preparationFailure ? 2u : 3u));
-        if (!preparationFailure)
-          assert(Native::payloads[1] == Native::payloads[2]);
-        step = 5;
-      } else if (WaterTest::uploadState == "submitted") {
-        assert(milliseconds == 1500 && WaterTest::uploadedRecords == WaterTest::recordCount);
-        assert(!fs_exists(WaterTest::journalPath));
-        if (++completedWaits == 2)
-          throw Native::Yield{};
+        if (!preparationFailure) assert(Native::payloads[1] == Native::payloads[2]);
+        step = 4;
       } else {
         assert(milliseconds == 50 && WaterTest::uploadState == "pending");
       }
     };
-    try {
-      WaterTest::uploader(nullptr);
-    } catch (const Native::Yield &) {
-    }
-    assert(step == 5 && completedWaits == 2);
+    try { WaterTest::uploader(nullptr); } catch (const Native::TaskDeleted &) {}
+    assert(step == 4 && Native::taskDeletes == deleted + 2);
+    assert(WaterTest::uploadState == "submitted" && WaterTest::uploadedRecords == WaterTest::recordCount);
+    assert(!fs_exists(WaterTest::journalPath));
   } else if (scenario == "upload_retry") {
     start();
     finishEligibleStopped();
     assert(fs_exists(WaterTest::journalPath));
-    unsigned backoffs = 0;
+    const auto deleted = Native::taskDeletes;
     Native::delayHook = [&](int milliseconds) {
-      if (milliseconds == 30000) {
-        assert(Native::uploadBuffer == nullptr);
-        ++backoffs;
-      }
+      assert(milliseconds != 30000); // Backoff releases the task stack now.
+      assert(Native::uploadBuffer == nullptr);
     };
     Native::nextHttpCode = 500;
     uploadOnce();
@@ -1125,7 +1276,7 @@ int main(int argc, char **argv) {
     assert(WaterTest::uploadState == "submitted");
     assert(!fs_exists(WaterTest::journalPath));
     assert(!fs_exists(WaterTest::journalPath));
-    assert(backoffs == 2);
+    assert(Native::taskDeletes == deleted + 3); // Two errors, then final completion.
   } else if (scenario == "upload_allocation_failure") {
     start();
     finishEligibleStopped();

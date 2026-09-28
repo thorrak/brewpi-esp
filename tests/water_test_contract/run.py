@@ -51,13 +51,15 @@ def main():
     if headers is None:
         parser.error("Build a firmware target to install ArduinoJson, or provide --arduinojson PATH")
     source = (ROOT / "src/WaterTest.cpp").read_text()
-    functions = "".join(definition(source, name) for name in (
-        "std::unique_ptr<GlycolCooling::Controller> makeTestController(", "void controllerPlan(",
+    functions = between(source, "struct TestControllerDeleter {", "TestControllerPtr testController;")
+    functions += "".join(definition(source, name) for name in (
+        "TestControllerPtr makeTestController(", "bool controllerPlan(",
         "void controllerTerminalMetadata(", "std::string romOf(", "void common(", "void sensorManifest(", "void outputManifest(",
         "void recordOutput(", "void recordPhase(", "void recordController(", "void recordingMetadata(", "Record sampleRecord(",
     ))
     # Extract within the owning function so unrelated records cannot match.
-    manifest = between(definition(source, "void startRun("), "char testId[37];", 'journal = fs_open(journalPath, "wb");')
+    manifest = between(definition(source, "void startRun("), "char testId[37];", 'if (!controllerPlanReady)')
+    manifest += 'assert(controllerPlanReady);\n'
     finish = between(definition(source, "void finishRun("), "terminal.clear();", "closeJournal();")
     harness = (HERE / "harness.cpp").read_text()
     for marker, code in (("SOURCE_FUNCTIONS", functions), ("MANIFEST_SOURCE", manifest),

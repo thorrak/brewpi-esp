@@ -41,7 +41,8 @@ def main():
                 "-I" + str(json_headers), *sources, "-o", binary)
             run(binary)
     for name in ["cooling_selector_settings", "glycol_tuning", "predictive_coast_integration",
-                 "water_test_backend", "static_file_serving", "crash_dump", "http_json_response"]:
+                 "water_test_backend", "water_test_storage", "controller_memory", "static_file_serving",
+                 "crash_dump", "http_json_response", "startup_health"]:
         print(f"Running {name}", flush=True)
         run(sys.executable, ROOT / "tests" / name / "run.py")
     run(sys.executable, ROOT / "tests/water_test_contract/run.py", "--firmware-only")

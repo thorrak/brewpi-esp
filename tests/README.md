@@ -8,7 +8,8 @@ python3 tests/run_native.py
 
 This compiles and runs the portable cooling controllers, algorithm selection,
 settings and learned-tuning persistence, firmware integration, water-test program and protocol,
-storage and upload backend, test cancellation on reboot, static HTTP serving,
+storage and upload backend, metadata under tight memory limits, controller
+allocation failures, startup task failures and sensor retries, test cancellation on reboot, static HTTP serving,
 firmware serializer harness, and the controller source identity used by offline
 learning comparisons.
 It uses temporary files and simulated I/O; it does not contact a server or

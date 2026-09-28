@@ -54,11 +54,11 @@
         </div>
         <div v-if="!status.active && status.control_owned" class="notice notice-info mt-5">
           <p class="font-medium">{{ t('water_test.control_off') }}</p>
-          <button type="button" class="button button-primary mt-3" :disabled="busy !== '' || !status.can_resume" @click="sendAction('resume')">{{ busy === 'resume' ? t('water_test.resuming') : t('water_test.resume') }}</button>
+          <button v-if="!status.startup_interrupted" type="button" class="button button-primary mt-3" :disabled="busy !== '' || !status.can_resume" @click="sendAction('resume')">{{ busy === 'resume' ? t('water_test.resuming') : t('water_test.resume') }}</button>
         </div>
       </section>
 
-      <form v-if="status && !status.active && !status.control_owned" @submit.prevent="startTest" class="space-y-6">
+      <form v-if="status && !status.active && (!status.control_owned || status.startup_interrupted)" @submit.prevent="startTest" class="space-y-6">
         <div class="card">
           <h2 class="text-lg font-semibold text-gray-900">{{ t('water_test.prepare_title') }}</h2>
           <ol class="list-decimal pl-5 mt-3 space-y-2 text-sm text-gray-700">

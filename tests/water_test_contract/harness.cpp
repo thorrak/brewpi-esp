@@ -18,6 +18,7 @@ JsonDocument manifest, terminal;
 Program program;
 Role recordedRole = Role::Baseline;
 std::unique_ptr<GlycolCooling::Controller> testController;
+bool controllerAllocationFailed = false;
 GlycolCooling::Algorithm testAlgorithm = GlycolCooling::Algorithm::PredictiveCoast;
 uint64_t denseUntilUs=0, lastControllerRecordUs=0, recordStartUs=1000000;
 bool recordedControllerPump=false;

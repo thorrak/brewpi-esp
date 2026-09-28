@@ -37,6 +37,9 @@
 
 #include "rest/rest_send.h"
 #include "OneWireTempSensor.h"
+#include "OneWireScanner.h"
+#include "RuntimeHealth.h"
+#include <atomic>
 #include <esp_system.h>
 #include <esp_heap_caps.h>
 
@@ -80,6 +83,22 @@ DisplayType realDisplay;
 DisplayType DISPLAY_REF display = realDisplay;
 
 ValueActuator alarm_actuator;
+
+namespace RuntimeHealth {
+namespace {
+std::atomic<bool> loopStarted{false};
+std::atomic<bool> loopTaskFallback{false};
+std::atomic<uint32_t> loopIterations{0};
+std::atomic<uint64_t> lastLoopUs{0};
+}
+
+Snapshot snapshot() {
+    return {loopStarted.load(std::memory_order_relaxed),
+            loopTaskFallback.load(std::memory_order_relaxed),
+            loopIterations.load(std::memory_order_relaxed),
+            lastLoopUs.load(std::memory_order_relaxed)};
+}
+}
 
 void printMem() {
     const uint32_t free = esp_get_free_heap_size();
@@ -251,6 +270,14 @@ void setup()
  */
 void brewpiLoop()
 {
+  // Setup also calls tick once. Background work is enabled only once the real
+  // control loop and sensor worker have stacks. Give a failed scanner startup
+  // first access to available memory before allowing an upload to allocate it.
+#if !BREWPI_SIMULATE
+  ow_scanner.retry_if_stopped(oneWirePin);
+  if (ow_scanner.is_running())
+#endif
+  WaterTest::startBackgroundServices();
   WaterTest::tick();
 	static unsigned long lastUpdate = 0;
 	uint8_t oldState;
@@ -336,11 +363,21 @@ if(bt_scanner.scanning_failed()) {
  * This dispatches to brewpiLoop(), or if we're in simulation mode simulateLoop()
  */
 void loop() {
+	RuntimeHealth::lastLoopUs.store(esp_timer_get_time(), std::memory_order_relaxed);
+	RuntimeHealth::loopIterations.fetch_add(1, std::memory_order_relaxed);
+	RuntimeHealth::loopStarted.store(true, std::memory_order_relaxed);
 #if BREWPI_SIMULATE
 	simulateLoop();
 #else
 	brewpiLoop();
 #endif
+}
+
+static void runControlLoop(void*) {
+    for (;;) {
+        loop();
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
 }
 
 extern "C" void app_main(void) {
@@ -363,8 +400,8 @@ extern "C" void app_main(void) {
     setup();
 
     // Create loop task on the app core
-    xTaskCreatePinnedToCore(
-        [](void*) { for (;;) { loop(); vTaskDelay(pdMS_TO_TICKS(10)); } },
+    const BaseType_t created = xTaskCreatePinnedToCore(
+        runControlLoop,
         "loopTask",
         8192,
         nullptr,
@@ -372,4 +409,11 @@ extern "C" void app_main(void) {
         nullptr,
         1  // Core 1 = app core
     );
+    if (created != pdPASS) {
+        RuntimeHealth::loopTaskFallback.store(true, std::memory_order_relaxed);
+        // app_main already has an 8 KiB stack. Keep servicing sensors and
+        // actuator safety here instead of returning with only HTTP alive.
+        printf("Unable to allocate loopTask; using the existing main task.\n");
+        runControlLoop(nullptr);
+    }
 }

@@ -79,6 +79,24 @@ describe('water-test setup and resume UI', () => {
         expect(html).toContain(waterTest.status.preflight.reason);
     });
 
+    it.each([true, false])('offers interrupted-start setup with live preflight ready=%s while showing held-off control', async (ready) => {
+        Object.assign(waterTest.status, {
+            test_id: null, active: false, control_owned: true, startup_interrupted: true,
+            can_start: ready, can_resume: false, reason: 'Setup was interrupted before the test began. Start a new test when ready.',
+        });
+        waterTest.status.preflight.reason = ready ? '' : 'Waiting for a fresh valid beer probe reading.';
+        const html = await render();
+        expect(html).toContain('id="progress-heading"');
+        expect(html).toContain(waterTest.status.reason);
+        expect(html).toContain(i18n.global.t('water_test.control_off'));
+        expect(html).toContain(i18n.global.t('water_test.prepare_title'));
+        expect(html).toContain('id="water-volume"');
+        expect(/<fieldset[^>]*disabled/.test(html)).toBe(!ready);
+        expect(html).not.toContain(i18n.global.t('water_test.resume'));
+        expect(html).not.toContain(i18n.global.t('water_test.restored'));
+        if (!ready) expect(html).toContain(waterTest.status.preflight.reason);
+    });
+
     it('offers three flow choices after the bath question, with pump rating selected by default', async () => {
         const html = await render();
         expect(html.indexOf('id="flow-question"')).toBeGreaterThan(html.indexOf('name="glycol-source"'));

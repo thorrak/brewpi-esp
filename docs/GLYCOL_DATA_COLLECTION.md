@@ -149,12 +149,23 @@ can still end acquisition early; the recorded prefix and declared loss remain
 available. The journal shares the filesystem with the web UI and settings.
 
 Manifest and finish documents are checksummed and committed by writing a complete
-temporary file followed by rename. The manifest is durable before the first pump
+temporary file followed by rename. Metadata is streamed through bounded buffers
+instead of building several complete JSON copies in RAM. The manifest is durable before the first pump
 command. Uploads begin only after acquisition ends and its finish details are
 saved, so network retries cannot stretch a pulse. Every outcome is submitted,
 including no measurable response, failure, and stopping during the baseline.
 The page shows **Test submitted** only after the server accepts the complete
 immutable records and finish, and its receipt has been saved locally.
+
+The upload task is allocated only while a completed recording needs submission,
+after the control loop and OneWire sensor worker have started. Its 12 KiB stack
+is released after submission or a failed attempt; failures retry after 30 seconds.
+HTTP waits run outside the test-state lock. Preparing a batch or committing its
+receipt still takes that lock and can briefly delay a display update.
+
+If the separate control-loop task cannot be allocated, control runs on the
+existing main-task stack. Failed OneWire startup is retried every 30 seconds;
+a running sensor worker continues to handle its own bus recovery.
 
 After a restart, recovery scans the existing journal's valid prefix. An unfinished
 run becomes `interrupted`, with any torn tail declared lost. Recovery records
@@ -165,6 +176,13 @@ are removed only after a durable server receipt. Saved metadata remains until
 normal control has been explicitly resumed. A new test cannot overwrite pending
 data. Damaged metadata or a changed completed recording blocks replacement and
 holds outputs OFF, with a visible error; its files remain available for recovery.
+
+If startup was interrupted before a manifest was committed and the journal is
+provably empty, no measurements or test pump commands occurred. The setup form
+allows an explicit new test while outputs stay held OFF. Startup files are kept
+until that request; a failed or cancelled retry keeps the hold. Any nonempty or
+unreadable journal, existing manifest, or evidence of finalization continues to
+require recovery. Do not erase the filesystem to resolve a startup failure.
 
 ## Controller snapshots
 
@@ -225,6 +243,13 @@ metadata and does not alter controller settings, test sequencing, or simulator
 inputs. It does not establish installed glycol mass flow.
 
 - `GET /api/water-test/`: current progress, preflight, temperatures and upload state.
+- `GET /api/health/`: control-loop progress and OneWire startup/read diagnostics.
+  `control_loop.last_tick_age_ms` shows time since the loop last began an iteration;
+  `task_fallback` identifies use of the existing main-task stack. OneWire
+  `running`, `last_init_error`, and allocation counters distinguish a worker that
+  could not start from one that is running but has no successful probe readings.
+  `last_read_age_ms` is null until a real successful read. The request neither
+  starts tasks nor accesses the sensor bus.
 - `POST /api/water-test/start/`: consent and the normalized survey; accepted work
   is processed by the local sequencing loop.
 - `POST /api/water-test/stop/`: request an ordinary stop.
@@ -270,6 +295,9 @@ c++ -std=c++17 -Isrc -I.pio/libdeps/esp32_wifi_iic/ArduinoJson/src \
   tests/water_test_protocol/test.cpp -o /tmp/water-test-protocol
 /tmp/water-test-protocol
 python3 tests/water_test_backend/run.py
+python3 tests/water_test_storage/run.py
+python3 tests/controller_memory/run.py
+python3 tests/startup_health/run.py
 /path/to/portal/.venv/bin/python tests/water_test_contract/run.py \
   --portal /path/to/glycol_data_collection
 cd ui

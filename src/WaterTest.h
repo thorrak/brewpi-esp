@@ -7,6 +7,9 @@
 namespace WaterTest {
 // init may run before settings/device installation; never starts outputs.
 void init();
+// Call only from the running control loop, after startup tasks are established.
+// Idempotent; permits tick() to launch short-lived background upload work.
+void startBackgroundServices();
 void tick();
 bool active();
 // Includes queued start and completed test held OFF awaiting explicit resume.

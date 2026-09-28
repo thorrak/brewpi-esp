@@ -17,6 +17,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <esp_heap_caps.h>
 #include <esp_random.h>
@@ -27,6 +28,7 @@
 #include <freertos/semphr.h>
 #include <freertos/task.h>
 #include <memory>
+#include <new>
 #include <sys/time.h>
 #include <unistd.h>
 
@@ -55,11 +57,28 @@ struct Cache {
 SemaphoreHandle_t mutex = nullptr;
 QueueHandle_t samples = nullptr;
 std::atomic<bool> initialized{false}, owned{false}, running{false}, overflow{false};
+// An interrupted save before acquisition started must not resume normal control
+// on boot, but an explicit new Start may replace its empty recording.
+std::atomic<bool> startupHold{false};
 std::atomic<bool> uploaderBusy{false};
+std::atomic<bool> backgroundServicesReady{false};
+bool uploaderTaskActive = false; // protected by Guard, including task creation/exit
+uint64_t nextUploaderAttemptUs = 0;
+constexpr uint64_t uploaderRetryUs = 30000000;
 Cache cache[Config::EepromFormat::MAX_DEVICES];
 Program program;
 Role recordedRole = Role::Complete;
-std::unique_ptr<GlycolCooling::Controller> testController;
+struct TestControllerDeleter {
+  void operator()(GlycolCooling::Controller *controller) const {
+    if (controller) {
+      controller->~Controller();
+      std::free(controller);
+    }
+  }
+};
+using TestControllerPtr = std::unique_ptr<GlycolCooling::Controller, TestControllerDeleter>;
+TestControllerPtr testController;
+bool controllerAllocationFailed = false;
 GlycolCooling::Algorithm testAlgorithm = GlycolCooling::Algorithm::PredictiveCoast;
 uint64_t lastControllerRecordUs = 0;
 double lastControllerStep = -1;
@@ -313,6 +332,10 @@ void finishRun() {
   terminal["baseline_noise_c"] = program.noiseC;
   terminal["baseline_drift_c_per_s"] = program.baselineDrift;
   controllerTerminalMetadata(terminal["controller"].to<JsonObject>());
+  testController.reset();
+  if (controllerAllocationFailed)
+    terminal["error_detail"] = "Not enough free memory to start the cooling algorithm. Cooling has stopped; the "
+                               "recorded test data is retained.";
   JsonObject bounds = terminal["final_seq_by_boot"].to<JsonObject>();
   closeJournal();
   bounds[recordingBoot] = recordCount ? int64_t(recordCount) - 1 : -1;
@@ -327,7 +350,7 @@ void finishRun() {
   terminalDurable = saveDocument(finishPath, terminal);
   uploadState = terminalDurable ? "pending" : "error";
   uploadError.clear();
-  reason = reasonName(program.reason);
+  reason = terminal["error_detail"] | reasonName(program.reason);
   if (!terminalDurable)
     uploadError = "The recording is retained; saving its finish details will be retried.";
   running = false;
@@ -407,20 +430,28 @@ void recordingMetadata() {
   manifest["acquisition"]["dense_extra_record_budget"] = denseRecordBudget;
   manifest["acquisition"]["max_records"] = maxRecords;
 }
-std::unique_ptr<GlycolCooling::Controller> makeTestController(uint32_t minimumOn, uint32_t minimumOff,
-                                                             GlycolCooling::Algorithm algorithm) {
+TestControllerPtr makeTestController(uint32_t minimumOn, uint32_t minimumOff,
+                                     GlycolCooling::Algorithm algorithm) {
   PredictiveCooling::Config predictive;
   AdaptiveCooling::Config dose;
   predictive.min_on_s = dose.min_on_s = minimumOn;
   predictive.min_off_s = dose.min_off_s = minimumOff;
-  return std::unique_ptr<GlycolCooling::Controller>(
-      new GlycolCooling::Controller(algorithm, predictive, dose));
+  // This ESP toolchain implements nothrow new through throwing new; allocation
+  // failure would still abort when C++ exceptions are disabled. The constructor
+  // only initializes fixed storage, so check malloc before placement construction.
+  void *storage = std::malloc(sizeof(GlycolCooling::Controller));
+  if (!storage)
+    return {};
+  return TestControllerPtr(new (storage) GlycolCooling::Controller(algorithm, predictive, dose));
 }
-void controllerPlan(JsonObject out) {
+bool controllerPlan(JsonObject out) {
   // The preview uses the same constructor and effective relay settings as the
   // eventual test controller. It neither steps nor touches normal brewing tuning.
   auto defaults = makeTestController(minimumOn(), minimumOff(), testAlgorithm);
+  if (!defaults)
+    return false;
   WaterTestControllerSnapshot::initial(out, *defaults, COOLING_IMPLEMENTATION_ID);
+  return true;
 }
 void startRun(const std::string &payload) {
   JsonDocument input;
@@ -452,6 +483,8 @@ void startRun(const std::string &payload) {
   }
   manifest.clear();
   terminal.clear();
+  testController.reset();
+  controllerAllocationFailed = false;
   recordingFailed = false;
   lostRecord = false;
   recordCount = seq = 0;
@@ -513,10 +546,6 @@ void startRun(const std::string &payload) {
       "baseline60-300s; off>=180s, extended by observed response delay, until response plateau; final check retains "
       "measured calibration coast; weak pilot may advance after300s only without credible ongoing cooling, without "
       "claiming settled; off cap21600s";
-  controllerPlan(plan["controller"].to<JsonObject>());
-  plan["controller"]["target_drop_c"] = .25;
-  plan["controller"]["max_duration_s"] = controllerSeconds;
-  plan["controller"]["scope"] = "cooling_controller_core_with_test_safety_limits";
   sensorManifest(manifest["sensors"]["beer"].to<JsonObject>(), beer, "beer", input["probe_mounting"] | "unknown");
   if (bath)
     sensorManifest(manifest["sensors"]["glycol"].to<JsonObject>(), glycol, "chamber", "glycol_bath");
@@ -536,6 +565,20 @@ void startRun(const std::string &payload) {
   manifest["acquisition"]["freshness_limit_s"] = freshnessSeconds;
   manifest["acquisition"]["recording_format"] = "crc32-binary-v1";
   manifest["acquisition"]["clock_status_at_start"] = isNtpSynced() ? "synced" : "unknown";
+  // All survey values have been copied into the manifest. Release their parse
+  // storage before allocating the controller used to capture its exact defaults.
+  input.clear();
+  const bool controllerPlanReady = controllerPlan(plan["controller"].to<JsonObject>());
+  plan["controller"]["target_drop_c"] = .25;
+  plan["controller"]["max_duration_s"] = controllerSeconds;
+  plan["controller"]["scope"] = "cooling_controller_core_with_test_safety_limits";
+  if (!controllerPlanReady) {
+    manifest.clear();
+    owned = false;
+    uploadState = "idle";
+    reason = "Not enough free memory to prepare the cooling test; the test was not started.";
+    return;
+  }
   journal = fs_open(journalPath, "wb");
   if (!journal) {
     reason = "Unable to open the test recording file.";
@@ -566,7 +609,6 @@ void startRun(const std::string &payload) {
   forceOff();
   tempControl.cs.mode = Modes::off;
   program.start(recordStartUs / 1e6, waterC, minimumOn(), minimumOff());
-  testController.reset();
   lastControllerRecordUs = 0;
   lastControllerStep = -1;
   recordedRole = Role::Complete;
@@ -576,6 +618,7 @@ void startRun(const std::string &payload) {
   uploadError.clear();
   overflow = false;
   running = true;
+  startupHold = false;
   recordBoot();
   recordPhase();
   recordStartUs = lastRecordUs; // discard queued reads acquired before the initial record boundary
@@ -648,6 +691,12 @@ void serviceProgram(bool allowNewPulse) {
   if (allowNewPulse && phase == Phase::Controller && program.phase == Phase::Controller) {
     if (!testController) {
       testController = makeTestController(program.minimumOn, program.minimumOff, testAlgorithm);
+      if (!testController) {
+        controllerAllocationFailed = true;
+        program.finish(now, End::Failed, Reason::StorageFailure);
+        applyProgram(phase);
+        return;
+      }
       testController->externalOff(program.switched);
     }
     // Match normal GlycolMode's 1 Hz cadence. The outer loop runs much faster;
@@ -744,19 +793,21 @@ UploadBuffer serializeUpload(const JsonDocument &doc, size_t &length) {
 }
 
 UploadBuffer storedUpload(const char *path, size_t &length) {
-  std::string payload;
-  if (!loadDocumentPayload(path, payload))
+  if (!readDocumentPayload(path, nullptr, 0, length))
     return nullptr;
-  length = payload.size();
   UploadBuffer body(static_cast<char *>(heap_caps_malloc(length, MALLOC_CAP_8BIT)));
-  if (body)
-    memcpy(body.get(), payload.data(), length);
+  size_t copied = 0;
+  if (body && (!readDocumentPayload(path, body.get(), length, copied) || copied != length))
+    body.reset();
   return body;
 }
 
-// This worker never touches actuators. It starts only after acquisition is closed;
-// upload/response delays cannot change an experiment's timing or sample cadence.
-void uploader(void *) {
+bool uploadNeeded() {
+  return !running && queuedStart.empty() && !terminal.isNull() && !recoveryBlocked && uploadState != "submitted";
+}
+// Return whether another attempt is needed after backoff. All request buffers
+// and documents leave scope before the task deletes itself and frees its stack.
+bool uploadPending() {
   uint32_t delayMs = 1500;
   for (;;) {
     vTaskDelay(pdMS_TO_TICKS(delayMs));
@@ -771,14 +822,14 @@ void uploader(void *) {
     JsonDocument response;
     {
       Guard lock;
-      if (running || !queuedStart.empty() || terminal.isNull() || recoveryBlocked || uploadState == "submitted")
-        continue;
+      if (!uploadNeeded())
+        return false;
       if (!terminalDurable) {
         terminalDurable = saveDocument(finishPath, terminal);
         if (!terminalDurable) {
           uploadState = "error";
           uploadError = "The recording is retained; finish details could not yet be saved.";
-          continue;
+          return true;
         }
       }
       next = uploadedRecords;
@@ -793,7 +844,7 @@ void uploader(void *) {
         if (!f) {
           uploadState = "error";
           uploadError = "Recording file is unavailable.";
-          continue;
+          return true;
         }
         fseek(f, next * sizeof(Record), SEEK_SET);
         Record r{};
@@ -818,7 +869,7 @@ void uploader(void *) {
         if (end == next) {
           uploadState = "error";
           uploadError = "Recording checksum mismatch; retained for inspection.";
-          continue;
+          return true;
         }
         batchId = WaterTestProtocol::batchIdentifier(id, next);
         request["batch_id"] = batchId;
@@ -833,7 +884,7 @@ void uploader(void *) {
       if (!body) {
         uploadState = "error";
         uploadError = "Low memory.";
-        continue;
+        return true;
       }
       uploadState = "uploading";
       uploaderBusy = true;
@@ -885,14 +936,67 @@ void uploader(void *) {
       uploaderBusy = false;
     }
     if (!ok)
-      vTaskDelay(pdMS_TO_TICKS(30000));
+      return true;
+    if (isFinish)
+      return false;
+  }
+}
+// This worker never touches actuators. It starts only after acquisition closes,
+// and releases its stack after delivery or a failed attempt rather than sleeping
+// with 12 KiB reserved for the lifetime of the device.
+void uploader(void *) {
+  const bool retry = uploadPending();
+  {
+    Guard lock;
+    nextUploaderAttemptUs = retry ? nowUs() + uploaderRetryUs : 0;
+    uploaderBusy = false;
+    uploaderTaskActive = false;
+  }
+  vTaskDelete(nullptr);
+}
+// Called with Guard held by the actual main loop, never by startup recovery.
+void serviceUploader() {
+  if (!backgroundServicesReady || uploaderTaskActive || !uploadNeeded() || nowUs() < nextUploaderAttemptUs)
+    return;
+  // Publish ownership before creation: the scheduler may run the task as soon
+  // as xTaskCreate returns, including on the other core.
+  uploaderTaskActive = true;
+  if (xTaskCreate(uploader, "water-upload", 12288, nullptr, 1, nullptr) != pdPASS) {
+    uploaderTaskActive = false;
+    nextUploaderAttemptUs = nowUs() + uploaderRetryUs;
+    uploadState = "error";
+    uploadError = "Not enough memory to start the upload worker; the recording is retained and will be retried.";
   }
 }
 // Recovery closes an interrupted experiment; it never resumes a pulse or
 // invents an OFF edge in the old boot's monotonic clock domain.
+bool uncommittedEmptyStartup() {
+  if (fs_exists(manifestPath))
+    return false;
+  // Finalization or legacy boot metadata indicates more than an abandoned
+  // startup, even if those files are incomplete. Preserve that recovery block.
+  for (const auto path : {finishPath, receiptPath, resumedPath, "/water-test-boots.json"}) {
+    if (fs_exists(path) || fs_exists((std::string(path) + ".tmp").c_str()))
+      return false;
+  }
+  FILE *file = fs_open(journalPath, "rb");
+  if (!file)
+    return false;
+  const bool empty = fgetc(file) == EOF && !ferror(file);
+  const bool closed = fclose(file) == 0;
+  return empty && closed;
+}
 void recoverDataset() {
   if (!fs_exists(manifestPath) && !fs_exists(journalPath))
     return;
+  if (uncommittedEmptyStartup()) {
+    startupHold = true;
+    forceOff();
+    uploadState = "not_submitted";
+    reason = "The controller restarted before the test began. No measurements were recorded. "
+             "You can start a new test; outputs remain off.";
+    return; // Keep all files until the user explicitly starts another test.
+  }
   auto blocked = [](const char *message) {
     recoveryBlocked = true;
     owned = true;
@@ -1005,7 +1109,7 @@ void recoverDataset() {
   }
   program.outcome = End::Failed;
   program.completedPulses = terminal["completed_pulses"] | 0U;
-  reason = terminal["reason"] | "Recovered interrupted test.";
+  reason = terminal["error_detail"] | (terminal["reason"] | "Recovered interrupted test.");
   uploadState = terminalDurable ? "pending" : "error";
   if (!terminalDurable)
     uploadError = "Recovered recording is retained; saving finish details will be retried.";
@@ -1023,13 +1127,10 @@ void init() {
   uuid(currentBoot);
   initialized = true;
   recoverDataset();
-  if (xTaskCreate(uploader, "water-upload", 12288, nullptr, 1, nullptr) != pdPASS) {
-    uploadState = "error";
-    uploadError = "Cannot start upload worker.";
-  }
 }
+void startBackgroundServices() { backgroundServicesReady = true; }
 bool active() { return running.load(); }
-bool controlOwned() { return owned.load(); }
+bool controlOwned() { return owned.load() || startupHold.load(); }
 void onSample(uint64_t address, int16_t raw, bool validReading, uint64_t conversion, uint64_t read) {
   if (!initialized)
     return;
@@ -1043,7 +1144,7 @@ bool requestStart(JsonVariantConst body, std::string &error) {
     return false;
   }
   Guard lock;
-  if (recoveryBlocked || owned || running || uploaderBusy ||
+  if (recoveryBlocked || owned || running || uploaderBusy || uploaderTaskActive ||
       (!manifest.isNull() && uploadState != "submitted" && uploadState != "not_submitted")) {
     error = owned || running ? "Finish or stop the current test and resume normal control before another test."
                              : "Wait for the current test's submission to finish before another test.";
@@ -1197,7 +1298,7 @@ void tick() {
   if (running) {
     recordClock();
     serviceProgram(false);
-  } else if (owned)
+  } else if (owned || startupHold)
     forceOff();
   if (queuedResume) {
     queuedResume = false;
@@ -1207,6 +1308,7 @@ void tick() {
       removePreviousDataset();
     reason = "Normal control resumed.";
   }
+  serviceUploader();
 }
 void status(JsonDocument &doc) {
   doc.clear();
@@ -1222,7 +1324,8 @@ void status(JsonDocument &doc) {
   std::string check = preflight(false, beer, glycol, cool);
   doc["device_guid"] = guid;
   doc["active"] = running || !queuedStart.empty();
-  doc["control_owned"] = owned.load();
+  doc["control_owned"] = controlOwned();
+  doc["startup_interrupted"] = startupHold.load();
   doc["phase"] = !queuedStart.empty() ? "preflight" : phaseName(program.phase);
   doc["pulse_number"] = program.pulse;
   doc["analysis_role"] = program.analysisRole();
@@ -1256,10 +1359,11 @@ void status(JsonDocument &doc) {
   doc["upload_error"] = uploadError;
   doc["result_url"] = std::string(endpoint) + "/" + guid + "/";
   doc["moved_chamber_probe"] = movedProbe();
-  doc["can_start"] = !recoveryBlocked && !owned && !running && !uploaderBusy &&
+  doc["can_start"] = !recoveryBlocked && !owned && !running && !uploaderBusy && !uploaderTaskActive &&
                      (manifest.isNull() || uploadState == "submitted" || uploadState == "not_submitted") &&
                      check.empty();
-  doc["can_resume"] = owned && !running && queuedStart.empty();
+  doc["can_resume"] = owned && !running && queuedStart.empty() &&
+                      manifest["prior_control"]["mode"].is<const char *>();
   auto p = doc["preflight"].to<JsonObject>();
   p["ready"] = check.empty();
   p["reason"] = check;

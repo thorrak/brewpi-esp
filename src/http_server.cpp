@@ -28,6 +28,9 @@
 #include "WaterTest.h"
 #include "CrashDump.h"
 #include "HttpJsonResponse.h"
+#include "OneWireScanner.h"
+#include "RuntimeHealth.h"
+#include <esp_timer.h>
 
 
 httpServer http_server;
@@ -957,6 +960,35 @@ void reset_reason(JsonDocument &doc) {
     doc["description"] = resetDescription[reset];
 }
 
+void health(JsonDocument &doc) {
+    const uint64_t now = esp_timer_get_time();
+    const auto loop = RuntimeHealth::snapshot();
+    auto control = doc["control_loop"].to<JsonObject>();
+    control["started"] = loop.loopStarted;
+    control["task_fallback"] = loop.loopTaskFallback;
+    control["iterations"] = loop.loopIterations;
+    if (loop.loopStarted)
+        control["last_tick_age_ms"] = now >= loop.lastLoopUs ? (now - loop.lastLoopUs) / 1000 : 0;
+    else
+        control["last_tick_age_ms"] = nullptr;
+    const auto scanner = ow_scanner.health();
+    auto oneWire = doc["onewire"].to<JsonObject>();
+    oneWire["running"] = scanner.running;
+    oneWire["bus_failed"] = scanner.busFailed;
+    oneWire["last_init_error"] = OneWireScanner::init_error_name(scanner.lastInitError);
+    oneWire["last_bus_create_error"] = scanner.lastBusCreateError;
+    oneWire["init_attempts"] = scanner.initAttempts;
+    oneWire["init_failures"] = scanner.initFailures;
+    oneWire["enumerations"] = scanner.enumerations;
+    oneWire["successful_reads"] = scanner.successfulReads;
+    oneWire["failed_reads"] = scanner.failedReads;
+    oneWire["bus_recovery_attempts"] = scanner.busRecoveryAttempts;
+    if (scanner.lastSuccessfulReadUs)
+        oneWire["last_read_age_ms"] = now >= scanner.lastSuccessfulReadUs ? (now - scanner.lastSuccessfulReadUs) / 1000 : 0;
+    else
+        oneWire["last_read_age_ms"] = nullptr;
+}
+
 
 // ============================================================================
 // Static file serving
@@ -1143,6 +1175,7 @@ void httpServer::setJsonPages() {
         { "/api/upstream/",          get_json_handler<serveUpstreamSettings> },
         { "/api/uptime/",            get_json_handler<uptime> },
         { "/api/heap/",              get_json_handler<heap> },
+        { "/api/health/",            get_json_handler<health> },
         { "/api/resetreason/",       get_json_handler<reset_reason> },
     };
 
