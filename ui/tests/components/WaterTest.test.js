@@ -161,6 +161,20 @@ describe('water-test setup and resume UI', () => {
         expect(html.match(/type="checkbox"/g)).toHaveLength(2);
     });
 
+    it('waits for the whole test to finish before describing an upload as pending', async () => {
+        Object.assign(waterTest.status, {
+            test_id: 'test-running', active: true, phase: 'pulse_2',
+            upload_status: 'pending', control_owned: true, can_start: false,
+        });
+        const html = await render();
+        expect(html).toContain('>Stop Test</button>');
+        expect(html).toContain('&#39;Stop Test&#39; may wait for the relay minimum ON time.');
+        expect(html).toContain('Data submission: Waiting for test to complete');
+        expect(html).toContain('will upload the recording after the test ends');
+        expect(html).not.toContain('Data submission: Upload pending');
+        expect(html).not.toContain('It retries automatically');
+    });
+
     it.each(['completed', 'stopped', 'failed', 'inconclusive', 'interrupted'])('keeps automatic upload information and result links for eligible %s tests', async (outcome) => {
         Object.assign(waterTest.status, {
             test_id: 'test-eligible', phase: 'finished', outcome, completed_pulses: 1,

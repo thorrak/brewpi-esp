@@ -26,7 +26,7 @@
             {{ busy === 'stop' || status.phase === 'stopping' ? t('water_test.stopping') : t('water_test.stop') }}
           </button>
         </div>
-        <p v-if="status.active" class="mt-3 text-sm text-gray-600">{{ t('water_test.active_help') }}</p>
+        <p v-if="status.active" class="mt-3 text-sm text-gray-600">{{ t('water_test.active_help', { stop: `'${t('water_test.stop')}'` }) }}</p>
         <div class="mt-5 grid grid-cols-2 sm:grid-cols-4 gap-4">
           <div v-if="status.control_owned || status.active"><p class="metric-label">{{ t('water_test.beer_probe') }}</p><p class="metric">{{ displayTemperature(status.beer_c) }}</p></div>
           <div v-if="status.moved_chamber_probe && (status.control_owned || status.active)"><p class="metric-label">{{ t('water_test.glycol_bath') }}</p><p class="metric">{{ displayTemperature(status.glycol_c) }}</p></div>
@@ -46,7 +46,8 @@
         <p v-if="status.reason" class="mt-4 text-sm text-gray-700">{{ reasonLabel }}</p>
         <div class="mt-5 border-t border-gray-200 pt-4">
           <h3 class="text-sm font-semibold text-gray-900">{{ t('water_test.submission_status', { status: uploadLabel }) }}</h3>
-          <p v-if="['pending', 'uploading', 'error'].includes(status.upload_status)" class="mt-1 text-sm text-gray-600">{{ t('water_test.upload_help') }}</p>
+          <p v-if="waitingForTestCompletion" class="mt-1 text-sm text-gray-600">{{ t('water_test.waiting_for_test_help') }}</p>
+          <p v-else-if="['pending', 'uploading', 'error'].includes(status.upload_status)" class="mt-1 text-sm text-gray-600">{{ t('water_test.upload_help') }}</p>
           <p v-if="status.upload_status === 'not_submitted'" class="mt-1 text-sm text-gray-600">{{ t('water_test.not_submitted_help') }}</p>
           <p v-if="status.upload_error" class="mt-2 text-sm text-red-700" role="status">{{ status.upload_error }}</p>
           <a v-if="resultLink && status.upload_status !== 'not_submitted'" :href="resultLink" target="_blank" rel="noopener noreferrer" class="inline-block mt-3 font-medium text-indigo-700 underline">{{ t('water_test.view_results') }}</a>
@@ -165,7 +166,10 @@ const resultLink = computed(() => resultsUrl(status.value?.device_guid, status.v
 const phaseLabel = computed(() => statusLabel('phases', status.value?.phase, (status.value?.phase || '').replaceAll('_', ' ')));
 const outcomeTitle = computed(() => status.value?.active ? t('water_test.in_progress') : statusLabel('outcomes', status.value?.outcome, t('water_test.title')));
 const reasonLabel = computed(() => statusLabel('reasons', status.value?.reason));
-const uploadLabel = computed(() => statusLabel('uploads', status.value?.upload_status, t('water_test.waiting_status')));
+const waitingForTestCompletion = computed(() => status.value?.active && status.value?.upload_status === 'pending');
+const uploadLabel = computed(() => waitingForTestCompletion.value
+  ? t('water_test.waiting_for_test')
+  : statusLabel('uploads', status.value?.upload_status, t('water_test.waiting_status')));
 
 function statusLabel(group, value, fallback = value || '') {
   const key = `water_test.${group}.${value}`;

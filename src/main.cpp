@@ -187,9 +187,9 @@ void setup()
   // 0.1.0+) uses Espressif's wifi_prov_scheme_ble, which unconditionally calls
   // esp_bt_controller_init() and brings up its own NimBLE host. If NimBLE is
   // already up, that fails with ESP_ERR_INVALID_STATE and provisioning never
-  // starts. So wifi_cfg has to be initialised first; bt_scanner.init() below
-  // calls NimBLEDevice::init() afterwards and re-attaches to the controller,
-  // which is kept resident by .prov_ble.memory_policy = KEEP_ALL.
+  // starts. So wifi_cfg has to be initialised first. If provisioning ran on
+  // this boot, initialize_wifi() restarts after saving credentials; the scanner
+  // starts on the next boot, when the provisioning BLE host is not running.
   initialize_wifi();
 #ifdef ENABLE_GLYCOL_LOGGING
   initNTP();

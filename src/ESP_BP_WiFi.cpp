@@ -6,6 +6,7 @@
 #include <esp_wifi.h>
 #include <esp_netif.h>
 #include <cstring>
+#include <atomic>
 
 #ifdef CONNECT_VIA_WIFI
 
@@ -41,6 +42,9 @@ extern void handleReset();  // Terrible practice. In brewpi-esp8266.cpp.
 
 // Track WiFi connection state to distinguish initial connection from reconnection.
 static bool wifi_was_disconnected = false;
+static std::atomic<bool> provisioning_started_this_boot{false};
+static std::atomic<bool> provisioning_stopped_this_boot{false};
+static std::atomic<bool> ble_credentials_received{false};
 
 
 // RFC-1123 hostname label: 1-63 chars, alphanumerics and hyphens, no leading
@@ -122,6 +126,7 @@ static void on_wifi_disconnected(void *arg, esp_event_base_t base, int32_t event
 // Event callback for AP started
 static void on_wifi_ap_started(void *arg, esp_event_base_t base, int32_t event_id, void *data) {
     wifi_ap_status_t ap_status;
+    provisioning_started_this_boot.store(true, std::memory_order_relaxed);
     Log.info("WiFi AP started for configuration.\r\n");
     if (wifi_cfg_get_ap_status(&ap_status) == ESP_OK) {
         Log.info("AP started: SSID: %s, IP: %s\r\n", ap_status.ssid, ap_status.ip);
@@ -130,12 +135,21 @@ static void on_wifi_ap_started(void *arg, esp_event_base_t base, int32_t event_i
     }
 }
 
+static void on_provisioning_started(void *arg, esp_event_base_t base, int32_t event_id, void *data) {
+    provisioning_started_this_boot.store(true, std::memory_order_relaxed);
+}
+
+static void on_ble_credentials_received(void *arg, esp_event_base_t base, int32_t event_id, void *data) {
+    ble_credentials_received.store(true, std::memory_order_relaxed);
+}
+
 // Event callback for provisioning stopped — initialize the HTTP server routes
 static void on_provisioning_stopped(void *arg, esp_event_base_t base, int32_t event_id, void *data) {
 #ifdef ENABLE_HTTP_INTERFACE
     Log.info("WiFi provisioning stopped, initializing HTTP server routes.\r\n");
     http_server.registerRoutes();
 #endif
+    provisioning_stopped_this_boot.store(true, std::memory_order_release);
 }
 
 // Event callback for variable changes (e.g., mdns_name changed via WiFi manager API)
@@ -237,7 +251,9 @@ void initialize_wifi() {
     // ESP_ERROR_CHECK(esp_event_handler_register(WIFI_CFG_EVENT, WIFI_CFG_EVENT_DISCONNECTED, on_wifi_disconnected, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_CFG_EVENT, WIFI_CFG_EVENT_AP_START, on_wifi_ap_started, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_CFG_EVENT, WIFI_CFG_EVENT_VAR_CHANGED, on_var_changed, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_CFG_EVENT, WIFI_CFG_EVENT_PROVISIONING_STARTED, on_provisioning_started, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_CFG_EVENT, WIFI_CFG_EVENT_PROVISIONING_STOPPED, on_provisioning_stopped, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_CFG_EVENT, WIFI_CFG_EVENT_PROV_CRED_RECV, on_ble_credentials_received, NULL));
 
     // Default variables for WiFi Config - mdns_name is used to set the mDNS hostname
     // This provides a default value; if NVS has a stored value, that takes precedence
@@ -292,9 +308,8 @@ void initialize_wifi() {
     wifi_config.prov_ble.device_name = "BrewPiESP-{id}";
     wifi_config.prov_ble.security = WIFI_CFG_PROV_SECURITY_1;
     wifi_config.prov_ble.pop = "brewpi";
-    // KEEP_ALL keeps the BT controller + BLE memory alive after the
-    // provisioning manager tears down, so bt_scanner can attach via
-    // NimBLEDevice::init() without re-initialising the controller.
+    // KEEP_ALL lets the provisioning manager recover from a BLE client
+    // disconnect without releasing controller memory needed for a restart.
     wifi_config.prov_ble.memory_policy = WIFI_CFG_PROV_MEM_KEEP_ALL;
     // Clear stored creds after max_failed_attempts so a wrong-password loop
     // accepts a fresh attempt without rebooting.
@@ -323,8 +338,31 @@ void initialize_wifi() {
         esp_restart();
     }
 
-    // wifi_cfg handles its own provisioning teardown after the configured delay
-    // (stop_provisioning_on_connect + provisioning_teardown_delay_ms)
+    // The provisioning manager still owns NimBLE when the station first gets
+    // an IP address. Starting BrewPi's scanner at this point can hang in
+    // NimBLEDevice::init(). Reboot after SoftAP provisioning so the next boot
+    // connects using the credentials already saved by wifi_cfg, without
+    // starting a provisioning BLE host. The library handles BLE provisioning's
+    // own reboot after giving its client time to read the connection result.
+    if (provisioning_started_this_boot.load(std::memory_order_relaxed)) {
+        if (ble_credentials_received.load(std::memory_order_relaxed)) {
+            Log.notice("BLE provisioning connected; waiting for WiFi Config to restart.\r\n");
+            vTaskDelay(pdMS_TO_TICKS(20000));
+            Log.warning("WiFi Config did not restart after BLE provisioning; restarting BrewPi.\r\n");
+        } else {
+            const TickType_t started = xTaskGetTickCount();
+            const TickType_t timeout = pdMS_TO_TICKS(15000);
+            while (!provisioning_stopped_this_boot.load(std::memory_order_acquire) &&
+                   xTaskGetTickCount() - started < timeout) {
+                vTaskDelay(pdMS_TO_TICKS(100));
+            }
+            if (!provisioning_stopped_this_boot.load(std::memory_order_acquire)) {
+                Log.warning("WiFi provisioning stop event timed out; restarting BrewPi.\r\n");
+            }
+            Log.notice("SoftAP provisioning connected; restarting to launch BrewPi.\r\n");
+        }
+        esp_restart();
+    }
 
     // Sync mDNS name FROM config TO wifi_cfg (config file is the source of truth).
     // The on_var_changed callback handles the reverse direction for real-time changes.
