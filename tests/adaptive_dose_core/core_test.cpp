@@ -1,4 +1,5 @@
 #include "AdaptiveDoseController.h"
+#include "../glycol_cooling_measurements/regressions.h"
 
 #include <cassert>
 #include <cmath>
@@ -10,6 +11,7 @@ using AdaptiveCooling::Controller;
 using AdaptiveCooling::Phase;
 
 int main() {
+    rateMaturityRegressions<Controller>();
     {
         Controller controller;
         assert(controller.configurationValid());

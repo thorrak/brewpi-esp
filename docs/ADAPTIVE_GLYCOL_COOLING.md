@@ -1,10 +1,11 @@
 # Adaptive pulse-dose glycol cooling
 
-This document describes the original `codex/adaptive-glycol-cooling` port.
-On `predictive-glycol-cooling`, pulse-dose is now selectable alongside predictive
-coast. See [Selecting the glycol cooling algorithm](GLYCOL_COOLING_SELECTION.md)
-for the current setting, switching behavior, and shared diagnostics. The
-algorithm described below is unchanged; the historical branch-specific
+This document records the original adaptive pulse-dose port and its reference
+validation. Pulse-dose is selectable alongside predictive coast; see
+[Selecting the glycol cooling algorithm](GLYCOL_COOLING_SELECTION.md) for current
+settings, switching and diagnostics. The current cores also require a mature
+rate window and report controller observations, covered by
+[the native regression suite](../tests/README.md). Historical branch-specific
 diagnostic names below do not describe the selector build.
 
 This branch replaces the predictive bang-bang cooling path from

@@ -11,6 +11,7 @@
 #include "WaterTestProtocol.h"
 #include "WaterTestStorage.h"
 #include "WaterTestTransport.h"
+#include "WaterTestUpload.h"
 #include "getGuid.h"
 #include "ntp.h"
 #include <algorithm>
@@ -38,8 +39,10 @@ using namespace WaterTestCore;
 using namespace WaterTestStorage;
 using WaterTestTransport::endpoint;
 constexpr size_t maxRecords = 12500;
-constexpr size_t requiredBytes = maxRecords * sizeof(Record) + 32768;
-constexpr size_t batchSize = 12;
+constexpr size_t requiredBytes = maxRecords * sizeof(Record) + 49152;
+constexpr size_t batchSize = WaterTestUpload::batchSize;
+// Only reboot recovery decodes the retired plan-v1/v2 episode completion rule.
+constexpr unsigned legacyControllerRequiredEpisodes = 3;
 constexpr size_t sampleQueueCapacity = 64;
 constexpr uint64_t sparseSampleUs = 10000000;
 constexpr uint64_t denseSampleUs = 2000000;
@@ -83,7 +86,47 @@ GlycolCooling::Algorithm testAlgorithm = GlycolCooling::Algorithm::PredictiveCoa
 uint64_t lastControllerRecordUs = 0;
 double lastControllerStep = -1;
 bool recordedControllerPump = false;
+static_assert(static_cast<uint8_t>(GlycolCooling::ObservationReason::RateCondition) == 1 &&
+              static_cast<uint8_t>(GlycolCooling::ObservationReason::CoastTimeLimit) == 2 &&
+              static_cast<uint8_t>(GlycolCooling::ObservationReason::RateUnqualified) == 3 &&
+              static_cast<uint8_t>(GlycolCooling::ObservationReason::Interrupted) == 4,
+              "Observation reason IDs are part of the durable journal format");
+struct ObservationCounts {
+  unsigned rateQualified = 0, timeLimited = 0, rateUnqualified = 0, interrupted = 0;
+  unsigned completed() const { return rateQualified + timeLimited + rateUnqualified; }
+  bool record(uint8_t reason) {
+    switch (reason) {
+    case 1: ++rateQualified; return true;
+    case 2: ++timeLimited; return true;
+    case 3: ++rateUnqualified; return true;
+    case 4: ++interrupted; return true;
+    default: return false;
+    }
+  }
+  void json(JsonObject out) const {
+    out["goal"] = controllerObservationGoal;
+    out["completed"] = completed();
+    out["rate_qualified"] = rateQualified;
+    out["time_limited"] = timeLimited;
+    out["rate_unqualified"] = rateUnqualified;
+    out["interrupted"] = interrupted;
+  }
+};
+ObservationCounts controllerObservations[controllerRunCount];
+uint32_t recordedControllerObservation = 0;
+bool controllerCheckpointed[controllerRunCount] = {};
+unsigned recordedControllerStarts = 0, recordedControllerFinishes = 0;
 JsonDocument manifest, terminal;
+bool fixedDurationPlan() { return manifest["test_program"]["controller_plan_version"] == 3; }
+GlycolCooling::Algorithm algorithmForRun(unsigned run) {
+  return run == 2 ? (testAlgorithm == GlycolCooling::Algorithm::PredictiveCoast
+                         ? GlycolCooling::Algorithm::PulseDose : GlycolCooling::Algorithm::PredictiveCoast)
+                  : testAlgorithm;
+}
+const char *controllerPath(unsigned run) { return run == 2 ? controllerTwoPath : controllerOnePath; }
+JsonObjectConst initialController(unsigned run) {
+  return manifest["test_program"]["controllers"][run - 1].as<JsonObjectConst>();
+}
 std::string queuedStart, reason, uploadError, uploadState = "idle";
 bool queuedStop = false, queuedResume = false, clockRecorded = false, recordingFailed = false;
 bool lostRecord = false;
@@ -214,6 +257,10 @@ void recordPhase(uint64_t transitionUs = 0) {
   Record r{};
   r.kind = 4;
   r.t_us = transitionUs;
+  if (program.phase == Phase::ControllerFinalObserve) {
+    r.read_us = uint64_t(std::llround(program.controllerFinalObservationStarted * 1000000));
+    r.t_us = std::max(r.t_us, r.read_us);
+  }
   r.code = static_cast<uint8_t>(program.phase);
   r.pulse = program.pulse;
   r.raw = program.block;
@@ -231,6 +278,7 @@ void recordController() {
   const auto &out = testController->output();
   Record r{};
   r.kind = 7;
+  r.role = program.controllerRun;
   r.t_us = now;
   r.code = static_cast<uint8_t>(testController->selection());
   r.pulse = static_cast<uint8_t>(out.phase);
@@ -247,6 +295,53 @@ void recordController() {
   append(r);
   lastControllerRecordUs = now;
   recordedControllerPump = program.pump;
+}
+bool recordControllerObservation() {
+  if (!testController || !program.controllerRun)
+    return false;
+  const auto &event = testController->output().observation;
+  if (!event.sequence || event.sequence <= recordedControllerObservation)
+    return false;
+  Record r{};
+  r.kind = 10;
+  r.role = program.controllerRun;
+  r.code = static_cast<uint8_t>(algorithmForRun(program.controllerRun));
+  r.pulse = static_cast<uint8_t>(event.reason);
+  r.flags = event.rate_qualified ? 1 : 0;
+  r.detail = event.sequence;
+  r.read_us = uint64_t(std::llround(event.ended_s * 1000000));
+  const float coast = event.off_s >= event.started_s && event.off_s <= event.ended_s
+                          ? std::max(0., event.ended_s - event.off_s) : 0.;
+  memcpy(&r.conversion_us, &coast, sizeof(coast));
+  if (!append(r))
+    return false;
+  recordedControllerObservation = event.sequence;
+  controllerObservations[program.controllerRun - 1].record(r.pulse);
+  return true;
+}
+void closeControllerObservation() {
+  if (!testController || !program.controllerRunEnded)
+    return;
+  // A step can close COAST and start a new pulse together. Save that completed
+  // observation before inhibit replaces it with the new response's interruption.
+  recordControllerObservation();
+  testController->inhibit(program.controllerRunEnded);
+  recordControllerObservation();
+}
+void recordControllerRun(bool finished) {
+  Record r{};
+  r.kind = 9;
+  r.role = program.controllerRun;
+  r.code = static_cast<uint8_t>(algorithmForRun(program.controllerRun));
+  r.pulse = finished ? 1 : 0;
+  r.flags = 128 | (program.controllerRunDurationComplete ? 1 : 0);
+  r.read_us = uint64_t(std::llround((finished ? program.controllerRunEnded : program.controllerStarted) * 1000000));
+  r.raw = std::lround(program.controllerRunStartC * 16);
+  uint64_t targetBits;
+  memcpy(&targetBits, &program.targetC, sizeof(targetBits));
+  r.conversion_us = uint32_t(targetBits);
+  r.detail = uint32_t(targetBits >> 32);
+  append(r);
 }
 void recordClock() {
   if (clockRecorded || !isNtpSynced())
@@ -292,11 +387,142 @@ void controllerTerminalMetadata(JsonObject out, bool interrupted = false) {
                                     uint64_t(std::llround(program.controllerStarted * 1000000)), program.targetC,
                                     nowUs());
 }
+void controllerRunMetadata(JsonObject out, unsigned run) {
+  const bool started = program.controllerRun == run && program.controllerStarted > 0;
+  WaterTestControllerSnapshot::final(out, initialController(run), started ? testController.get() : nullptr,
+                                    false, uint64_t(std::llround(program.controllerStarted * 1000000)),
+                                    program.targetC, nowUs());
+  out["test_id"] = manifest["test_id"];
+  out["boot_id"] = recordingBoot;
+  out["run"] = run;
+  const bool complete = started && program.controllerRunDurationComplete;
+  out["completion_policy"] = "fixed_duration_v1";
+  out["run_duration_complete"] = complete;
+  out["status"] = !started ? "skipped" : complete ? "completed"
+                       : program.outcome == End::Stopped ? "stopped" : "failed";
+  out["reason"] = complete ? "duration_complete" : reasonName(program.reason);
+  (started ? controllerObservations[run - 1] : ObservationCounts{}).json(out["observations"].to<JsonObject>());
+  if (started) {
+    out["started_us"] = uint64_t(std::llround(program.controllerStarted * 1000000));
+    out["ended_us"] = uint64_t(std::llround(program.controllerRunEnded * 1000000));
+    out["start_c"] = program.controllerRunStartC;
+    out["target_c"] = program.targetC;
+    char exact[32];
+    snprintf(exact, sizeof(exact), "%.17g", program.targetC);
+    out["target_c_exact"] = exact;
+    out["pump_cycles"] = program.controllerCycles;
+    out["pump_on_s"] = program.totalPump - program.controllerRunPumpStart;
+  }
+}
+bool loadControllerCheckpoint(unsigned run, JsonDocument &saved) {
+  return loadDocument(controllerPath(run), saved) && saved["test_id"] == manifest["test_id"] &&
+         saved["boot_id"] == recordingBoot && saved["run"] == run &&
+         saved["selection"] == initialController(run)["selection"] && saved["ended_us"].is<uint64_t>() &&
+         WaterTestControllerSnapshot::restoreExactNumbers(saved.as<JsonObject>());
+}
+bool checkpointController() {
+  const unsigned run = program.controllerRun;
+  if (!run || !program.controllerRunEnded || controllerCheckpointed[run - 1])
+    return true;
+  JsonDocument saved;
+  controllerRunMetadata(saved.to<JsonObject>(), run);
+  const bool ok = saveDocument(controllerPath(run), saved);
+  controllerCheckpointed[run - 1] = ok;
+  return ok;
+}
+void aggregateLegacyControllerResults() {
+  bool complete = true, timedOut = false, initialSettled = true, observed = true;
+  unsigned episodes = 0;
+  for (JsonObjectConst result : terminal["controllers"].as<JsonArrayConst>()) {
+    complete = complete && (result["controller_completed"] == true);
+    timedOut = timedOut || (result["controller_timed_out"] == true);
+    initialSettled = initialSettled && (result["controller_initial_settled"] == true);
+    observed = observed && (result["controller_observation_complete"] == true);
+    episodes += result["controller_episodes_completed"] | 0U;
+  }
+  terminal["controller_completed"] = complete;
+  terminal["controller_timed_out"] = timedOut;
+  terminal["controller_episodes_completed"] = episodes;
+  terminal["controller_episodes_required"] = legacyControllerRequiredEpisodes * controllerRunCount;
+  terminal["controller_initial_settled"] = initialSettled;
+  terminal["controller_observation_complete"] = observed;
+}
+void finishControllers() {
+  auto results = terminal["controllers"].to<JsonArray>();
+  for (unsigned run = 1; run <= controllerRunCount; ++run) {
+    JsonDocument saved;
+    if (loadControllerCheckpoint(run, saved))
+      results.add(saved.as<JsonObjectConst>());
+    else if (run < program.controllerRun) {
+      auto out = results.add<JsonObject>();
+      WaterTestControllerSnapshot::final(out, initialController(run), nullptr, true, 0, 0, 0);
+      out["run"] = run;
+      out["status"] = "interrupted";
+      out["reason"] = "checkpoint_unavailable";
+      out["checkpoint_unavailable"] = true;
+      out["completion_policy"] = "fixed_duration_v1";
+      out["run_duration_complete"] = false;
+      controllerObservations[run - 1].json(out["observations"].to<JsonObject>());
+    } else
+      controllerRunMetadata(results.add<JsonObject>(), run);
+  }
+}
+void recoverControllers(const JsonDocument (&boundaries)[controllerRunCount],
+                        const unsigned (&settled)[controllerRunCount],
+                        const ObservationCounts (&observations)[controllerRunCount]) {
+  auto results = terminal["controllers"].to<JsonArray>();
+  for (unsigned run = 1; run <= controllerRunCount; ++run) {
+    JsonDocument saved;
+    if (loadControllerCheckpoint(run, saved)) {
+      results.add(saved.as<JsonObjectConst>());
+      continue;
+    }
+    auto out = results.add<JsonObject>();
+    const auto recorded = boundaries[run - 1].as<JsonObjectConst>();
+    const bool started = recorded["started_us"].is<uint64_t>();
+    WaterTestControllerSnapshot::final(out, initialController(run), nullptr, started, 0, 0, 0);
+    out["run"] = run;
+    out["boot_id"] = recordingBoot;
+    out["status"] = started ? "interrupted" : "skipped";
+    out["reason"] = "reboot_interrupted";
+    if (fixedDurationPlan()) {
+      const uint64_t began = recorded["started_us"] | uint64_t(0);
+      const uint64_t ended = recorded["ended_us"] | uint64_t(0);
+      // A pending recording may have been made by firmware with a shorter plan.
+      const uint32_t plannedSeconds = initialController(run)["max_duration_s"] | controllerSeconds;
+      const bool complete = started && recorded["run_duration_complete"] == true && ended >= began &&
+                            ended - began >= uint64_t(plannedSeconds) * 1000000;
+      out["completion_policy"] = "fixed_duration_v1";
+      out["run_duration_complete"] = complete;
+      observations[run - 1].json(out["observations"].to<JsonObject>());
+      if (complete) {
+        out["status"] = "completed";
+        out["reason"] = "duration_complete";
+      }
+    } else {
+      out["controller_completed"] = false;
+      out["controller_episodes_required"] = legacyControllerRequiredEpisodes;
+      out["controller_episodes_completed"] = settled[run - 1];
+      out["controller_initial_settled"] = settled[run - 1] > 0;
+      out["controller_observation_complete"] = settled[run - 1] >= legacyControllerRequiredEpisodes;
+    }
+    // Exact target/boundaries survive in the journal. Unobserved stability,
+    // deadline state and learned parameters do not; do not guess them.
+    for (JsonPairConst pair : recorded)
+      if (!fixedDurationPlan() || std::strcmp(pair.key().c_str(), "run_duration_complete") != 0)
+        out[pair.key()] = pair.value();
+    if (started || fs_exists(controllerPath(run)))
+      out["checkpoint_unavailable"] = true;
+  }
+  if (!fixedDurationPlan())
+    aggregateLegacyControllerResults();
+}
 void finishRun() {
   const uint64_t offUs = nowUs();
   const bool wasPump = physicalPump();
   const bool wasHeat = physicalHeat();
   forceOff();
+  closeControllerObservation();
   recordOutput(true, false, wasPump, program.reason, offUs);
   recordOutput(false, false, wasHeat, program.reason, offUs);
   if (program.reason == Reason::SensorFault || program.reason == Reason::SensorStale ||
@@ -324,14 +550,21 @@ void finishRun() {
   terminal["final_outputs"]["heater_on"] = false;
   terminal["elapsed_s"] = program.started > 0 ? uint32_t(nowUs() / 1e6 - program.started) : 0;
   terminal["response_settled"] = program.responseSettled;
-  terminal["controller_completed"] = program.outcome == End::Completed && program.controllerStarted > 0 &&
-                                     program.responseSettled && program.controllerCycles > 0 &&
-                                     !program.controllerTimedOut;
-  terminal["controller_timed_out"] = program.controllerTimedOut;
   terminal["useful_response"] = program.usefulResponse;
   terminal["baseline_noise_c"] = program.noiseC;
   terminal["baseline_drift_c_per_s"] = program.baselineDrift;
-  controllerTerminalMetadata(terminal["controller"].to<JsonObject>());
+  terminal["baseline_drift_uncertainty_c_per_s"] = program.baselineDriftUncertainty;
+  if (program.controllerFinalObservationStarted) {
+    auto observation = terminal["controller_final_observation"].to<JsonObject>();
+    observation["run"] = program.controllerRun;
+    observation["started_us"] = uint64_t(std::llround(program.controllerFinalObservationStarted * 1000000));
+    observation["ended_us"] = uint64_t(std::llround(program.controllerFinalObservationEnded * 1000000));
+    observation["last_valid_read_us"] = uint64_t(std::llround(program.controllerFinalObservationLastRead * 1000000));
+    observation["valid_beer_samples"] = program.controllerFinalObservationSamples;
+    observation["completed"] = program.controllerFinalObservationCompleted;
+    observation["reason"] = program.controllerFinalObservationCompleted ? "observation_complete" : reasonName(program.reason);
+  }
+  finishControllers();
   testController.reset();
   if (controllerAllocationFailed)
     terminal["error_detail"] = "Not enough free memory to start the cooling algorithm. Cooling has stopped; the "
@@ -348,6 +581,7 @@ void finishRun() {
   }
   releaseMetadataReserve();
   terminalDurable = saveDocument(finishPath, terminal);
+  program.releaseHistory();
   uploadState = terminalDurable ? "pending" : "error";
   uploadError.clear();
   reason = terminal["error_detail"] | reasonName(program.reason);
@@ -444,13 +678,20 @@ TestControllerPtr makeTestController(uint32_t minimumOn, uint32_t minimumOff,
     return {};
   return TestControllerPtr(new (storage) GlycolCooling::Controller(algorithm, predictive, dose));
 }
-bool controllerPlan(JsonObject out) {
+bool controllerPlan(JsonObject out, unsigned run) {
   // The preview uses the same constructor and effective relay settings as the
   // eventual test controller. It neither steps nor touches normal brewing tuning.
-  auto defaults = makeTestController(minimumOn(), minimumOff(), testAlgorithm);
+  auto defaults = makeTestController(minimumOn(), minimumOff(), algorithmForRun(run));
   if (!defaults)
     return false;
   WaterTestControllerSnapshot::initial(out, *defaults, COOLING_IMPLEMENTATION_ID);
+  out["run"] = run;
+  out["target_drop_c"] = controllerTargetDropC;
+  out["minimum_headroom_c"] = controllerTargetDropC + controllerHeadroomMarginC;
+  out["max_duration_s"] = controllerSeconds;
+  out["completion_policy"] = "fixed_duration_v1";
+  out["observation_goal"] = controllerObservationGoal;
+  out["scope"] = "cooling_controller_core_with_test_safety_limits";
   return true;
 }
 void startRun(const std::string &payload) {
@@ -532,8 +773,11 @@ void startRun(const std::string &payload) {
   plan["max_pump_s"] = maximumPumpSeconds;
   plan["max_drop_c"] = maximumDropC;
   plan["minimum_water_c"] = minimumWaterC;
+  plan["decision_rules"]["version"] = 2;
   plan["decision_rules"]["useful_drop_c"] = .20;
   plan["decision_rules"]["useful_noise_multiplier"] = 4;
+  plan["decision_rules"]["baseline_window_s"] = baselineWindowSeconds;
+  plan["decision_rules"]["background_cooling_correction_s"] = driftCorrectionSeconds;
   plan["decision_rules"]["settling_window_min_s"] = 90;
   plan["decision_rules"]["settling_window_max_s"] = 1800;
   plan["decision_rules"]["cooling_tail_rate_tolerance_c_per_s"] = coolingTailRateTolerance;
@@ -543,9 +787,9 @@ void startRun(const std::string &payload) {
   plan["pulse_selection"] = "10/30/90/270/810/1800s caps; stop early at max(0.20C,4x baseline noise); response-sized "
                             "contrast then two reserved pulses; later doses capped by remaining temperature range";
   plan["observation_selection"] =
-      "baseline60-300s; off>=180s, extended by observed response delay, until response plateau; final check retains "
-      "measured calibration coast; weak pilot may advance after300s only without credible ongoing cooling, without "
-      "claiming settled; off cap21600s";
+      "baseline180-300s; measured drops only, recent background cooling discounted; off>=180s, extended by response "
+      "delay and measured coast, until flat or steady warming in two windows; refresh baseline after recovery; "
+      "weak pilot may advance after300s without detected or ongoing cooling; unresolved off cap21600s ends inconclusive";
   sensorManifest(manifest["sensors"]["beer"].to<JsonObject>(), beer, "beer", input["probe_mounting"] | "unknown");
   if (bath)
     sensorManifest(manifest["sensors"]["glycol"].to<JsonObject>(), glycol, "chamber", "glycol_bath");
@@ -568,10 +812,19 @@ void startRun(const std::string &payload) {
   // All survey values have been copied into the manifest. Release their parse
   // storage before allocating the controller used to capture its exact defaults.
   input.clear();
-  const bool controllerPlanReady = controllerPlan(plan["controller"].to<JsonObject>());
-  plan["controller"]["target_drop_c"] = .25;
-  plan["controller"]["max_duration_s"] = controllerSeconds;
-  plan["controller"]["scope"] = "cooling_controller_core_with_test_safety_limits";
+  plan["controller_plan_version"] = 3;
+  plan["order"] = "selected_first";
+  plan["controller_transition_max_s"] = controllerTransitionSeconds;
+  auto finalObservation = plan["controller_final_observation"].to<JsonObject>();
+  finalObservation["phase"] = "controller_final_observe";
+  finalObservation["min_duration_s"] = controllerFinalObservationSeconds;
+  finalObservation["max_duration_s"] = controllerFinalObservationMaxSeconds;
+  finalObservation["min_valid_beer_samples"] = controllerFinalObservationRequiredSamples;
+  finalObservation["record_valid_beer_samples"] = true;
+  plan["diagnostic_max_drop_c"] = diagnosticMaximumDropC;
+  auto controllers = plan["controllers"].to<JsonArray>();
+  const bool controllerPlanReady = controllerPlan(controllers.add<JsonObject>(), 1) &&
+                                   controllerPlan(controllers.add<JsonObject>(), 2);
   if (!controllerPlanReady) {
     manifest.clear();
     owned = false;
@@ -579,8 +832,16 @@ void startRun(const std::string &payload) {
     reason = "Not enough free memory to prepare the cooling test; the test was not started.";
     return;
   }
+  if (!program.allocateHistory()) {
+    manifest.clear();
+    owned = false;
+    uploadState = "idle";
+    reason = "Not enough free memory to record the cooling test; the test was not started.";
+    return;
+  }
   journal = fs_open(journalPath, "wb");
   if (!journal) {
+    program.releaseHistory();
     reason = "Unable to open the test recording file.";
     manifest.clear();
     uploadState = "idle";
@@ -600,17 +861,31 @@ void startRun(const std::string &payload) {
   if (!reserveMetadata() || !saveDocument(manifestPath, manifest)) {
     closeJournal();
     removePreviousDataset();
+    program.releaseHistory();
     manifest.clear();
     owned = false;
     uploadState = "idle";
     reason = "Unable to reserve and save the offline recording; the test was not started.";
     return;
   }
+  if (!program.start(recordStartUs / 1e6, waterC, minimumOn(), minimumOff())) {
+    closeJournal();
+    removePreviousDataset();
+    program.releaseHistory();
+    manifest.clear();
+    owned = false;
+    uploadState = "idle";
+    reason = "Unable to initialize the cooling test; the test was not started.";
+    return;
+  }
   forceOff();
   tempControl.cs.mode = Modes::off;
-  program.start(recordStartUs / 1e6, waterC, minimumOn(), minimumOff());
   lastControllerRecordUs = 0;
   lastControllerStep = -1;
+  recordedControllerObservation = 0;
+  std::fill_n(controllerObservations, controllerRunCount, ObservationCounts{});
+  recordedControllerStarts = recordedControllerFinishes = 0;
+  std::fill_n(controllerCheckpointed, controllerRunCount, false);
   recordedRole = Role::Complete;
   program.lastSample = cached(beerAddress)->lastGood.read / 1e6;
   reason.clear();
@@ -658,6 +933,31 @@ void persistProgram(Phase oldPhase, bool pumpChanged, uint64_t appliedUs) {
         return;
     }
   }
+  if (program.controllerRun > recordedControllerStarts) {
+    recordedControllerStarts = program.controllerRun;
+    recordControllerRun(false);
+    if (program.pump) {
+      serviceProgram(false);
+      if (!running)
+        return;
+    }
+  }
+  if (recordControllerObservation() && program.pump) {
+    serviceProgram(false);
+    if (!running)
+      return;
+  }
+  if (program.controllerRun && program.controllerRunEnded &&
+      program.controllerRun > recordedControllerFinishes) {
+    closeControllerObservation();
+    recordedControllerFinishes = program.controllerRun;
+    recordControllerRun(true);
+    // The pump has already been forced OFF. Save exact tuning before releasing
+    // this controller or admitting a second run; a reboot cannot erase run 1.
+    if (!checkpointController()) {
+      program.finish(nowUs() / 1e6, End::Failed, Reason::StorageFailure);
+    }
+  }
   if (recordingFailed && program.active())
     program.finish(nowUs() / 1e6, End::Failed, Reason::StorageFailure);
   if (!program.active())
@@ -666,6 +966,8 @@ void persistProgram(Phase oldPhase, bool pumpChanged, uint64_t appliedUs) {
 void applyProgram(Phase oldPhase) {
   const uint64_t appliedUs = nowUs();
   const bool changed = applyOutputs();
+  if (!physicalPump())
+    program.confirmControllerFinalOff(nowUs() / 1e6);
   persistProgram(oldPhase, changed, appliedUs);
 }
 // New pulses wait until the current queue snapshot has been consumed. Protective
@@ -684,13 +986,18 @@ void serviceProgram(bool allowNewPulse) {
     program.finish(now, End::Failed, recordingFailed ? Reason::StorageFailure : Reason::QueueOverflow);
   else if (unexpected)
     program.finish(now, End::Failed, Reason::UnexpectedOutput);
-  else if (allowNewPulse || program.pump || program.stopping || now - program.started >= maximumSeconds)
+  else if (allowNewPulse || program.pump || program.stopping || program.phase == Phase::ControllerFinalObserve ||
+           now - program.started >= maximumSeconds)
     program.tick(now);
   // The same portable controller used in normal glycol mode gets fresh tuning.
   // Its output history is exactly the test pump history during this block.
-  if (allowNewPulse && phase == Phase::Controller && program.phase == Phase::Controller) {
+  // Protective service between slow journal writes must also evaluate a live
+  // controller's OFF decision. Only the ordinary pass can create a controller
+  // or start a pulse while the pump is OFF.
+  if ((allowNewPulse || (program.pump && testController)) &&
+      phase == Phase::Controller && program.phase == Phase::Controller) {
     if (!testController) {
-      testController = makeTestController(program.minimumOn, program.minimumOff, testAlgorithm);
+      testController = makeTestController(program.minimumOn, program.minimumOff, algorithmForRun(program.controllerRun));
       if (!testController) {
         controllerAllocationFailed = true;
         program.finish(now, End::Failed, Reason::StorageFailure);
@@ -708,6 +1015,17 @@ void serviceProgram(bool allowNewPulse) {
     }
   }
   applyProgram(phase);
+  if (allowNewPulse && running && program.phase == Phase::ControllerTransition &&
+      program.controllerTransitionReady && controllerCheckpointed[program.controllerRun - 1]) {
+    if (program.advanceController(nowUs() / 1e6)) {
+      testController.reset();
+      lastControllerRecordUs = 0;
+      lastControllerStep = -1;
+      recordedControllerPump = false;
+      recordedControllerObservation = 0;
+    }
+    applyProgram(Phase::ControllerTransition);
+  }
   if (allowNewPulse && running && program.phase == Phase::Controller)
     recordController();
 }
@@ -764,9 +1082,13 @@ void processSample(const Sample &sample) {
       denseRecords < denseRecordBudget &&
       (!sample.valid ||
        (sample.read <= denseUntilUs && (!lastLoggedRead[role] || sample.read - lastLoggedRead[role] >= denseSampleUs)));
+  const bool finalObservation = beer && sample.valid && phase == Phase::ControllerFinalObserve &&
+                                program.controllerFinalOffConfirmed && !physicalPump() &&
+                                sample.read / 1e6 > program.controllerFinalObservationStarted &&
+                                sample.read <= nowUs();
   // All fresh samples above drive decisions. Only the durable journal has a
   // declared lower cadence, with a bounded denser interval around pump edges.
-  if (regular || dense || !program.active()) {
+  if (regular || dense || finalObservation || !program.active()) {
     append(r);
     lastLoggedRead[role] = sample.read;
     if (regular)
@@ -777,29 +1099,43 @@ void processSample(const Sample &sample) {
   persistProgram(phase, changed, r.t_us);
 }
 
-struct UploadBufferDeleter {
+struct UploadWorkspaceDeleter {
   void operator()(char *buffer) const { heap_caps_free(buffer); }
 };
-using UploadBuffer = std::unique_ptr<char[], UploadBufferDeleter>;
+using UploadWorkspace = std::unique_ptr<char[], UploadWorkspaceDeleter>;
 
-UploadBuffer serializeUpload(const JsonDocument &doc, size_t &length) {
-  if (doc.overflowed())
-    return nullptr;
-  length = measureJson(doc);
-  UploadBuffer body(static_cast<char *>(heap_caps_malloc(length, MALLOC_CAP_8BIT)));
-  if (body && serializeJson(doc, body.get(), length) != length)
-    body.reset();
-  return body;
-}
-
-UploadBuffer storedUpload(const char *path, size_t &length) {
-  if (!readDocumentPayload(path, nullptr, 0, length))
-    return nullptr;
-  UploadBuffer body(static_cast<char *>(heap_caps_malloc(length, MALLOC_CAP_8BIT)));
-  size_t copied = 0;
-  if (body && (!readDocumentPayload(path, body.get(), length, copied) || copied != length))
-    body.reset();
-  return body;
+struct StoredUpload {
+  const char *path = nullptr;
+  size_t length = 0;
+  static bool write(void *context, WaterTestTransport::BodySink sink, void *sinkContext) {
+    const auto &source = *static_cast<StoredUpload *>(context);
+    return streamDocumentPayload(source.path, sink, sinkContext, source.length);
+  }
+};
+struct BatchUpload {
+  Record records[batchSize]{};
+  char boot[37]{};
+  WaterTestUpload::Batch batch{};
+  void *workspace = nullptr;
+  size_t length = 0;
+  static bool write(void *context, WaterTestTransport::BodySink sink, void *sinkContext) {
+    auto &source = *static_cast<BatchUpload *>(context);
+    size_t written = 0;
+    return WaterTestUpload::writeBatch(source.batch, source.workspace, WaterTestUpload::workspaceBytes,
+                                       sink, sinkContext, written) && written == source.length;
+  }
+};
+std::string uploadWorkspaceError() {
+  // Capture the failed allocation's heap state, rather than relying on a later
+  // /api/heap poll after temporary allocations and the worker stack disappear.
+  const size_t free = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+  const size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  char details[224];
+  snprintf(details, sizeof(details),
+           "Not enough memory for upload workspace (need %u bytes; free %u; largest block %u). "
+           "Recording retained; will retry.",
+           unsigned(WaterTestUpload::workspaceBytes), unsigned(free), unsigned(largest));
+  return details;
 }
 
 bool uploadNeeded() {
@@ -813,8 +1149,10 @@ bool uploadPending() {
     vTaskDelay(pdMS_TO_TICKS(delayMs));
     delayMs = 1500;
     std::string id, path, error;
-    UploadBuffer body;
-    size_t bodyLength = 0;
+    UploadWorkspace workspace;
+    StoredUpload stored;
+    BatchUpload batch;
+    WaterTestTransport::BodySource body{};
     uint32_t next = 0, end = 0;
     uint32_t firstSequence = 0, lastSequence = 0;
     bool isManifest = false, isFinish = false;
@@ -837,61 +1175,74 @@ bool uploadPending() {
       path = "/api/v1/water-tests/" + id;
       if (!manifestUploaded) {
         isManifest = true;
-        body = storedUpload(manifestPath, bodyLength);
+        stored.path = manifestPath;
       } else if (next < recordCount) {
-        JsonDocument request;
         FILE *f = fs_open(journalPath, "rb");
         if (!f) {
           uploadState = "error";
           uploadError = "Recording file is unavailable.";
           return true;
         }
-        fseek(f, next * sizeof(Record), SEEK_SET);
-        Record r{};
-        common(request);
-        auto list = request["records"].to<JsonArray>();
-        end = next;
-        while (end < recordCount && end - next < batchSize && fread(&r, sizeof(r), 1, f) == 1) {
-          if (!valid(r) || r.boot != 0)
-            break;
-          if (end == next) {
-            firstSequence = r.seq;
-            request["first_seq"] = firstSequence;
-          }
-          lastSequence = r.seq;
-          request["last_seq"] = lastSequence;
-          WaterTestProtocol::recordToJson(list.add<JsonObject>(), r, recordingBoot,
-                                          manifest["sensors"][r.role ? "glycol" : "beer"]["calibration_offset_c"] |
-                                              0.0);
-          ++end;
+        const size_t count = std::min(batchSize, size_t(recordCount - next));
+        bool validBatch = fseek(f, next * sizeof(Record), SEEK_SET) == 0;
+        for (size_t i = 0; validBatch && i < count; ++i) {
+          auto &record = batch.records[i];
+          validBatch = fread(&record, sizeof(record), 1, f) == 1 && valid(record) &&
+                       record.boot == 0 && record.seq == next + i;
         }
         fclose(f);
-        if (end == next) {
+        // Never shorten a retry's payload while retaining its batch ID. The
+        // server may already have accepted the complete batch and lost its ACK.
+        if (!validBatch) {
           uploadState = "error";
-          uploadError = "Recording checksum mismatch; retained for inspection.";
+          uploadError = "Recording checksum or sequence mismatch; retained for inspection.";
           return true;
         }
+        end = next + count;
+        firstSequence = batch.records[0].seq;
+        lastSequence = batch.records[count - 1].seq;
         batchId = WaterTestProtocol::batchIdentifier(id, next);
-        request["batch_id"] = batchId;
-        request["boot_id"] = recordingBoot;
-        body = serializeUpload(request, bodyLength);
+        memcpy(batch.boot, recordingBoot, sizeof(batch.boot));
+        batch.batch = {guid, id.c_str(), batchId.c_str(), batch.boot, batch.records, count,
+                       manifest["sensors"]["beer"]["calibration_offset_c"] | 0.0,
+                       manifest["sensors"]["glycol"]["calibration_offset_c"] | 0.0};
+        workspace.reset(static_cast<char *>(heap_caps_malloc(WaterTestUpload::workspaceBytes, MALLOC_CAP_8BIT)));
+        if (!workspace) {
+          uploadState = "error";
+          uploadError = uploadWorkspaceError();
+          return true;
+        }
+        batch.workspace = workspace.get();
+        if (!WaterTestUpload::writeBatch(batch.batch, batch.workspace, WaterTestUpload::workspaceBytes,
+                                         nullptr, nullptr, batch.length)) {
+          uploadState = "error";
+          uploadError = "Recording could not be encoded within the bounded upload workspace; retained for inspection.";
+          return true;
+        }
+        body = {batch.length, &batch, BatchUpload::write};
         path += "/batches";
       } else {
         isFinish = true;
-        body = storedUpload(finishPath, bodyLength);
+        stored.path = finishPath;
         path += "/finish";
       }
-      if (!body) {
-        uploadState = "error";
-        uploadError = "Low memory.";
-        return true;
+      if (stored.path) {
+        // Validate the saved envelope before HTTP headers can reach the portal.
+        // The body itself is decoded directly from flash during transmission.
+        if (!validateDocumentPayload(stored.path, stored.length)) {
+          uploadState = "error";
+          uploadError = "Saved upload metadata is unreadable or has a checksum mismatch; retained for inspection.";
+          return true;
+        }
+        body = {stored.length, &stored, StoredUpload::write};
       }
       uploadState = "uploading";
       uploaderBusy = true;
     }
-    bool ok = WaterTestTransport::send(path, !isManifest && !isFinish, std::string_view(body.get(), bodyLength),
-                                       response, error);
-    body.reset();
+    bool ok = WaterTestTransport::send(path, !isManifest && !isFinish, body, response, error);
+    workspace.reset();
+    if (!ok)
+      error = std::string(isManifest ? "Manifest upload: " : isFinish ? "Finish upload: " : "Record upload: ") + error;
     if (ok) {
       ok = WaterTestProtocol::acknowledged(response.as<JsonVariantConst>(), id, guid);
       if (!isManifest && !isFinish)
@@ -975,7 +1326,7 @@ bool uncommittedEmptyStartup() {
     return false;
   // Finalization or legacy boot metadata indicates more than an abandoned
   // startup, even if those files are incomplete. Preserve that recovery block.
-  for (const auto path : {finishPath, receiptPath, resumedPath, "/water-test-boots.json"}) {
+  for (const auto path : {finishPath, receiptPath, resumedPath, controllerOnePath, controllerTwoPath, "/water-test-boots.json"}) {
     if (fs_exists(path) || fs_exists((std::string(path) + ".tmp").c_str()))
       return false;
   }
@@ -987,7 +1338,10 @@ bool uncommittedEmptyStartup() {
   return empty && closed;
 }
 void recoverDataset() {
-  if (!fs_exists(manifestPath) && !fs_exists(journalPath))
+  if (!fs_exists(manifestPath) && !fs_exists(journalPath) &&
+      !fs_exists(controllerOnePath) && !fs_exists(controllerTwoPath) &&
+      !fs_exists((std::string(controllerOnePath) + ".tmp").c_str()) &&
+      !fs_exists((std::string(controllerTwoPath) + ".tmp").c_str()))
     return;
   if (uncommittedEmptyStartup()) {
     startupHold = true;
@@ -1056,6 +1410,13 @@ void recoverDataset() {
   recordCount = seq = 0;
   lastRecordUs = 0;
   uint32_t recoveredPulses = 0;
+  unsigned recoveredEpisodeStarts = 0, recoveredEpisodeSettles = 0;
+  JsonDocument recoveredRuns[controllerRunCount];
+  unsigned recoveredRunStarts[controllerRunCount] = {}, recoveredRunSettles[controllerRunCount] = {};
+  ObservationCounts recoveredObservations[controllerRunCount];
+  uint32_t recoveredObservationSequence[controllerRunCount] = {};
+  uint64_t recoveredFinalObservationStarted = 0, recoveredFinalObservationLastRead = 0;
+  unsigned recoveredFinalObservationSamples = 0;
   Record record{};
   while (fread(&record, sizeof(record), 1, file) == 1 && valid(record) && record.boot == 0 &&
          record.seq == recordCount && record.t_us >= lastRecordUs) {
@@ -1063,6 +1424,49 @@ void recoverDataset() {
     lastRecordUs = record.t_us;
     if (record.kind == 4 && record.code == static_cast<uint8_t>(Phase::Observe))
       recoveredPulses = std::max(recoveredPulses, uint32_t(record.pulse));
+    if (record.kind == 4 && record.code == static_cast<uint8_t>(Phase::ControllerFinalObserve))
+      recoveredFinalObservationStarted = record.read_us;
+    if (recoveredFinalObservationStarted && record.kind == 2 && record.role == 0 &&
+        (record.flags & 1) && !(record.flags & 2) && record.read_us > recoveredFinalObservationStarted &&
+        record.read_us > recoveredFinalObservationLastRead && record.read_us <= record.t_us) {
+      ++recoveredFinalObservationSamples;
+      recoveredFinalObservationLastRead = record.read_us;
+    }
+    if (record.kind == 9 && record.role >= 1 && record.role <= controllerRunCount) {
+      auto &boundary = recoveredRuns[record.role - 1];
+      if (record.pulse == 0) {
+        JsonDocument decoded;
+        WaterTestProtocol::recordToJson(decoded.to<JsonObject>(), record, recordingBoot, 0.);
+        boundary["started_us"] = record.read_us;
+        for (auto key : {"start_c", "target_c", "target_c_exact"})
+          boundary[key] = decoded[key];
+      } else if (record.pulse == 1) {
+        boundary["ended_us"] = record.read_us;
+        if (record.flags & 128)
+          boundary["run_duration_complete"] = bool(record.flags & 1);
+      }
+    }
+    if (record.kind == 10 && record.role >= 1 && record.role <= controllerRunCount &&
+        record.detail == recoveredObservationSequence[record.role - 1] + 1 &&
+        recoveredObservations[record.role - 1].record(record.pulse))
+      recoveredObservationSequence[record.role - 1] = record.detail;
+    if (record.kind == 8 && record.role >= 1 && record.role <= controllerRunCount &&
+        record.pulse <= legacyControllerRequiredEpisodes) {
+      auto &starts = recoveredRunStarts[record.role - 1];
+      auto &settles = recoveredRunSettles[record.role - 1];
+      if (record.code == 0 && starts == settles && record.pulse == starts + 1)
+        ++starts;
+      else if (record.code == 1 && starts == settles + 1 && record.pulse == starts)
+        ++settles;
+    }
+    if (record.kind == 8 && record.pulse <= legacyControllerRequiredEpisodes) {
+      if (record.code == 0 && recoveredEpisodeStarts == recoveredEpisodeSettles &&
+          record.pulse == recoveredEpisodeStarts + 1)
+        ++recoveredEpisodeStarts;
+      else if (record.code == 1 && recoveredEpisodeStarts == recoveredEpisodeSettles + 1 &&
+               record.pulse == recoveredEpisodeStarts)
+        ++recoveredEpisodeSettles;
+    }
   }
   fclose(file);
   const bool damaged = bytes < 0 || size_t(bytes) != recordCount * sizeof(Record);
@@ -1087,12 +1491,34 @@ void recoverDataset() {
     terminal["final_phase"] = "finished";
     terminal["completed_pulses"] = recoveredPulses;
     terminal["response_settled"] = false;
+    if (recoveredFinalObservationStarted) {
+      auto observation = terminal["controller_final_observation"].to<JsonObject>();
+      observation["run"] = controllerRunCount;
+      observation["started_us"] = recoveredFinalObservationStarted;
+      observation["ended_us"] = nullptr;
+      observation["last_valid_read_us"] = recoveredFinalObservationLastRead;
+      observation["valid_beer_samples"] = recoveredFinalObservationSamples;
+      observation["completed"] = false;
+      observation["reason"] = "reboot_interrupted";
+    }
+    if (manifest["test_program"]["controller"]["required_episodes"] == legacyControllerRequiredEpisodes) {
+      terminal["controller_episodes_required"] = legacyControllerRequiredEpisodes;
+      terminal["controller_episodes_completed"] = recoveredEpisodeSettles;
+      terminal["controller_initial_settled"] = recoveredEpisodeSettles > 0;
+      terminal["controller_observation_complete"] = recoveredEpisodeSettles >= legacyControllerRequiredEpisodes;
+      terminal["controller_completed"] = false;
+      // The durable episode history survives a reboot. Current stability and
+      // whether a deadline was reached during the unobserved interval do not.
+    }
     terminal["final_outputs"]["pump_on"] = false;
     terminal["final_outputs"]["heater_on"] = false;
     terminal["recovery_boot_id"] = currentBoot;
     terminal["last_recorded_us"] = lastRecordUs;
     terminal["unobserved_shutdown"] = true;
-    controllerTerminalMetadata(terminal["controller"].to<JsonObject>(), true);
+    if (manifest["test_program"]["controller_plan_version"] == 2 || fixedDurationPlan())
+      recoverControllers(recoveredRuns, recoveredRunSettles, recoveredObservations);
+    else
+      controllerTerminalMetadata(terminal["controller"].to<JsonObject>(), true);
     const uint64_t began = manifest["acquisition"]["started_us"] | uint64_t(0);
     terminal["elapsed_s"] = lastRecordUs >= began ? (lastRecordUs - began) / 1000000 : 0;
     terminal["final_seq_by_boot"][recordingBoot] = int64_t(recordCount) - 1;
@@ -1331,8 +1757,26 @@ void status(JsonDocument &doc) {
   doc["analysis_role"] = program.analysisRole();
   doc["block_id"] = program.block;
   doc["response_settled"] = program.responseSettled;
-  if (program.phase == Phase::Controller)
+  if (program.phase == Phase::Controller || program.phase == Phase::ControllerTransition ||
+      program.phase == Phase::ControllerFinalObserve) {
+    doc["controller_run"] = program.controllerRun;
+    doc["controller_run_count"] = controllerRunCount;
+    doc["controller_algorithm"] = GlycolCooling::selectionName(algorithmForRun(program.controllerRun));
     doc["controller_target_c"] = program.targetC;
+    doc["controller_completion_policy"] = "fixed_duration_v1";
+    doc["controller_run_duration_complete"] = program.controllerRunDurationComplete;
+    const double runNow = program.controllerRunEnded ? program.controllerRunEnded : nowUs() / 1e6;
+    doc["controller_elapsed_s"] = std::max(0., runNow - program.controllerStarted);
+    doc["controller_duration_s"] = controllerSeconds;
+    controllerObservations[program.controllerRun - 1].json(doc["controller_observations"].to<JsonObject>());
+    doc["controller_remaining_s"] = std::max(0., program.deadline - nowUs() / 1e6);
+    if (program.phase == Phase::ControllerFinalObserve) {
+      doc["controller_final_observation_remaining_s"] =
+          std::max(0., program.controllerFinalObservationStarted + controllerFinalObservationSeconds - nowUs() / 1e6);
+      doc["controller_final_observation_valid_samples"] = program.controllerFinalObservationSamples;
+      doc["controller_final_observation_required_samples"] = controllerFinalObservationRequiredSamples;
+    }
+  }
   doc["completed_pulses"] = program.completedPulses;
   doc["elapsed_s"] = running ? uint32_t(nowUs() / 1e6 - program.started) : (terminal["elapsed_s"] | 0U);
   doc["max_duration_s"] = maximumSeconds;
@@ -1357,6 +1801,13 @@ void status(JsonDocument &doc) {
   doc["reason"] = reason;
   doc["upload_status"] = uploadState;
   doc["upload_error"] = uploadError;
+  doc["upload_manifest_uploaded"] = manifestUploaded;
+  doc["upload_records_uploaded"] = uploadedRecords;
+  doc["upload_records_total"] = recordCount;
+  doc["upload_stage"] = uploadState == "submitted" ? "complete"
+                          : terminal.isNull() ? "none"
+                          : !manifestUploaded ? "manifest"
+                          : uploadedRecords < recordCount ? "batches" : "finish";
   doc["result_url"] = std::string(endpoint) + "/" + guid + "/";
   doc["moved_chamber_probe"] = movedProbe();
   doc["can_start"] = !recoveryBlocked && !owned && !running && !uploaderBusy && !uploaderTaskActive &&

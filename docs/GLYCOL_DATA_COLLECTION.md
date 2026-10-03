@@ -1,9 +1,9 @@
 # Contribute a glycol Chill Test
 
-The `glycol-data-collection` branch adds a **Chill Test** page to the normal
-BrewPi web interface. Predictive and pulse-dose cooling remain available for
-normal brewing. The experiment temporarily owns the outputs. Its final controller
-challenge starts with fresh estimates and leaves normal brewing tuning unchanged.
+The **Chill Test** page in the BrewPi web interface records a water-only
+cooling experiment. Predictive and pulse-dose cooling remain available for
+normal brewing. The experiment temporarily owns the outputs. Its two final
+controller challenges start with fresh estimates and leave normal brewing tuning unchanged.
 
 ## Participant flow
 
@@ -23,7 +23,7 @@ challenge starts with fresh estimates and leaves normal brewing tuning unchanged
 4. Confirm the water-only preparation and consent to submission, then start.
    Be sure the pump runs during the first test and glycol is circulating.
 5. The device runs and records the sequence without needing the browser open.
-   The page shows progress, temperatures and a **Stop test** button.
+   The page shows progress, temperatures and a **Stop Test** button.
 6. Every outcome uploads automatically over **HTTP** to
    `http://chill.fermentrack.net`: completed, stopped, inconclusive, failed, or
    interrupted by a restart. Follow the results link on the page.
@@ -41,13 +41,15 @@ background research telemetry is collected during ordinary brewing.
 
 ## Versioned test program
 
-`adaptive-campaign-v1` is one continuous experiment with a twelve-hour upper
-limit. It advances when the measurements are informative; twelve hours is not a
-target duration. The heater stays OFF throughout.
+`adaptive-campaign-v1` with decision rules version 2 is one continuous experiment
+with a twelve-hour upper limit. It advances when the measurements are informative;
+twelve hours is not a target duration. The heater stays OFF throughout.
 
-1. **Baseline.** With the pump OFF, collect at least 60 seconds of fresh readings.
-   Advance when the observed drift and noise are consistent. The nominal upper
-   baseline window is five minutes; inadequate sample coverage cannot qualify it.
+1. **Baseline.** With the pump OFF, collect at least three minutes of fresh readings.
+   Estimate drift and noise over the most recent three minutes, accounting for
+   the probe's temperature steps and uncertainty in the fitted trend. Advance
+   when the two halves agree. The nominal upper baseline wait is five minutes;
+   inadequate sample coverage cannot qualify it.
 2. **Calibration pulses.** Start with a ten-second pulse. If cooling is too weak,
    escalate through 30, 90, 270, 810, and 1,800 seconds. A calibration pulse ends
    early once cooling exceeds the larger of 0.20°C and four times the measured
@@ -60,24 +62,76 @@ target duration. The heater stays OFF throughout.
    30 seconds OFF and the configured relay minimum. This portion is reserved for
    checking the fitted response model. Hose, jacket, and water temperatures retain
    their history across every phase; no phase pretends the installation reset.
-4. **Controller challenge.** Where enough measured temperature budget remains,
-   run the selected production glycol cooling algorithm with fresh estimates and
-   a target 0.25°C below the current reading. This phase ends after an actual pump
-   cycle and three minutes of stable readings within 0.08°C of target, after
-   allowing at least the cooling tail already observed during calibration. It
-   otherwise ends after one hour. A timeout is reported explicitly. The controller used for normal
-   brewing keeps its existing learned values.
+4. **First controller challenge.** Run the selected production cooling algorithm
+   with fresh estimates and a fixed target 1°F (5/9°C) below its starting reading.
+   It runs for three hours unless stopped by the user or a safety/recording limit.
+   The run requires room for the full drop plus 0.25°C above both temperature
+   limits. Three completed controller observations are a data-coverage goal;
+   temperature-control quality is evaluated separately. The production algorithm
+   controls every pulse and learns normally, without changing normal brewing tuning.
+5. **Transition and second challenge.** Save the first run, keep the pump OFF,
+   and wait for flat temperature or steady warming in two covered windows and
+   their combined trend. The minimum wait is the greatest of 180 seconds, the
+   observed cooling tail, twice the observed delay, and the relay minimum OFF
+   time. After recovery, run the other algorithm with fresh estimates, its own
+   1°F target drop and the same three-hour duration. Unresolved recovery after
+   30 minutes ends the campaign as inconclusive (`controller_transition_timeout`).
+   Insufficient temperature range skips the second run (`controller_headroom`).
+6. **Final pump-off recording.** At the second controller's deadline, stop the
+   algorithm and pump and save its result. Record at least 90 seconds after the
+   wrapper confirms the applied pump output is OFF, retaining at least six
+   distinct fresh valid beer readings, including one at or after 90 seconds.
+   This separate `controller_final_observe` phase ends inconclusively after
+   180 seconds if coverage is insufficient (`controller_final_observation_timeout`).
+   The normal stop, freshness and safety limits continue to apply.
 
-After an isolated pulse, the test looks for the cooling rate to return near the
-measured baseline. It requires two sufficiently populated windows of 90–1,800
+The campaign uses one recording and test ID, with separate calibration,
+validation and controller analysis roles. Both controllers share the vessel's
+thermal history and the campaign's runtime and pump budgets. Their order and
+starting temperatures are recorded so comparisons can account for those
+conditions. Controller measurements do not enter the earlier model fit.
+
+### Completion and compatibility
+
+Controller plan version 3 declares `completion_policy: fixed_duration_v1`,
+`max_duration_s: 10800` and `observation_goal: 3` for each run. Reaching the
+scheduled end sets `run_duration_complete`, status `completed` and reason
+`duration_complete`, independently of observation count or temperature quality.
+Early termination preserves the measurements and outcome for each started run.
+
+Recovery and upload preserve each saved manifest's plan. Earlier version-3
+recordings retain their declared 7,200-second duration; version-1/2 episode
+records and completion flags remain readable. New tests emit duration completion
+and controller observations instead of episode-based completion flags.
+
+### Calibration response and recovery
+
+Pulse decisions require a measured temperature drop. A warming baseline never
+adds cooling credit. When the baseline clearly shows natural cooling, the test
+subtracts a conservative estimate of that cooling for up to five minutes after
+the pulse starts. Beyond that window it freezes response credit from that pulse;
+an expired background estimate cannot establish a new response or a larger gain.
+A very delayed response during natural cooling can therefore remain inconclusive.
+
+After an isolated pulse, the test looks for the measured cooling to subside into
+flat readings or steady warming, independently of the initial drift estimate.
+It requires two sufficiently populated windows of 90–1,800
 seconds each (longer for a slower observed response), at least 180 seconds OFF,
-and at least twice the observed response delay. A flat trace without detected
+at least twice the observed response delay, and at least the recovery time
+already observed on earlier pulses. A flat trace without detected
 cooling does not count as settled. An uninformative pilot can escalate after
 five minutes, provided credible cooling has not started. A detected drop of at least 0.125°C, or at least 0.0625°C
-with a continuing downward trend, extends observation. Unsettled state and
-thermal history remain in the recording. An observation otherwise has a
-six-hour upper limit within the overall twelve-hour cap. It still ends as soon
-as the response meets the measured completion criteria. These rules describe
+with a continuing downward trend, establishes a response and extends observation.
+After recovery, the recent pump-off readings refresh the background estimate
+for the next pulse. An active cooling tail never becomes a new baseline.
+The completion metadata reports this latest baseline's drift, noise, and trend
+uncertainty. Both individual windows and their combined trend must show recovery;
+a downward probe step between otherwise flat windows still counts as cooling.
+Unsettled state and thermal history remain in the recording. An observation has a
+six-hour upper limit within the overall twelve-hour cap. An unresolved response
+at that limit ends the test as inconclusive with reason `observation_timeout`;
+it does not start another pulse or supply a useful-response estimate. Observation
+ends sooner when the response meets the measured completion criteria. These rules describe
 measured probe behavior and do not prove that all water, hose, and jacket temperatures have equilibrated. Final
 validation also waits at least as long as the settled calibration tail already
 observed, preventing a shorter flat interval from hiding a known slow response.
@@ -86,12 +140,14 @@ Start with water between 8 and 35°C, at least 2°C warmer than the glycol input
 that input is available. Unknown glycol input remains explicitly unknown. The
 relay's configured minimum ON/OFF intervals apply, with an absolute minimum of
 two seconds. A single pulse is bounded by 30 minutes and total pump operation by
-two hours, including the controller challenge. A continuous controller pump run
+two hours, including both controller challenges. A continuous controller pump run
 also stops at 30 minutes, with the `pulse_time_limit` reason. Unsupported minimum
 intervals block preflight.
 
-The test stops at a 3°C measured drop from its initial water reading or a 4°C
-water reading. As in normal OneWire control, a failed read can use the last good
+The test stops at a measured drop of 3 + 5/9°C (6.4°F) from its initial water
+reading or a 4°C water reading. The extra 1°F reserves space for the second
+controller; diagnostic pulse sizing still uses the original 3°C budget.
+As in normal OneWire control, a failed read can use the last good
 beer reading for up to 30 seconds. More than 30 seconds without a good beer
 reading, a recording failure, unaccounted sample loss, or an unexpected output
 ends the experiment. A fault or temperature limit switches outputs OFF before
@@ -116,13 +172,18 @@ pulse deadlines and protective stops are checked on every call. Statistical
 history keeps 2,048 compact readings at least 1.9 seconds apart, with timestamps
 relative to the start of the test. This covers both long settling windows while
 keeping memory bounded; durable sample timestamps retain their original
-microsecond precision. The
-**durable recording normally keeps one reading per probe every ten seconds**,
+microsecond precision. The **durable recording normally keeps one reading per
+probe every ten seconds**,
 with up to 2,500 additional readings across both probes at approximately two-second
 spacing during the first two minutes and after pump edges. Invalid reads may
 also use that additional-record budget. Once that budget is consumed, recording
 continues at the normal ten-second cadence. The manifest declares these limits;
-the uploaded data does not contain every acquisition attempt.
+the uploaded data does not contain every acquisition attempt. During the final
+pump-off recording, every fresh valid beer reading after the physical OFF
+boundary is retained regardless of those normal sampling budgets. Duplicate,
+invalid, queued pre-OFF, and future-dated readings do not satisfy its completion
+requirement; a failed durable write fails the campaign rather than qualifying
+an unrecorded observation.
 
 Each retained sample preserves its raw Celsius/sixteenth-degree value, calibration
 offset, validity, acquisition time, and conversion duration. Invalid readings
@@ -134,15 +195,16 @@ sensor sample.
 Every applied logical pump/heater transition has its own record, independent of
 sample cadence. These commands do not prove relay contact state or glycol flow.
 Phase records identify the analysis role and block. Controller records preserve
-the selected algorithm, controller phase, target, predicted endpoint, cooling
+the run's algorithm, controller phase, target, predicted endpoint, cooling
 rate, coast estimate, gain estimate, and applied pump state at most once per
 minute plus pump transitions. Device GUID, test UUID, recording boot UUID, and
 sequence identify immutable survey, measurements, and events. Monotonic
 microseconds drive timing; a startup NTP anchor is recorded when available.
 
 The LittleFS journal has a hard ceiling of 12,500 checksummed 40-byte records.
-Preflight requires 532,768 free bytes for the 500,000-byte journal and metadata
-allowance; 16 KiB is reserved physically for finish/recovery metadata. The
+Preflight requires 549,152 free bytes: a 500,000-byte journal plus a 48 KiB
+metadata allowance. Of that allowance, 16 KiB is reserved physically for
+finish/recovery metadata. The
 sampling budget accommodates twelve hours offline plus event records. Extremely
 frequent output events, another component consuming flash, or a write failure
 can still end acquisition early; the recorded prefix and declared loss remain
@@ -150,8 +212,8 @@ available. The journal shares the filesystem with the web UI and settings.
 
 Manifest and finish documents are checksummed and committed by writing a complete
 temporary file followed by rename. Metadata is streamed through bounded buffers
-instead of building several complete JSON copies in RAM. The manifest is durable before the first pump
-command. Uploads begin only after acquisition ends and its finish details are
+instead of building several complete JSON copies in RAM. The manifest is durable
+before the first pump command. Uploads begin only after acquisition ends and its finish details are
 saved, so network retries cannot stretch a pulse. Every outcome is submitted,
 including no measurable response, failure, and stopping during the baseline.
 The page shows **Test submitted** only after the server accepts the complete
@@ -162,6 +224,36 @@ after the control loop and OneWire sensor worker have started. Its 12 KiB stack
 is released after submission or a failed attempt; failures retry after 30 seconds.
 HTTP waits run outside the test-state lock. Preparing a batch or committing its
 receipt still takes that lock and can briefly delay a display update.
+
+Uploads use a fixed 3 KiB ESP32 workspace to encode one record at a time, then
+stream through a 512-byte HTTP buffer. They do not hold a complete batch JSON
+document or serialized body in memory. Saved manifest and finish payloads are
+validated before opening HTTP and decoded from flash in 256-byte chunks. A
+batch always contains the same 12 records (or the final remainder), even after a
+lost acknowledgement; a damaged record rejects the whole batch rather than
+changing an existing batch ID's contents. Replies are capped at 8 KiB on the
+wire, with at most 2,304 bytes of retained JSON allocation for acknowledgement
+fields.
+Partial writes, truncated replies and missing acknowledgements retain the
+original recording and retry without advancing progress. A failed workspace
+allocation reports the requested bytes, free heap and largest available block
+at the time of failure. Include an open device page when checking upload memory
+pressure on hardware; host tests cover the allocation bounds and retry protocol.
+
+If the device page stops responding or connections reset while a recording is
+retained, first close all browser tabs for the device, then retry one request to
+`/api/health/` followed by `/api/water-test/`. Exhausted network sockets are one
+possible cause; these symptoms alone do not prove the test or control loop has
+stopped. Check the portal for an accepted result and preserve any available
+serial diagnostics before restarting or flashing. Restart recovery retains
+pending data, but an unfinished test becomes interrupted rather than continuing.
+
+The web server limits itself to four client sessions and reserves global socket
+capacity for other network services. `/api/health/` reports its client count,
+client limit and global socket limit under `network`. This protects ordinary
+control and uploads as well as the water-test page. After firmware updates,
+validate idle connection pressure using `tests/http_connections/check.py`;
+see its README for the bounded, read-only procedure.
 
 If the separate control-loop task cannot be allocated, control runs on the
 existing main-task stack. Failed OneWire startup is retried every 30 seconds;
@@ -186,29 +278,28 @@ require recovery. Do not erase the filesystem to resolve a startup failure.
 
 ## Controller snapshots
 
-The durable manifest's `test_program.controller` contains the selected algorithm,
-its version, all 19 effective configuration fields, and its numeric initial
-tuning. The selection is pinned when the campaign starts. `initialization` is
-`fresh_defaults`; normal brewing estimates are neither copied into the challenge
-nor changed by it. The same constructor and relay limits build the manifest
-preview and the controller used later in the test.
+The durable manifest's `test_program.controllers` array contains both algorithms
+in execution order. Each entry records `run`, `selection`, algorithm version,
+all effective configuration fields, and numeric initial tuning. `initialization`
+is `fresh_defaults`. The same constructors and relay limits build the manifest
+snapshots and the controllers used during the test.
 
-The finish document's `controller` object records final tuning directly from the
-actual test-controller instance, including learning/response counts. Sparse
-controller diagnostic samples are not used to reconstruct those values. An
-initialized controller also records `started_us`, `captured_at_us`, `target_c`,
-and `target_c_exact`. The snapshot's `learning_status` distinguishes:
+The finish document's `controllers` array preserves each run's final tuning from
+its actual controller instance, including learning/response counts, target,
+start/end times, outcome and observation counts. A completed run is checkpointed
+before the next phase. Sparse diagnostic samples are not used to reconstruct
+learned values. Each snapshot's `learning_status` distinguishes:
 
 - `learned`: at least one relevant learning or response update occurred.
 - `no_updates`: the controller initialized but retained its initial estimates.
 - `not_started`: the run ended before the controller was initialized.
-- `unavailable_after_restart`: an active run was interrupted before a finish
-  snapshot could be saved; final tuning and initialization state are unknown.
+- `unavailable_after_restart`: no final snapshot survived for an initialized run.
 
-A finish snapshot already saved before a restart retains its original values.
-Both snapshot objects carry `implementation_id`, a SHA-256 identity of the exact
-portable cooling implementation sources, plus `tuning_schema_version: 1` and
-`numeric_encoding: "binary64-decimal-v1"`.
+A saved snapshot retains its values after restart. A missing snapshot leaves
+learned values unknown; recorded run boundaries and observations can still be
+recovered from the journal. Initial and final snapshots carry `implementation_id`,
+a SHA-256 identity of the portable cooling sources, `tuning_schema_version: 1`
+and `numeric_encoding: "binary64-decimal-v1"`.
 
 Readable JSON numbers accompany `configuration_exact`, `initial_tuning_exact`,
 and `final_tuning_exact`. Those matching objects store each floating-point value
@@ -219,12 +310,38 @@ ArduinoJson numeric output. Manifest and finish uploads send their original
 checksummed stored JSON bytes, including after a restart, so parsing and
 reserializing metadata cannot change an immutable retry.
 
-The portal's starting-versus-learned comparison simulates the selected cooling
-algorithm over the observed challenge duration. It applies the controller's
+The portal's starting-versus-learned comparison simulates each cooling
+algorithm over its recorded challenge duration. It applies the controller's
 relay limits but excludes the campaign safety-stop wrapper, including the total
 temperature-drop and pump-time limits. It cannot certify that a physical replay
 would run to completion. Predictions outside the installation's tested operating
 range are identified separately.
+
+### Controller observations and final recording
+
+`controller_observation` records preserve each production controller's response
+closure, including a COAST exit followed by a new ON in the same control tick.
+They contain the run, algorithm, observation ordinal, `event_us`, `coast_s`,
+`rate_qualified` and reason:
+
+- `rate_condition`: the controller's rate condition ended a covered observation.
+- `coast_time_limit`: the controller's observation time limit was reached.
+- `rate_unqualified`: the observation closed without adequate rate coverage.
+- `interrupted`: a stop or deadline closed an open response.
+
+Each run's `observations` object stores `goal`, `completed`, `rate_qualified`,
+`time_limited`, `rate_unqualified` and `interrupted`. The first three completion
+reasons count toward `completed`; interruptions are separate. These events are
+journaled before the run checkpoint. They describe controller decisions, not
+proof that all physical cooling has ended. Recovery reports only saved evidence.
+
+The manifest's `test_program.controller_final_observation` declares the final
+pump-off phase, duration bounds and required durable sample count. The finish's
+`controller_final_observation` reports `started_us`, end time, last valid read,
+sample count, completion and reason. Its phase event records
+`observation_started_us`. Recovery preserves the OFF boundary and recorded
+samples but marks an interrupted tail incomplete with an unknown end. Controller
+performance metrics stop at the run boundary; the tail remains in the raw data.
 
 ## Device API
 
@@ -286,23 +403,18 @@ A physical relay/sensor smoke test is still required before a distributed releas
 compilation and host tests do not demonstrate that a participant's pump is wired
 correctly.
 
-The additional host tests are:
+Run the complete hardware-free suite and the cross-repository contract check:
 
 ```sh
-c++ -std=c++17 -Isrc tests/water_test_core/test.cpp -o /tmp/water-test-core
-/tmp/water-test-core
-c++ -std=c++17 -Isrc -I.pio/libdeps/esp32_wifi_iic/ArduinoJson/src \
-  tests/water_test_protocol/test.cpp -o /tmp/water-test-protocol
-/tmp/water-test-protocol
-python3 tests/water_test_backend/run.py
-python3 tests/water_test_storage/run.py
-python3 tests/controller_memory/run.py
-python3 tests/startup_health/run.py
+python3 tests/run_native.py
 /path/to/portal/.venv/bin/python tests/water_test_contract/run.py \
   --portal /path/to/glycol_data_collection
 cd ui
-npx jest --runInBand tests/mixins/WaterTest.test.js tests/stores/WaterTestStore.test.js
+npx jest --runInBand tests/components/WaterTest.test.js tests/components/AppPolling.test.js \
+  tests/mixins/WaterTest.test.js tests/stores/WaterTestStore.test.js
 ```
+
+Focused checks are documented in [tests/README.md](../tests/README.md).
 
 The cross-repository contract check exercises actual firmware serialization,
 receiver ingestion, retry acknowledgements and the real Chillsim worker without

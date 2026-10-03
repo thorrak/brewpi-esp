@@ -64,13 +64,13 @@ void Controller::copyActiveOutput() {
         output_ = {static_cast<Phase>(o.phase), o.pump_on, o.full_cooling,
             o.temperature_c, o.rate_c_per_s, o.setpoint_c, o.learning_updates,
             nanValue(), nanValue(), 0, o.gain_c_per_on_s, o.pulse_budget_s,
-            o.predicted_endpoint_c, o.actual_on_s};
+            o.predicted_endpoint_c, o.actual_on_s, o.observation};
     } else {
         const auto& o = predictive_.output();
         output_ = {static_cast<Phase>(o.phase), o.pump_on, o.full_cooling,
             o.temperature_c, o.rate_c_per_s, o.setpoint_c, o.learning_updates,
             o.coast_s, o.budget_gain_c_per_s, o.response_updates, nanValue(),
-            o.pulse_budget_s, o.predicted_endpoint_c, o.actual_on_s};
+            o.pulse_budget_s, o.predicted_endpoint_c, o.actual_on_s, o.observation};
     }
 }
 

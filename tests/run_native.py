@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the glycol and water-test host regressions without hardware or a network.
+"""Run host regressions without hardware or external services.
 
 Build one firmware target first to install ArduinoJson. The full portal contract
 and saved Chillsim trace replay remain separate cross-repository checks.
@@ -29,6 +29,7 @@ def main():
         "adaptive_dose_core": ["src/AdaptiveDoseController.cpp", "tests/adaptive_dose_core/core_test.cpp"],
         "predictive_coast_core": ["src/PredictiveCoastController.cpp", "tests/predictive_coast_core/core_test.cpp"],
         "glycol_cooling_selector": controller_sources + ["tests/glycol_cooling_selector/core_test.cpp"],
+        "cooling_observations": controller_sources + ["tests/cooling_observations/test.cpp"],
         "water_test_core": ["tests/water_test_core/test.cpp"],
         "water_test_protocol": ["tests/water_test_protocol/test.cpp"],
     }
@@ -41,10 +42,11 @@ def main():
                 "-I" + str(json_headers), *sources, "-o", binary)
             run(binary)
     for name in ["cooling_selector_settings", "glycol_tuning", "predictive_coast_integration",
-                 "water_test_backend", "water_test_storage", "controller_memory", "static_file_serving",
-                 "crash_dump", "http_json_response", "startup_health"]:
+                 "water_test_backend", "water_test_storage", "water_test_transport", "water_test_upload_arena", "controller_memory", "static_file_serving",
+                 "crash_dump", "http_json_response", "tcp_backend", "startup_health"]:
         print(f"Running {name}", flush=True)
         run(sys.executable, ROOT / "tests" / name / "run.py")
+    run(sys.executable, ROOT / "tests/http_connections/test_check.py")
     run(sys.executable, ROOT / "tests/water_test_contract/run.py", "--firmware-only")
     print("All native regressions passed.")
 

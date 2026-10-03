@@ -32,7 +32,10 @@ int main(int argc, char** argv) {
         assert(json["onewire"]["last_init_error"] == "bus_creation");
         assert(json["onewire"]["init_attempts"] == 1);
         assert(json["onewire"]["last_read_age_ms"].isNull());
+        assert(json["network"]["http_clients"] == 2);
+        Native::failHttpClientList = true;
         health(json);
+        assert(json["network"]["http_clients"].isNull());
         assert(before == Native::busCalls + Native::taskCalls + Native::busIo + Native::mutexCalls);
         return 0;
     }

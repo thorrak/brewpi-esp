@@ -69,6 +69,113 @@ describe('water-test setup and resume UI', () => {
         expect(html).toContain('10 seconds');
         expect(html).toContain('up to 30 minutes');
         expect(html).toContain('12-hour limit');
+        expect(html).toContain('both BrewPi cooling algorithms in sequence');
+        expect(html).toContain('three hours');
+        expect(html).toContain('30 minutes of pump-off observation');
+        expect(html).toContain('3 + 5/9 °C (6.4 °F)');
+    });
+
+    it.each([
+        [1, 'predictive_coast', 'Predictive coast'],
+        [2, 'pulse_dose', 'Pulse-dose'],
+    ])('preserves legacy episode progress for controller run %s', async (run, algorithm, label) => {
+        Object.assign(waterTest.status, {
+            test_id: 'dual-test', active: true, phase: 'controller', controller_run: run,
+            controller_run_count: 2, controller_algorithm: algorithm, controller_target_c: 20,
+            controller_episodes_completed: 1, controller_episodes_required: 3,
+            controller_waiting_for_rewarming: true, controller_remaining_s: 3661,
+        });
+        const html = await render();
+        expect(html).toContain(`Controller run ${run} of 2: ${label}`);
+        expect(html).toContain('Settled cooling episodes: 1 of 3 · target 68.00 °F');
+        expect(html).toContain('waiting for natural warming');
+        expect(html).toContain('Time remaining for this algorithm: 1h 1m 01s');
+    });
+
+    it.each([0, 3, 5])('shows fixed duration and observation coverage without a quality verdict (%s)', async (completed) => {
+        Object.assign(waterTest.status, {
+            test_id: 'v3-test', active: true, phase: 'controller', controller_run: 1,
+            controller_run_count: 2, controller_algorithm: 'predictive_coast', controller_target_c: 20,
+            controller_completion_policy: 'fixed_duration_v1', controller_elapsed_s: 3540,
+            controller_duration_s: 10800, controller_remaining_s: 7260,
+            controller_observations: { completed, goal: 3, rate_qualified: completed, time_limited: 0,
+                rate_unqualified: 0, interrupted: 1 },
+        });
+        const html = await render();
+        expect(html).toContain('Run time: 59m 00s of 3h 0m 00s · target 68.00 °F');
+        expect(html).toContain(`Completed controller observations: ${completed} · coverage goal: 3`);
+        expect(html).toContain('1 interrupted');
+        expect(html).toContain('temperature-control quality is evaluated separately.');
+        expect(html).not.toContain('Settled cooling episodes');
+        expect(html).not.toContain('waiting for natural warming');
+    });
+
+    it('uses the reported duration when reading an older fixed-duration plan', async () => {
+        Object.assign(waterTest.status, {
+            test_id: 'v3-two-hour-test', active: true, phase: 'controller', controller_run: 1,
+            controller_run_count: 2, controller_algorithm: 'predictive_coast', controller_target_c: 20,
+            controller_completion_policy: 'fixed_duration_v1', controller_elapsed_s: 3540,
+            controller_duration_s: 7200, controller_remaining_s: 3660,
+            controller_observations: { completed: 1, goal: 3 },
+        });
+        const html = await render();
+        expect(html).toContain('Run time: 59m 00s of 2h 0m 00s');
+        expect(html).not.toContain('Scheduled duration: three hours.');
+    });
+
+    it('shows the current plan transition and its separate time allowance', async () => {
+        Object.assign(waterTest.status, {
+            test_id: 'dual-test', active: true, phase: 'controller_transition', controller_run: 1,
+            controller_run_count: 2, controller_algorithm: 'pulse_dose', controller_target_c: 20,
+            controller_completion_policy: 'fixed_duration_v1', controller_elapsed_s: 10800,
+            controller_duration_s: 10800, controller_remaining_s: 1200,
+            controller_observations: { completed: 2, goal: 3 },
+        });
+        const html = await render();
+        expect(html).toContain('Pump off: waiting for cooling to settle before the second algorithm');
+        expect(html).toContain('Controller run 1 of 2: Pulse-dose');
+        expect(html).toContain('Time remaining to observe recovery: 20m 00s');
+        expect(html).not.toContain('waiting for natural warming');
+        expect(html).not.toContain('Time remaining for this algorithm');
+    });
+
+    it('shows final OFF recording without extending the algorithm countdown', async () => {
+        Object.assign(waterTest.status, {
+            test_id: 'dual-test', active: true, phase: 'controller_final_observe', controller_run: 2,
+            controller_run_count: 2, controller_algorithm: 'pulse_dose', controller_target_c: 20,
+            controller_completion_policy: 'fixed_duration_v1', controller_elapsed_s: 10800,
+            controller_duration_s: 10800, controller_remaining_s: 160,
+            controller_observations: { completed: 1, goal: 3 },
+            controller_final_observation_remaining_s: 70,
+            controller_final_observation_valid_samples: 4, controller_final_observation_required_samples: 6,
+        });
+        const html = await render();
+        expect(html).toContain('Pump off: saving final temperature readings');
+        expect(html).toContain('Final recording: at least 1m 10s remaining · 4 of 6 fresh readings required');
+        expect(html).toContain('The algorithm has stopped and the pump stays off.');
+        expect(html).not.toContain('waiting for natural warming');
+        expect(html).not.toContain('Time remaining for this algorithm');
+    });
+
+    it('keeps legacy controller status readable without inventing a run number', async () => {
+        Object.assign(waterTest.status, { test_id: 'old-test', active: true, phase: 'controller' });
+        const html = await render();
+        expect(html).toContain('Testing a cooling algorithm');
+        expect(html).not.toContain('Controller run');
+    });
+
+    it.each([
+        ['controller_transition_timeout', 'The second run was skipped; the first run is saved.'],
+        ['controller_headroom', 'Recorded measurements are saved.'],
+        ['controller_final_observation_timeout', 'The controller results and available readings are saved.'],
+    ])('explains %s while preserving the result link', async (reason, message) => {
+        Object.assign(waterTest.status, {
+            test_id: 'dual-test', active: false, phase: 'finished', outcome: 'inconclusive', reason,
+            upload_status: 'pending', control_owned: true,
+        });
+        const html = await render();
+        expect(html).toContain(message);
+        expect(html).toContain(`href="${fixture.result_url}"`);
     });
 
     it('keeps the survey visible but disabled for other preflight restrictions', async () => {

@@ -21,7 +21,7 @@ def main():
         raise SystemExit("Build a firmware target first to install ArduinoJson.")
     allowed = {f'#include "{name}"' for name in (
         "WaterTest.h", "WaterTestCore.h", "WaterTestProtocol.h", "WaterTestStorage.h",
-        "WaterTestTransport.h", "WaterTestControllerSnapshot.h")}
+        "WaterTestTransport.h", "WaterTestUpload.h", "WaterTestControllerSnapshot.h")}
     source = "\n".join(
         line for name in ("WaterTestStorage.cpp", "WaterTestTransport.cpp", "WaterTest.cpp")
         for line in (ROOT / "src" / name).read_text().splitlines()
@@ -51,6 +51,7 @@ void *allocate(std::size_t size) {
         binary = build / "test"
         subprocess.run([
             os.environ.get("CXX", "c++"), "-std=c++17", "-Wall", "-Wextra", "-Werror",
+            "-DARDUINOJSON_SIZEOF_POINTER=4", "-DARDUINOJSON_POOL_CAPACITY=64",
             "-I" + str(ROOT / "src"), "-I" + str(ROOT / "tests/water_test_backend"),
             "-I" + str(headers),
             "-DCOOLING_IMPLEMENTATION_ID=" + json.dumps(controller_identity(ROOT)), str(cpp),

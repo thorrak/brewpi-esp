@@ -4,6 +4,9 @@
 #include <ArduinoJson.h>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <cerrno>
 
 // JSON numbers are convenient for readers, but ArduinoJson rounds doubles when
 // writing them. The parallel 17-digit strings preserve binary64 values through
@@ -19,6 +22,49 @@ inline void number(JsonObject values, JsonObject exact, const char *key, double 
   snprintf(decimal, sizeof(decimal), "%.17g", value);
   values[key] = value;
   exact[key] = decimal;
+}
+// Reloading a rounded JSON number can select ArduinoJson's float32 storage;
+// serializing that float again loses more digits. Restore the exact double in
+// memory before assembling a new document, without rewriting durable payloads.
+inline bool restoreNumber(JsonVariant value, JsonVariantConst exact) {
+  if (value.isNull() && exact.isNull())
+    return true;
+  if (!value.is<double>() || !exact.is<const char *>())
+    return false;
+  const char *decimal = exact.as<const char *>();
+  const size_t length = std::strlen(decimal);
+  if (!length || length >= 32)
+    return false;
+  // Our encoding is a decimal %.17g string. strtod alone also accepts whitespace,
+  // hexadecimal numbers and nonfinite values, which are not this encoding.
+  for (size_t n = 0; n < length; ++n)
+    if ((decimal[n] < '0' || decimal[n] > '9') && decimal[n] != '.' && decimal[n] != '-' &&
+        decimal[n] != '+' && decimal[n] != 'e' && decimal[n] != 'E')
+      return false;
+  char *end = nullptr;
+  errno = 0;
+  const double restored = std::strtod(decimal, &end);
+  if (end != decimal + length || !std::isfinite(restored) || errno == ERANGE)
+    return false;
+  return value.set(restored);
+}
+inline bool restoreNumbers(JsonVariant values, JsonVariantConst exact) {
+  if (values.isNull() && exact.isNull())
+    return true;
+  if (!values.is<JsonObject>() || !exact.is<JsonObjectConst>())
+    return false;
+  for (JsonPairConst field : exact.as<JsonObjectConst>())
+    if (!restoreNumber(values[field.key()], field.value()))
+      return false;
+  return true;
+}
+inline bool restoreExactNumbers(JsonObject snapshot) {
+  if (snapshot["numeric_encoding"] != "binary64-decimal-v1")
+    return false;
+  return restoreNumbers(snapshot["configuration"], snapshot["configuration_exact"]) &&
+         restoreNumbers(snapshot["initial_tuning"], snapshot["initial_tuning_exact"]) &&
+         restoreNumbers(snapshot["final_tuning"], snapshot["final_tuning_exact"]) &&
+         restoreNumber(snapshot["target_c"], snapshot["target_c_exact"]);
 }
 template <typename Configuration> struct Field {
   const char *name;

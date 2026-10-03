@@ -25,6 +25,7 @@ struct Output {
     double pulse_budget_s;
     double predicted_endpoint_c;
     double actual_on_s;
+    Observation observation;
 };
 
 struct Tuning {

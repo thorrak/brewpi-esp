@@ -18,10 +18,10 @@ export const useTempControlStore = defineStore("TempControlStore", () => {
     const controlState = ref(0);
     const setModeError = ref(false);
 
-    async function getTempInfo() {
+    async function getTempInfo({ signal } = {}) {
         try {
             const remote_api = mande("/api/all_temp_control/", genCSRFOptions());
-            const response = await remote_api.get();
+            const response = await remote_api.get({ signal });
             if (response && response.cc) {
                 hasTempInfo.value = true;
                 tempInfoError.value = false;
@@ -66,7 +66,7 @@ export const useTempControlStore = defineStore("TempControlStore", () => {
                 newMode: new_mode,  // Char (String)
                 setPoint: new_setpoint,  // Double
             });
-            if (response && response.status) {
+            if (response && response.status === 'ok') {
                 setModeError.value = false;
             } else {
                 await clearTempInfo();

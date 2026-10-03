@@ -35,6 +35,7 @@ def main():
     if headers is None:
         raise SystemExit("Build a firmware target first to install ArduinoJson.")
     main_source = (ROOT / "src/main.cpp").read_text()
+    http_source = (ROOT / "src/http_server.cpp").read_text()
     loop_body = function(main_source, "void brewpiLoop()")
     assert loop_body.index("WaterTest::startBackgroundServices();") < loop_body.index("WaterTest::tick();")
     assert loop_body.index("ow_scanner.retry_if_stopped(oneWirePin);") < loop_body.index("WaterTest::startBackgroundServices();")
@@ -49,7 +50,8 @@ def main():
         function(main_source, "void loop()"),
         function(main_source, "static void runControlLoop(void*)"),
         function(main_source, 'extern "C" void app_main(void)'),
-        function((ROOT / "src/http_server.cpp").read_text(), "void health(JsonDocument &doc)"),
+        function(http_source, "namespace {"),
+        function(http_source, "void health(JsonDocument &doc)"),
     ])
     with tempfile.TemporaryDirectory(prefix="brewpi-startup-health-") as temp:
         build = Path(temp)

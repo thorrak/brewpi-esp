@@ -1,10 +1,11 @@
 # Predictive glycol cooling
 
-Predictive coast is now one of two selectable cooling algorithms on this branch
-and remains the default for existing installations. See
-[Selecting the glycol cooling algorithm](GLYCOL_COOLING_SELECTION.md) for the
-saved setting, safe switching, and current firmware revision. Both original
-controller cores retain the behavior verified below.
+Predictive coast is the default of the two selectable cooling algorithms. See
+[Selecting the glycol cooling algorithm](GLYCOL_COOLING_SELECTION.md) for current
+settings, switching and diagnostics. This document records the original port
+and its reference validation. The current cores also require a mature rate
+window and report controller observations; those changes are covered by
+[the native regression suite](../tests/README.md).
 
 `predictive-glycol-cooling` starts from `codex/adaptive-glycol-cooling` at
 `f2f72322e166963199fd8ae257a6746faab941ab` and replaces its active glycol cooling
@@ -128,7 +129,7 @@ pio run -e esp32_wifi_iic
 Portable and integration checks:
 
 ```sh
-c++ -std=c++11 -O2 -Wall -Wextra -Werror -fno-fast-math -ffp-contract=off \
+c++ -std=c++17 -O2 -Wall -Wextra -Werror -fno-fast-math -ffp-contract=off \
   -Isrc src/PredictiveCoastController.cpp \
   tests/predictive_coast_core/core_test.cpp -o /tmp/predictive-coast-core-test
 /tmp/predictive-coast-core-test
@@ -137,7 +138,8 @@ python3 tests/predictive_coast_integration/run.py
 
 Independent reference replay is documented in
 [`tests/predictive_coast_parity/README.md`](../tests/predictive_coast_parity/README.md).
-It compares C++ against the frozen Python candidate on all 21 saved 12-hour
+Use the archived original-port sources for this comparison against the frozen
+Python candidate on all 21 saved 12-hour
 predictive traces, both at the original Celsius inputs and with BrewPi's
 Fahrenheit/Q9 setpoint encoding. The frozen Python source SHA-256 is
 `001d61e81b6ccdc8268b8dbff01896454876699a602ffbdcb1b8fdeaac7d9988`.

@@ -40,6 +40,8 @@ bool Controller::validate(const Config& c) {
 }
 
 void Controller::reset() {
+    observation_ = {};
+    observation_open_ = false;
     estimates_frozen_ = false;
     pump_on_ = false;
     restart_required_ = false;
@@ -107,8 +109,15 @@ bool Controller::switchPump(double time_s, bool desired, bool fail_off) {
 Output Controller::emit(Phase phase, double endpoint) {
     output_ = {phase, pump_on_, pump_on_ && !std::isfinite(pulse_budget_s_),
         temperature_c_, rate_c_per_s_, setpoint_c_, learning_updates_, gain_,
-        pulse_budget_s_, endpoint, actual_on_s_};
+        pulse_budget_s_, endpoint, actual_on_s_, observation_};
     return output_;
+}
+
+void Controller::closeObservation(double t, GlycolCooling::ObservationReason reason) {
+    if (!observation_open_) return;
+    observation_ = {observation_.sequence + 1, reason, start_s_,
+        phase_ == Phase::Coast ? off_s_ : t, t, measurements_.rateQualified()};
+    observation_open_ = false;
 }
 
 Output Controller::inhibit(double time_s) {
@@ -118,6 +127,7 @@ Output Controller::inhibit(double time_s) {
         time_s = std::isfinite(last_time_s_) ? last_time_s_ : 0.0;
     }
     last_time_s_ = time_s;
+    closeObservation(time_s, GlycolCooling::ObservationReason::Interrupted);
     switchPump(time_s, false, true);
     clearMeasurements();
     resetTransient();
@@ -136,6 +146,7 @@ Output Controller::step(double time_s, double sensor_c, double setpoint_c,
     if (time_s == last_time_s_) return output_;
     last_time_s_ = time_s;
     if (!std::isfinite(setpoint_c_) || std::abs(setpoint_c - setpoint_c_) > 1e-9) {
+        closeObservation(time_s, GlycolCooling::ObservationReason::Interrupted);
         resetTransient();
         setpoint_c_ = setpoint_c;
         restart_required_ = pump_on_;
@@ -158,6 +169,10 @@ Output Controller::control(double t) {
         const double coast_age = t - off_s_;
         const bool settled = std::abs(rate_c_per_s_) <= cfg.settled_rate_c_per_s;
         if (coast_age >= cfg.max_observe_coast_s || (coast_age >= cfg.observe_coast_s && settled)) {
+            closeObservation(t, coast_age >= cfg.max_observe_coast_s
+                ? GlycolCooling::ObservationReason::CoastTimeLimit
+                : measurements_.rateQualified() ? GlycolCooling::ObservationReason::RateCondition
+                                                : GlycolCooling::ObservationReason::RateUnqualified);
             const double drop = std::max(0.0, start_c_ - coast_min_c_);
             if (actual_on_s_ >= cfg.min_on_s && drop >= 0.03125) {
                 const double gain = std::min(cfg.maximum_gain_c_per_on_s,
@@ -179,6 +194,7 @@ Output Controller::control(double t) {
         pulse_budget_s_ = pulse >= cfg.saturation_dose_s
             ? infinity() : std::max(cfg.min_on_s, pulse);
         if (switchPump(t, true)) {
+            observation_open_ = true;
             phase_ = Phase::Cool;
             start_s_ = t;
             start_c_ = temperature_c_;

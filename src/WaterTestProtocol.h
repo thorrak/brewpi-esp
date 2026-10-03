@@ -4,6 +4,7 @@
 #include <string>
 #include <cstring>
 #include <cmath>
+#include <cstdio>
 
 // Shared by firmware and host contract tests. No network or hardware dependencies.
 namespace WaterTestProtocol {
@@ -61,6 +62,8 @@ inline void recordToJson(JsonObject out, const WaterTestCore::Record &r, const c
   case 4:
     out["type"] = "phase";
     out["phase"] = phaseName(static_cast<Phase>(r.code));
+    if (r.code == static_cast<uint8_t>(Phase::ControllerFinalObserve))
+      out["observation_started_us"] = r.read_us;
     out["pulse_number"] = r.pulse;
     out["planned_remaining_s"] = r.detail;
     out["block_id"] = r.raw;
@@ -72,6 +75,8 @@ inline void recordToJson(JsonObject out, const WaterTestCore::Record &r, const c
   case 7: {
     out["type"] = "controller";
     out["algorithm"] = r.code == 0 ? "predictive_coast" : "pulse_dose";
+    if (r.role)
+      out["controller_run"] = r.role;
     out["controller_phase"] = r.pulse;
     out["target_c"] = r.raw / 16.0;
     out["pump_on"] = bool(r.flags & 2);
@@ -87,6 +92,59 @@ inline void recordToJson(JsonObject out, const WaterTestCore::Record &r, const c
     number("cooling_rate_c_per_s", uint32_t(r.read_us));
     number("coast_s", uint32_t(r.read_us >> 32));
     number("gain_c_per_on_s", r.detail);
+    break;
+  }
+  case 8:
+    out["type"] = "controller_episode";
+    if (r.role) {
+      out["controller_run"] = r.role;
+      out["algorithm"] = r.detail == 0 ? "predictive_coast" : "pulse_dose";
+    }
+    out["episode"] = r.pulse;
+    out["stage"] = r.pulse == 1 ? "initial_approach" : "maintenance";
+    out["event"] = r.code == 0 ? "started" : "settled";
+    out["event_us"] = r.read_us;
+    break;
+  case 9: {
+    out["type"] = "controller_run";
+    out["run"] = r.role;
+    out["algorithm"] = r.code == 0 ? "predictive_coast" : "pulse_dose";
+    out["event"] = r.pulse == 0 ? "started" : "finished";
+    if ((r.flags & 128) && r.pulse == 1)
+      out["run_duration_complete"] = bool(r.flags & 1);
+    out["event_us"] = r.read_us;
+    out["start_c"] = r.raw / 16.0;
+    const uint64_t bits = uint64_t(r.conversion_us) | (uint64_t(r.detail) << 32);
+    double target;
+    static_assert(sizeof(target) == sizeof(bits), "Controller targets require 64-bit doubles");
+    memcpy(&target, &bits, sizeof(target));
+    if (std::isfinite(target)) {
+      char exact[32];
+      snprintf(exact, sizeof(exact), "%.17g", target);
+      out["target_c"] = target;
+      out["target_c_exact"] = std::string(exact);
+    } else {
+      out["target_c"] = nullptr;
+      out["target_c_exact"] = nullptr;
+    }
+    break;
+  }
+  case 10: {
+    out["type"] = "controller_observation";
+    out["controller_run"] = r.role;
+    out["algorithm"] = r.code == 0 ? "predictive_coast" : "pulse_dose";
+    out["observation"] = r.detail;
+    out["event"] = "finished";
+    out["event_us"] = r.read_us;
+    const char *reasons[] = {"unknown", "rate_condition", "coast_time_limit", "rate_unqualified", "interrupted"};
+    out["reason"] = r.pulse < 5 ? reasons[r.pulse] : "unknown";
+    out["rate_qualified"] = bool(r.flags & 1);
+    float coast;
+    memcpy(&coast, &r.conversion_us, sizeof(coast));
+    if (std::isfinite(coast) && coast >= 0)
+      out["coast_s"] = coast;
+    else
+      out["coast_s"] = nullptr;
     break;
   }
   default:

@@ -30,9 +30,7 @@ int main(int argc, char **argv) {
     if (dose)
       extendedSettings.glycolCoolingAlgorithm = GlycolCooling::Algorithm::PulseDose;
     start();
-    WaterTest::program.phase = Phase::Controller;
-    WaterTest::program.role = Role::Controller;
-    WaterTest::program.controllerStarted = Native::clock / 1e6;
+    WaterTest::program.startControllerRun(Native::clock / 1e6, 1);
     WaterTest::program.targetC = 19.75;
     WaterTest::program.deadline = Native::clock / 1e6 + controllerSeconds;
     if (scenario == "phase_failure") {
@@ -48,7 +46,7 @@ int main(int argc, char **argv) {
       assert(WaterTest::recordCount > previousRecords);
       assert(fs_exists(WaterTest::journalPath));
       assert(WaterTest::terminal["outcome"] == "failed");
-      assert(WaterTest::terminal["controller"]["initialized"] == false);
+      assert(WaterTest::terminal["controllers"][0]["initialized"] == false);
       assert(WaterTest::reason.find("Not enough free memory") != std::string::npos);
       JsonDocument saved;
       assert(WaterTest::loadDocument(WaterTest::finishPath, saved));
@@ -70,7 +68,7 @@ int main(int argc, char **argv) {
       assert(WaterTest::testController->restoreTuning(tuning));
       bool releasedBeforeFinishWrite = false;
       Native::fsyncHook = [&]() {
-        if (WaterTest::terminal["controller"]["initialized"] == true) {
+        if (WaterTest::terminal["controllers"][0]["initialized"] == true) {
           assert(!WaterTest::testController);
           releasedBeforeFinishWrite = true;
         }
@@ -79,9 +77,9 @@ int main(int argc, char **argv) {
       assert(WaterTest::requestStop(error));
       WaterTest::tick();
       assert(releasedBeforeFinishWrite && !WaterTest::testController);
-      assert(WaterTest::terminal["controller"]["initialized"] == true);
-      assert(WaterTest::terminal["controller"]["learning_status"] == "learned");
-      const auto exact = WaterTest::terminal["controller"]["final_tuning_exact"];
+      assert(WaterTest::terminal["controllers"][0]["initialized"] == true);
+      assert(WaterTest::terminal["controllers"][0]["learning_status"] == "learned");
+      const auto exact = WaterTest::terminal["controllers"][0]["final_tuning_exact"];
       if (dose)
         assertExact(exact["gain_c_per_on_s"], tuning.pulse_dose.gain_c_per_on_s);
       else {
@@ -92,5 +90,6 @@ int main(int argc, char **argv) {
       assert(!WaterTest::physicalPump() && !WaterTest::physicalHeat());
     }
   }
+  assert(!WaterTest::program.hasHistory());
   std::cout << scenario << " passed\n";
 }

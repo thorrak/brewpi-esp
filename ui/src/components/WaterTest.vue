@@ -27,6 +27,21 @@
           </button>
         </div>
         <p v-if="status.active" class="mt-3 text-sm text-gray-600">{{ t('water_test.active_help', { stop: `'${t('water_test.stop')}'` }) }}</p>
+        <div v-if="status.active && status.controller_run" class="mt-3 text-sm text-gray-700" aria-live="polite">
+          <p>{{ t('water_test.controller_run_progress', { run: status.controller_run, total: status.controller_run_count, algorithm: controllerAlgorithmLabel }) }}</p>
+          <template v-if="status.controller_completion_policy === 'fixed_duration_v1'">
+            <p>{{ t('water_test.controller_duration_progress', { elapsed: displayDuration(status.controller_elapsed_s), duration: displayDuration(status.controller_duration_s), target: displayTemperature(status.controller_target_c) }) }}</p>
+            <p>{{ t('water_test.controller_observation_progress', { completed: status.controller_observations?.completed || 0, goal: status.controller_observations?.goal || 3 }) }}</p>
+            <p>{{ t('water_test.controller_observation_detail', { rate: status.controller_observations?.rate_qualified || 0, limited: status.controller_observations?.time_limited || 0, unqualified: status.controller_observations?.rate_unqualified || 0, interrupted: status.controller_observations?.interrupted || 0 }) }}</p>
+            <p>{{ t('water_test.controller_quality_separate') }}</p>
+          </template>
+          <template v-else>
+            <p>{{ t('water_test.controller_episode_progress', { completed: status.controller_episodes_completed, total: status.controller_episodes_required, target: displayTemperature(status.controller_target_c) }) }}</p>
+            <p v-if="status.phase === 'controller' && status.controller_waiting_for_rewarming">{{ t('water_test.controller_waiting_for_rewarming') }}</p>
+          </template>
+          <p v-if="status.phase === 'controller_final_observe'">{{ t('water_test.controller_final_observation_progress', { duration: displayDuration(status.controller_final_observation_remaining_s), samples: status.controller_final_observation_valid_samples, required: status.controller_final_observation_required_samples }) }}</p>
+          <p v-else>{{ t(status.phase === 'controller_transition' ? 'water_test.controller_transition_remaining' : 'water_test.controller_run_remaining', { duration: displayDuration(status.controller_remaining_s) }) }}</p>
+        </div>
         <div class="mt-5 grid grid-cols-2 sm:grid-cols-4 gap-4">
           <div v-if="status.control_owned || status.active"><p class="metric-label">{{ t('water_test.beer_probe') }}</p><p class="metric">{{ displayTemperature(status.beer_c) }}</p></div>
           <div v-if="status.moved_chamber_probe && (status.control_owned || status.active)"><p class="metric-label">{{ t('water_test.glycol_bath') }}</p><p class="metric">{{ displayTemperature(status.glycol_c) }}</p></div>
@@ -164,6 +179,11 @@ watch(() => form.flowSource, () => {
 const resultLink = computed(() => resultsUrl(status.value?.device_guid, status.value?.result_url));
 
 const phaseLabel = computed(() => statusLabel('phases', status.value?.phase, (status.value?.phase || '').replaceAll('_', ' ')));
+const controllerAlgorithmLabel = computed(() => {
+  const algorithm = status.value?.controller_algorithm;
+  const key = `extended_settings.${algorithm}`;
+  return te(key, 'en') ? t(key) : algorithm || t('water_test.unavailable');
+});
 const outcomeTitle = computed(() => status.value?.active ? t('water_test.in_progress') : statusLabel('outcomes', status.value?.outcome, t('water_test.title')));
 const reasonLabel = computed(() => statusLabel('reasons', status.value?.reason));
 const waitingForTestCompletion = computed(() => status.value?.active && status.value?.upload_status === 'pending');

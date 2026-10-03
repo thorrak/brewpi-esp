@@ -1,8 +1,7 @@
 # Selecting the glycol cooling algorithm
 
-The `predictive-glycol-cooling` branch includes both simulator-tested cooling
-controllers in one firmware image. In **Controller Settings**, enable **Glycol
-Mode**, choose **Glycol cooling algorithm**, and save:
+The firmware includes both cooling controllers in one image. In **Controller
+Settings**, enable **Glycol Mode**, choose **Glycol cooling algorithm**, and save:
 
 | Choice | Saved value | Behavior |
 | --- | --- | --- |
@@ -65,7 +64,8 @@ Missing, malformed or unsupported-version tuning records use the initial default
 
 Pump state, incomplete observations, temperature samples and elapsed timers are
 not restored. Normal startup and relay timing guards still apply. A Chill Test
-does not train either cooling algorithm.
+runs both algorithms consecutively with fresh estimates for each test run. Learning
+within those test runs does not change either algorithm's saved brewing tuning.
 
 ## API and logging
 
@@ -117,10 +117,17 @@ both files. Manual output commands are not logged as automatic cooling cycles.
 
 `GlycolCoolingController` provides a common interface and shared switch timing
 around the `PredictiveCoastController` and `AdaptiveDoseController` policies.
-Both cores use `GlycolCoolingMeasurements.h` for bounded sample windows, smoothing and
-regression. The helper retains the frozen reference's arithmetic order, expiry
-rules, capacity limits and hourly rebasing. Policy, parameters and learned values
-remain separate. Only the active core processes temperature samples. `GlycolMode` retains heating
+Both cores use `GlycolCoolingMeasurements.h` for bounded sample windows, smoothing
+and regression. The helper retains the original reference's arithmetic order,
+expiry rules and hourly rebasing. Its rate estimate additionally requires a full
+startup window and sufficient retained time coverage, preventing a few quantized
+readings from producing a large predicted drop. Until those requirements are
+met, it uses zero rate. Observation telemetry separately reports whether the
+rate window has continuous tick coverage; a zero rate alone does not establish
+that the liquid has settled.
+
+Policy, parameters and learned values remain separate. Only the active core
+processes temperature samples. `GlycolMode` retains heating
 and heating/cooling coordination; `TempControl` retains hardware output and
 persistence responsibilities. `ChamberMode` and `ControlContext` are unchanged.
 
@@ -143,7 +150,7 @@ Algorithm equations and original frozen-reference verification are documented in
 Run the selector's portable C++ tests from the repository root:
 
 ```sh
-c++ -std=c++11 -O2 -Wall -Wextra -Werror -pedantic \
+c++ -std=c++17 -O2 -Wall -Wextra -Werror -pedantic \
   -fno-fast-math -ffp-contract=off -Isrc \
   tests/glycol_cooling_selector/core_test.cpp \
   src/GlycolCoolingController.cpp src/AdaptiveDoseController.cpp \
@@ -153,7 +160,7 @@ python3 tests/predictive_coast_integration/run.py
 python3 tests/cooling_selector_settings/run.py
 ```
 
-The selector tests compare 88,000 decisions against the original cores and cover
+The selector tests compare 88,000 decisions against the individual cores and cover
 switching, independent learning, faults, repeated requests, and differing relay
 minimums. The integration suite retains its historical directory name but now
 exercises both selections with real BrewPi temperature conversion, clock wrap,
@@ -165,7 +172,10 @@ The settings suite exercises actual persistence, HTTP, and Telnet methods.
 These two Python runners need ArduinoJson from a PlatformIO build, or an explicit
 `--arduinojson /path/to/ArduinoJson/src`.
 
+`python3 tests/run_native.py` also runs both core suites, shared rate-maturity
+regressions, and observation telemetry checks. These checks exercise the current
+implementation; the original frozen Python parity results do not cover the
+added rate-maturity guard.
+
 From `ui/`, run `npx jest --runInBand tests/stores/ExtendedSettingsStore.test.js`
-and `npm run build`. At this revision, the targeted suite passes all 21 tests;
-the full UI suite has three existing failures in unrelated sensor/upstream/control
-store tests, reproduced on the parent revision.
+and `npm run build`.

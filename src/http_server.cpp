@@ -35,6 +35,15 @@
 
 httpServer http_server;
 
+namespace {
+constexpr size_t httpClientLimit = 4;
+// Three HTTP-internal sockets plus room for telnet, TP-Link, uploads,
+// upstream traffic, provisioning and a replacement connection.
+constexpr size_t reservedSocketCount = 12;
+static_assert(CONFIG_LWIP_MAX_SOCKETS >= httpClientLimit + reservedSocketCount,
+              "HTTP clients must leave socket capacity for other network services.");
+}
+
 
 // ============================================================================
 // JSON helpers
@@ -97,6 +106,7 @@ static esp_err_t put_json_handler(httpd_req_t *req) {
     }
     JsonDocument doc;
     if (httpServer::parseJsonBody(req, doc) != ESP_OK) {
+        httpd_resp_set_status(req, "400 Bad Request");
         httpd_resp_set_type(req, "application/json");
         httpd_resp_send(req, "{\"status\":\"error\"}", HTTPD_RESP_USE_STRLEN);
         return ESP_OK;  // We handled it, just sent error
@@ -987,6 +997,16 @@ void health(JsonDocument &doc) {
         oneWire["last_read_age_ms"] = now >= scanner.lastSuccessfulReadUs ? (now - scanner.lastSuccessfulReadUs) / 1000 : 0;
     else
         oneWire["last_read_age_ms"] = nullptr;
+    auto network = doc["network"].to<JsonObject>();
+    network["socket_limit"] = CONFIG_LWIP_MAX_SOCKETS;
+    network["http_client_limit"] = httpClientLimit;
+    // This handler runs on the HTTP task, which owns the session list.
+    int clients[httpClientLimit];
+    size_t count = httpClientLimit;
+    if (httpd_get_client_list(http_server.getHandle(), &count, clients) == ESP_OK)
+        network["http_clients"] = count;
+    else
+        network["http_clients"] = nullptr;
 }
 
 
@@ -1212,7 +1232,15 @@ void httpServer::startServer() {
     config.max_uri_handlers = 64;
     config.max_resp_headers = 8;
     config.uri_match_fn = httpd_uri_match_wildcard;
-    config.max_open_sockets = 7;
+    // Budget four browser sessions plus HTTP's three internal sockets within
+    // CONFIG_LWIP_MAX_SOCKETS=16. Leave room for telnet, TP-Link UDP, uploads,
+    // upstream requests and provisioning. LRU must run before the global
+    // socket table fills; otherwise accept() fails before it can evict a client.
+    config.max_open_sockets = httpClientLimit;
+    config.keep_alive_enable = true;
+    config.keep_alive_idle = 60;
+    config.keep_alive_interval = 10;
+    config.keep_alive_count = 3;
     config.stack_size = 8192;
 
     esp_err_t ret = httpd_start(&server_handle, &config);

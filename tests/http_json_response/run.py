@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise the production JSON sender with bounded memory and HTTP failures."""
+"""Exercise production JSON response streaming and PUT acknowledgment semantics."""
 
 import os
 from pathlib import Path
@@ -8,6 +8,16 @@ import tempfile
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
+
+
+def production_function(source, signature):
+    start = source.index(signature)
+    brace = source.index("{", start)
+    depth, end = 1, brace + 1
+    while depth:
+        depth += (source[end] == "{") - (source[end] == "}")
+        end += 1
+    return source[start:end]
 
 
 def main():
@@ -24,7 +34,23 @@ def main():
             str(ROOT / "src/HttpJsonResponse.cpp"), str(HERE / "test.cpp"), "-o", str(binary),
         ], check=True)
         subprocess.run([str(binary)], check=True)
-    print("HTTP JSON response regressions passed.")
+
+        # Compile the actual parser and PUT template without the HTTP server's
+        # unrelated device, route-registration, and RTOS dependencies.
+        source = (ROOT / "src/http_server.cpp").read_text()
+        production = Path(temporary) / "production_put_handler.h"
+        production.write_text("\n".join(production_function(source, signature) for signature in (
+            "esp_err_t httpServer::parseJsonBody(",
+            "template<bool (*Handler)(const JsonDocument&, bool)>",
+        )))
+        put_binary = Path(temporary) / "put_test"
+        subprocess.run([
+            os.environ.get("CXX", "c++"), "-std=c++17", "-O2", "-Wall", "-Wextra",
+            "-Werror", "-pedantic", "-I", temporary, "-I", str(json_headers),
+            str(HERE / "put_handler_test.cpp"), "-o", str(put_binary),
+        ], check=True)
+        subprocess.run([str(put_binary)], check=True)
+    print("HTTP JSON response and PUT handler regressions passed.")
 
 
 if __name__ == "__main__":

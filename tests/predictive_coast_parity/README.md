@@ -1,5 +1,12 @@
 # Predictive controller parity verification
 
+These are historical reference checks for the original port. Run them against
+its archived firmware sources and matching saved traces. The current shared
+measurement code adds rate-window maturity and observation telemetry, so exact
+agreement with the original Python candidate is not its acceptance criterion.
+Use [the native suite](../README.md) for current firmware regressions and a
+matching implementation identity for current simulator comparisons.
+
 `adapter.cpp` exposes the portable `PredictiveCooling::Controller` through a small
 C ABI. It contains no controller decisions. The independent Python harness lives
 in the Chillsim repository and compiles this branch's actual C++ source.

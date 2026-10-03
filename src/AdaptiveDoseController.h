@@ -56,6 +56,7 @@ struct Output {
     double pulse_budget_s;
     double predicted_endpoint_c;
     double actual_on_s;
+    GlycolCooling::Observation observation;
 };
 
 struct Tuning {
@@ -113,6 +114,8 @@ private:
     Phase phase_;
     double start_c_, start_s_, off_s_, pulse_budget_s_, actual_on_s_, coast_min_c_;
     Output output_;
+    GlycolCooling::Observation observation_;
+    bool observation_open_;
 
     static bool validate(const Config& config);
     void clearMeasurements();
@@ -121,6 +124,7 @@ private:
     bool switchPump(double time_s, bool desired, bool fail_off = false);
     Output emit(Phase phase, double predicted_endpoint_c);
     Output control(double time_s);
+    void closeObservation(double time_s, GlycolCooling::ObservationReason reason);
 };
 
 } // namespace AdaptiveCooling

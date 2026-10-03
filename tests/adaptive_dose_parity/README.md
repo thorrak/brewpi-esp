@@ -1,5 +1,12 @@
 # Independent adaptive dose parity checks
 
+These are historical reference checks for the original port. Run them against
+its archived firmware sources and matching saved traces. The current shared
+measurement code adds rate-window maturity and observation telemetry, so exact
+agreement with the original Python candidate is not its acceptance criterion.
+Use [the native suite](../README.md) for current firmware regressions and a
+matching implementation identity for current simulator comparisons.
+
 `adapter.cpp` exposes the unmodified `src/AdaptiveDoseController.cpp` policy to
 Python through a narrow C ABI. It contains no cooling decisions. The comparison
 implementation is the already frozen `AdaptiveDoseController` in the companion

@@ -6,16 +6,23 @@ After building a firmware target to install ArduinoJson, run:
 python3 tests/run_native.py
 ```
 
-This compiles and runs the portable cooling controllers, algorithm selection,
-settings and learned-tuning persistence, firmware integration, water-test program and protocol,
-storage and upload backend, metadata under tight memory limits, controller
-allocation failures, startup task failures and sensor retries, test cancellation on reboot, static HTTP serving,
-firmware serializer harness, and the controller source identity used by offline
-learning comparisons.
-It uses temporary files and simulated I/O; it does not contact a server or
-operate hardware. `CXX` can select another native C++ compiler.
+The suite covers the portable controllers and observation telemetry, selection
+and tuning persistence, Chill Test sequencing and recovery, bounded storage and
+uploading, memory allocation failures, startup health, HTTP/TCP lifecycles and
+the firmware serializer contract. Shared measurement regressions run through
+both controller core suites.
+
+Tests use temporary files, simulated I/O and loopback servers; they do not
+contact a controller or external service. `CXX` selects the compiler for the
+portable core checks and for individual runners that support it.
 
 The individual test directories document focused checks. Full receiver and
 Chillsim comparisons need their respective repositories; see
 `water_test_contract/README.md` and the controller parity directories. UI tests
 run separately from `ui/` using `npx jest --runInBand`.
+
+After flashing network changes, run the explicit read-only hardware check in
+[`http_connections/README.md`](http_connections/README.md). It exercises new
+request admission while older browser-style connections remain idle, verifies
+control-loop liveness, and closes its own connections even on failure. It refuses
+active water tests and pending uploads by default.

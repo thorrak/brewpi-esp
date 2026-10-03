@@ -1,4 +1,3 @@
-import { createTestingPinia } from '@pinia/testing';
 import { setActivePinia, createPinia } from 'pinia'
 import { useTempControlStore } from '@/stores/TempControlStore.js';
 import { mande } from 'mande';
@@ -10,6 +9,7 @@ jest.mock('mande');
 
 describe('TempControlStore', () => {
     beforeEach(() => {
+        jest.clearAllMocks();
         setActivePinia(createPinia());
     });
 
@@ -75,22 +75,56 @@ describe('TempControlStore', () => {
     });
 
     it('sets mode correctly', async () => {
-        const mockPut = jest.fn().mockResolvedValue({ message: "Mode updated" });
+        const fixtureData = JSON.parse(fs.readFileSync(path.resolve(__dirname, './fixtures/api.all_temp_control.json'), 'utf-8'));
+        fixtureData.cs.mode = 'f';
+        fixtureData.cs.fridgeSet = 10;
+        fixtureData.temp.FridgeSet = 10;
+        const mockPut = jest.fn().mockResolvedValue({ status: 'ok' });
+        const mockGet = jest.fn().mockResolvedValue(fixtureData);
         mande.mockImplementation(() => {
             return {
                 put: mockPut,
+                get: mockGet,
             };
         });
 
         const store = useTempControlStore();
+        store.setModeError = true;
 
         await store.setMode('f', 10);
 
         expect(store.setModeError).toBe(false);
+        expect(mockPut).toHaveBeenCalledTimes(1);
         expect(mockPut).toHaveBeenCalledWith({
-            mode: 'f',
+            newMode: 'f',
             setPoint: 10
         });
-        // Check other state properties here as needed
+        expect(mande.mock.calls.map(([url]) => url)).toEqual([
+            '/api/mode/', '/api/all_temp_control/',
+        ]);
+        expect(mockGet).toHaveBeenCalledTimes(1);
+        expect(store.hasTempInfo).toBe(true);
+        expect(store.tempInfoError).toBe(false);
+        expect(store.controlMode).toBe('f');
+        expect(store.cs.fridgeSet).toBe(10);
+        expect(store.tempInfo.FridgeSet).toBe(10);
+    });
+
+    it('rejects an error status and still refreshes the actual control mode', async () => {
+        const fixtureData = JSON.parse(fs.readFileSync(path.resolve(__dirname, './fixtures/api.all_temp_control.json'), 'utf-8'));
+        const mockPut = jest.fn().mockResolvedValue({ status: 'error' });
+        const mockGet = jest.fn().mockResolvedValue(fixtureData);
+        mande.mockReturnValue({ put: mockPut, get: mockGet });
+        const store = useTempControlStore();
+
+        await store.setMode('f', 10);
+
+        expect(store.setModeError).toBe(true);
+        expect(mockPut).toHaveBeenCalledWith({ newMode: 'f', setPoint: 10 });
+        expect(mockGet).toHaveBeenCalledTimes(1);
+        expect(store.hasTempInfo).toBe(true);
+        expect(store.tempInfoError).toBe(false);
+        expect(store.controlMode).toBe(fixtureData.cs.mode);
+        expect(store.cs.fridgeSet).toBe(fixtureData.cs.fridgeSet);
     });
 });

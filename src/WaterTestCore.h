@@ -6,25 +6,41 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <memory>
 #include <new>
+#include <utility>
 
 // Platform-independent sequencing and journal primitives. Time is monotonic seconds;
 // adaptive decisions use fresh raw readings, and no network work runs here.
 namespace WaterTestCore {
 constexpr uint32_t baselineSeconds = 300; // upper bound, not a required wait
-constexpr uint32_t minimumBaselineSeconds = 60;
+constexpr uint32_t minimumBaselineSeconds = 180;
+constexpr uint32_t baselineWindowSeconds = 180;
+constexpr uint32_t driftCorrectionSeconds = 300;
 constexpr uint32_t observationSeconds = 21600;
 constexpr uint32_t maximumSeconds = 43200;
 constexpr uint32_t maximumPulseSeconds = 1800;
 constexpr uint32_t maximumPumpSeconds = 7200;
-constexpr uint32_t controllerSeconds = 3600;
+constexpr uint32_t controllerSeconds = 10800;
+constexpr unsigned controllerRunCount = 2;
+constexpr uint32_t controllerTransitionSeconds = 1800;
+constexpr uint32_t controllerFinalObservationSeconds = 90;
+constexpr uint32_t controllerFinalObservationMaxSeconds = 180;
+constexpr unsigned controllerFinalObservationRequiredSamples = 6;
+constexpr unsigned controllerObservationGoal = 3;
+constexpr double controllerTargetDropC = 5.0 / 9.0; // A temperature difference of 1 degree F.
+constexpr double controllerHeadroomMarginC = .25;
 constexpr unsigned historyCapacity = 2048;
 constexpr double coolingTailRateTolerance = .000005;
 constexpr double freshnessSeconds = OneWireSensorPolicy::connectedTimeoutUs / 1e6;
-constexpr double maximumDropC = 3;
+constexpr double diagnosticMaximumDropC = 3;
+constexpr double maximumDropC = diagnosticMaximumDropC + controllerTargetDropC;
 constexpr double minimumWaterC = 4;
 // Append values: existing journal enum IDs must remain readable.
-enum class Phase : uint8_t { Idle, Baseline, Pulse, Observe, Stopping, Finished, Controller };
+enum class Phase : uint8_t {
+  Idle, Baseline, Pulse, Observe, Stopping, Finished, Controller, ControllerTransition, ControllerFinalObserve
+};
 enum class End : uint8_t { None, Completed, Stopped, Inconclusive, Failed };
 enum class Reason : uint8_t {
   None,
@@ -44,11 +60,17 @@ enum class Reason : uint8_t {
   RelayLimit,
   PumpBudget,
   UnexpectedOutput,
-  PulseLimit
+  PulseLimit,
+  ObservationTimeout,
+  ControllerTransitionTimeout,
+  ControllerHeadroom,
+  ControllerFinalObservationTimeout,
+  ControllerDurationComplete
 };
 enum class Role : uint8_t { Baseline, Calibration, Validation, Controller, Complete };
 inline const char *phaseName(Phase p) {
-  const char *names[] = {"idle", "baseline", "pulse", "observe", "stopping", "finished", "controller"};
+  const char *names[] = {"idle", "baseline", "pulse", "observe", "stopping", "finished", "controller",
+                         "controller_transition", "controller_final_observe"};
   return names[static_cast<unsigned>(p)];
 }
 inline const char *roleName(Role r) {
@@ -77,39 +99,84 @@ inline const char *reasonName(Reason r) {
                          "relay_minimum_limit",
                          "pump_time_limit",
                          "unexpected_output",
-                         "pulse_time_limit"};
+                         "pulse_time_limit",
+                         "observation_timeout",
+                         "controller_transition_timeout",
+                         "controller_headroom",
+                         "controller_final_observation_timeout",
+                         "duration_complete"};
   return names[static_cast<unsigned>(r)];
 }
 struct Program {
+  Program() = default;
+  Program(const Program &) = delete;
+  Program &operator=(const Program &) = delete;
+  Program(Program &&) noexcept = default;
+  Program &operator=(Program &&) noexcept = default;
   Phase phase = Phase::Idle;
   Role role = Role::Baseline;
   End outcome = End::None;
   Reason reason = Reason::None;
   double started = 0, deadline = 0, switched = 0, pulseStarted = 0;
   double initialC = 0, latestC = 0, lastSample = 0, beforePulseC = 0, minimumC = 0;
-  double totalPump = 0, noiseC = .03125, baselineDrift = 0;
+  double totalPump = 0, noiseC = .03125, baselineDrift = 0, baselineDriftUncertainty = 0;
   double lastPulseSeconds = 0, usefulPulseSeconds = 0, peakResponse = 0;
   double responseOnset = -1, observedDelay = 0, usefulResponseDrop = 0, observedCoast = 0;
-  double targetC = 0, controllerStarted = 0, stableSince = -1, lastDecision = -1;
+  double targetC = 0, controllerStarted = 0, lastDecision = -1;
+  double controllerRunStartC = 0, controllerRunDeadline = 0, controllerRunEnded = 0, controllerRunPumpStart = 0;
+  double controllerFinalObservationStarted = 0, controllerFinalObservationEnded = 0,
+         controllerFinalObservationLastRead = 0;
   uint32_t minimumOn = 2, minimumOff = 2;
   unsigned pulse = 0, completedPulses = 0, block = 0, escalation = 0;
   unsigned calibrationPulses = 0, validationPulses = 0, controllerCycles = 0;
+  unsigned controllerRun = 0;
+  unsigned controllerFinalObservationSamples = 0;
   bool pump = false, stopping = false, contrastStarted = false, responseSettled = false;
-  bool usefulResponse = false, nextPulsePending = false, controllerTimedOut = false;
+  bool usefulResponse = false, nextPulsePending = false;
+  bool controllerTransitionReady = false, controllerRunDurationComplete = false;
+  bool controllerFinalOffConfirmed = false, controllerFinalObservationCompleted = false;
   struct Reading {
     float elapsed = 0, c = 0;
   };
-  Reading readings[historyCapacity]{};
+  struct History {
+    Reading readings[historyCapacity]{};
+  };
+  struct HistoryDeleter {
+    void operator()(History *history) const {
+      if (history) {
+        history->~History();
+        std::free(history);
+      }
+    }
+  };
+  std::unique_ptr<History, HistoryDeleter> history;
   unsigned head = 0, count = 0;
+  bool hasHistory() const { return bool(history); }
+  bool allocateHistory() {
+    if (history)
+      return true;
+    void *storage = std::malloc(sizeof(History));
+    if (!storage)
+      return false;
+    history.reset(new (storage) History);
+    head = count = 0;
+    return true;
+  }
+  void releaseHistory() {
+    history.reset();
+    head = count = 0;
+  }
   struct Stats {
     unsigned n = 0;
-    double span = 0, mean = 0, slope = 0, noise = 0;
+    double span = 0, mean = 0, slope = 0, noise = 0, slopeUncertainty = 0;
   };
   Stats stats(double begin, double end) const {
     Stats r;
+    if (!history)
+      return r;
     double sx = 0, sy = 0, sxx = 0, sxy = 0, syy = 0, first = end, last = begin;
     for (unsigned i = 0; i < count; ++i) {
-      const auto &v = readings[i];
+      const auto &v = history->readings[i];
       const double time = started + v.elapsed;
       if (time < begin || time > end)
         continue;
@@ -130,9 +197,16 @@ struct Program {
     const double xx = sxx - sx * sx / r.n, xy = sxy - sx * sy / r.n;
     r.slope = xx > 0 ? xy / xx : 0;
     r.noise = std::sqrt(std::max(0., (syy - sy * sy / r.n - r.slope * xy) / (r.n - 2)));
+    // A trend smaller than one probe step across the window is not resolved,
+    // even when repeated identical readings make the fitted noise very small.
+    if (xx > 0 && r.span > 0)
+      r.slopeUncertainty = std::max(3 * r.noise / std::sqrt(xx), .0625 / r.span);
     return r;
   }
   void remember(double read, double c) {
+    if (!history)
+      return;
+    auto &readings = history->readings;
     // Bound memory by the acquisition cadence, even if a host calls sample at 1 Hz.
     const double elapsed = read - started;
     if (count && elapsed - readings[(head + historyCapacity - 1) % historyCapacity].elapsed < 1.9)
@@ -145,14 +219,20 @@ struct Program {
   bool active() const { return phase != Phase::Idle && phase != Phase::Finished; }
   bool submissionEligible() const { return phase == Phase::Finished && outcome != End::None; }
   double usefulThreshold() const { return std::max(.20, 4 * noiseC); }
+  bool responseEstimateCurrent(double read) const {
+    return baselineDrift + baselineDriftUncertainty >= -coolingTailRateTolerance ||
+           read - pulseStarted <= driftCorrectionSeconds;
+  }
   bool start(double now, double beerC, uint32_t on, uint32_t off) {
-    // Reset in place: the history is larger than the MCU task stack.
-    this->~Program();
-    new (this) Program;
-    minimumOn = std::max<uint32_t>(2U, on);
-    minimumOff = std::max<uint32_t>(2U, off);
-    if (!std::isfinite(beerC) || minimumOn > maximumPulseSeconds || minimumOff > observationSeconds)
+    on = std::max<uint32_t>(2U, on);
+    off = std::max<uint32_t>(2U, off);
+    if (!std::isfinite(beerC) || on > maximumPulseSeconds || off > observationSeconds || !allocateHistory())
       return false;
+    auto retainedHistory = std::move(history);
+    *this = Program{};
+    history = std::move(retainedHistory);
+    minimumOn = on;
+    minimumOff = off;
     phase = Phase::Baseline;
     started = switched = lastSample = now;
     initialC = latestC = beforePulseC = minimumC = beerC;
@@ -170,6 +250,10 @@ struct Program {
     switched = now;
   }
   void finish(double now, End e, Reason r) {
+    if ((phase == Phase::Controller || phase == Phase::Stopping) && controllerRun && !controllerRunEnded)
+      controllerRunEnded = now;
+    if (controllerFinalObservationStarted && !controllerFinalObservationEnded)
+      controllerFinalObservationEnded = now;
     endPulse(now);
     switched = now;
     phase = Phase::Finished;
@@ -202,14 +286,27 @@ struct Program {
         finish(now, End::Failed, Reason::SensorStale);
       return;
     }
-    if (read > lastSample)
+    if (read > lastSample) {
       remember(read, beerC);
+      if (phase == Phase::ControllerFinalObserve && controllerFinalOffConfirmed && !pump &&
+          read > controllerFinalObservationStarted) {
+        ++controllerFinalObservationSamples;
+        controllerFinalObservationLastRead = read;
+      }
+    }
     latestC = beerC;
     lastSample = read;
     minimumC = std::min(minimumC, beerC);
-    if (role == Role::Calibration || role == Role::Validation) {
-      // Remove measured pump-off drift from the excitation decision only.
-      peakResponse = std::max(peakResponse, beforePulseC + baselineDrift * (read - pulseStarted) - beerC);
+    if ((role == Role::Calibration || role == Role::Validation) && pulse && !nextPulsePending) {
+      const double elapsed = read - pulseStarted;
+      const bool backgroundCooling = baselineDrift + baselineDriftUncertainty < -coolingTailRateTolerance;
+      // Only measured temperature drops earn response credit. Discount a
+      // resolved background cooling trend while its estimate is recent; after
+      // it expires, further cooling cannot be attributed to this pulse.
+      if (responseEstimateCurrent(read)) {
+        const double correction = backgroundCooling ? (baselineDrift - baselineDriftUncertainty) * elapsed : 0;
+        peakResponse = std::max(peakResponse, beforePulseC - beerC + correction);
+      }
       if (responseOnset < 0 && peakResponse >= std::max(.125, 3 * noiseC)) {
         responseOnset = std::max(0., read - pulseStarted);
         observedDelay = std::max(observedDelay, responseOnset);
@@ -221,38 +318,56 @@ struct Program {
   bool baselineReady(double now) {
     if (now - started < minimumBaselineSeconds)
       return false;
-    const auto whole = stats(now - 60, now), a = stats(now - 60, now - 30), b = stats(now - 30, now);
-    if (whole.n < 20 || whole.span < 55)
+    const double window = baselineWindowSeconds;
+    const auto whole = stats(now - window, now), a = stats(now - window, now - window / 2),
+               b = stats(now - window / 2, now);
+    if (whole.n < 60 || whole.span < window - 5)
       return false;
-    const bool consistent = a.n >= 8 && b.n >= 8 && std::abs(a.slope - b.slope) <= .0015 && whole.noise <= .10;
+    const bool consistent = a.n >= 20 && b.n >= 20 && a.span >= window / 2 - 5 && b.span >= window / 2 - 5 &&
+                            std::abs(a.slope - b.slope) <= a.slopeUncertainty + b.slopeUncertainty && whole.noise <= .10;
     if (!consistent && now < deadline)
       return false;
     baselineDrift = whole.slope;
+    baselineDriftUncertainty = whole.slopeUncertainty;
     noiseC = std::max(.03125, whole.noise);
     return true;
+  }
+  void refreshBaseline(double now) {
+    const auto recent = stats(now - baselineWindowSeconds, now);
+    if (recent.n < 60 || recent.span < baselineWindowSeconds - 5)
+      return;
+    baselineDrift = recent.slope;
+    baselineDriftUncertainty = recent.slopeUncertainty;
+    noiseC = std::max(.03125, recent.noise);
   }
   bool settled(double now) const {
     // A flat trace before any detected response never proves that cooling is finished.
     const double window = std::max(90., std::min(1800., observedDelay));
-    if (now - switched < std::max({2 * window, 2 * observedDelay, double(minimumOff)}) ||
-        peakResponse < std::max(.125, 3 * noiseC))
+    if (now - switched < std::max({2 * window, 2 * observedDelay, observedCoast, double(minimumOff)}) ||
+        responseOnset < 0)
       return false;
-    const auto a = stats(now - 2 * window, now - window), b = stats(now - window, now);
+    return recoveredWindows(now, window);
+  }
+  bool recoveredWindows(double now, double window) const {
+    const auto a = stats(now - 2 * window, now - window), b = stats(now - window, now),
+               whole = stats(now - 2 * window, now);
     if (a.n < 20 || b.n < 20 || a.span < window - 5 || b.span < window - 5)
       return false;
-    // A small steady cooling rate can still hide a large slow tail. Use a
-    // tighter cooling threshold while allowing weak background warming.
-    const auto nearBaseline = [&](double rate) {
-      return rate - baselineDrift >= -coolingTailRateTolerance && rate - baselineDrift <= .0001;
-    };
-    return nearBaseline(a.slope) && nearBaseline(b.slope) &&
-           std::abs(b.mean - a.mean - baselineDrift * window) <= std::max(.0625, 2 * noiseC);
+    // Check the combined trend too: a downward probe step between two flat
+    // windows is still cooling. Steady warming is a valid observed recovery.
+    const auto recovered = [](double rate) { return rate >= -coolingTailRateTolerance; };
+    const double tolerance = std::max(.0625, 2 * noiseC);
+    const double warming = std::max(0., (a.slope + b.slope) / 2);
+    return recovered(a.slope) && recovered(b.slope) && recovered(whole.slope) &&
+           std::abs(a.slope - b.slope) * window <= tolerance &&
+           std::abs(b.mean - a.mean - warming * window) <= tolerance;
   }
   uint32_t choosePulse() const {
     static const uint32_t candidates[] = {10, 30, 90, 270, 810, 1800};
     double selected = candidates[std::min(escalation, 5U)];
     if (role == Role::Validation || contrastStarted) {
-      const double remaining = std::max(0., latestC - std::max(minimumWaterC, initialC - maximumDropC));
+      // The second controller's extra reserve must not increase excitation.
+      const double remaining = std::max(0., latestC - std::max(minimumWaterC, initialC - diagnosticMaximumDropC));
       // Reserve cooling range for the contrast, paired check and controller.
       // This is an excitation budget, not a claim of identified physical gain.
       const double budget = .20 * remaining * usefulPulseSeconds / std::max(.125, usefulResponseDrop);
@@ -304,24 +419,106 @@ struct Program {
       }
       pump = true;
       switched = pulseStarted = now;
-      responseSettled = false;
     } else if (now - switched >= minimumOn) {
       endPulse(now);
       ++controllerCycles;
     }
   }
-  void beginController(double now) {
-    if (!usefulResponse || latestC - std::max(minimumWaterC, initialC - maximumDropC) < .5) {
-      finish(now, End::Completed, Reason::ProgramComplete);
-      return;
-    }
+  bool controllerHasHeadroom(unsigned remainingRuns) const {
+    return latestC - std::max(minimumWaterC, initialC - maximumDropC) >=
+           remainingRuns * (controllerTargetDropC + controllerHeadroomMarginC);
+  }
+  void startControllerRun(double now, unsigned run) {
+    // Called only at a guarded entry or after the wrapper has saved the prior
+    // run. History, diagnostic results, relay timings and pump budget survive.
+    controllerRun = run;
+    controllerRunStartC = latestC;
+    controllerRunEnded = 0;
+    controllerRunPumpStart = totalPump;
+    controllerRunDeadline = now + controllerSeconds;
+    controllerTransitionReady = false;
+    controllerRunDurationComplete = false;
+    controllerCycles = 0;
+    reason = Reason::Observation;
     role = Role::Controller;
     phase = Phase::Controller;
     ++block;
     controllerStarted = now;
-    deadline = now + controllerSeconds;
-    targetC = latestC - .25;
-    stableSince = -1;
+    deadline = controllerRunDeadline;
+    targetC = latestC - controllerTargetDropC;
+    responseSettled = false;
+    // Production observation telemetry belongs to the wrapper, not the sequencer.
+  }
+  void beginController(double now) {
+    if (!usefulResponse) {
+      finish(now, End::Inconclusive, Reason::NoResponse);
+      return;
+    }
+    // Keep useful first-run evidence when only one full challenge still fits.
+    // The additional reserve is protected by the diagnostic excitation budget;
+    // actual remaining headroom is checked again before the second run.
+    if (!controllerHasHeadroom(1)) {
+      finish(now, End::Inconclusive, Reason::ControllerHeadroom);
+      return;
+    }
+    startControllerRun(now, 1);
+  }
+  void endControllerRun(double now) {
+    if (pump)
+      ++controllerCycles; // The duration deadline can close an actual ON/OFF cycle.
+    endPulse(now);
+    controllerRunEnded = now;
+    controllerRunDurationComplete = now >= controllerRunDeadline;
+    if (controllerRun >= controllerRunCount) {
+      // End the algorithm now. Its immutable result is saved before this
+      // separate pump-OFF recording tail; it never adds controller observations.
+      phase = Phase::ControllerFinalObserve;
+      reason = controllerRunDurationComplete ? Reason::ControllerDurationComplete : Reason::Observation;
+      controllerFinalObservationStarted = now;
+      controllerFinalObservationEnded = controllerFinalObservationLastRead = 0;
+      controllerFinalObservationSamples = 0;
+      controllerFinalOffConfirmed = controllerFinalObservationCompleted = false;
+      deadline = now + controllerFinalObservationMaxSeconds;
+      return;
+    }
+    phase = Phase::ControllerTransition;
+    reason = controllerRunDurationComplete ? Reason::ControllerDurationComplete : Reason::Observation;
+    deadline = now + controllerTransitionSeconds;
+    controllerTransitionReady = false;
+  }
+  void confirmControllerFinalOff(double now) {
+    if (phase != Phase::ControllerFinalObserve || pump || controllerFinalOffConfirmed)
+      return;
+    // The hardware wrapper acknowledges the actual OFF application before any
+    // durable writes. Queued acquisitions from before it cannot qualify.
+    controllerFinalObservationStarted = std::max(controllerRunEnded, now);
+    deadline = controllerFinalObservationStarted + controllerFinalObservationMaxSeconds;
+    controllerFinalOffConfirmed = true;
+  }
+  bool controllerTransitionSettled(double now) const {
+    const double window = std::max(90., std::min(1800., observedDelay));
+    if (pump || now - controllerRunEnded < 2 * window ||
+        now - switched < std::max({180., observedCoast, 2 * observedDelay, double(minimumOff)}))
+      return false;
+    return recoveredWindows(now, window);
+  }
+  bool advanceController(double now) {
+    if (phase != Phase::ControllerTransition)
+      return false;
+    // The wrapper calls this only after durably checkpointing the ended run.
+    // Recheck fresh evidence and all global safety guards after that write.
+    tick(now);
+    if (phase != Phase::ControllerTransition)
+      return false;
+    controllerTransitionReady = controllerTransitionSettled(now);
+    if (!controllerTransitionReady)
+      return false;
+    if (!controllerHasHeadroom(controllerRunCount - controllerRun)) {
+      finish(now, End::Inconclusive, Reason::ControllerHeadroom);
+      return false;
+    }
+    startControllerRun(now, controllerRun + 1);
+    return true;
   }
   void tick(double now) {
     if (!active())
@@ -347,6 +544,23 @@ struct Program {
       finish(now, End::Stopped, Reason::PulseLimit);
       return;
     }
+    if (phase == Phase::Controller && now >= deadline) {
+      // Controller time limits are output deadlines, not throttled statistics.
+      endControllerRun(now);
+      return;
+    }
+    if (phase == Phase::ControllerFinalObserve) {
+      if (controllerFinalOffConfirmed && !pump &&
+          now - controllerFinalObservationStarted >= controllerFinalObservationSeconds &&
+          controllerFinalObservationLastRead - controllerFinalObservationStarted >= controllerFinalObservationSeconds &&
+          controllerFinalObservationSamples >= controllerFinalObservationRequiredSamples) {
+        controllerFinalObservationCompleted = true;
+        finish(now, End::Completed, Reason::ProgramComplete);
+      } else if (now >= deadline) {
+        finish(now, End::Inconclusive, Reason::ControllerFinalObservationTimeout);
+      }
+      return;
+    }
     if (phase == Phase::Pulse) {
       const bool enough = role == Role::Calibration && !contrastStarted && peakResponse >= usefulThreshold();
       if ((now >= deadline || enough) && now - switched >= minimumOn)
@@ -358,24 +572,17 @@ struct Program {
     if (lastDecision >= 0 && now - lastDecision < 1.)
       return;
     lastDecision = now;
-    if (phase == Phase::Controller) {
-      const auto recent = stats(now - 60, now);
-      if (!pump && controllerCycles && recent.span >= 55 && std::abs(latestC - targetC) <= .08 &&
-          std::abs(recent.slope) <= .0001) {
-        if (stableSince < 0)
-          stableSince = now;
-        if (now - stableSince >= 180 && now - switched >= std::max({180., observedCoast, 2 * observedDelay})) {
-          responseSettled = true;
-          finish(now, End::Completed, Reason::ProgramComplete);
-        }
-      } else
-        stableSince = -1;
-      if (active() && now >= deadline) {
-        controllerTimedOut = true;
-        finish(now, End::Completed, Reason::ProgramComplete);
-      }
+    if (phase == Phase::ControllerTransition) {
+      controllerTransitionReady = controllerTransitionSettled(now);
+      if (!controllerTransitionReady && now >= deadline)
+        finish(now, End::Inconclusive, Reason::ControllerTransitionTimeout);
       return;
     }
+    // Controller phases are fixed-duration experiments. Temperature quality and
+    // completed production observations are reported independently; neither can
+    // shorten a run or impose a diagnostic cooling-tail gate on normal control.
+    if (phase == Phase::Controller)
+      return;
     if (phase == Phase::Baseline) {
       if (!baselineReady(now))
         return;
@@ -396,24 +603,31 @@ struct Program {
         beginPulse(now);
       return;
     }
-    responseSettled = settled(now);
-    if (role == Role::Validation && now - switched < observedCoast)
-      responseSettled = false;
     const bool weakPilot = role == Role::Calibration && !contrastStarted && peakResponse < usefulThreshold();
     const auto recent = stats(now - 120, now);
-    const bool coolingArrived =
-        peakResponse >= std::max(.125, 3 * noiseC) ||
-        (peakResponse >= std::max(.0625, 2 * noiseC) && recent.span >= 110 && recent.slope < baselineDrift - .00005);
+    const bool coolingContinues = beforePulseC - latestC >= std::max(.0625, 2 * noiseC) && recent.span >= 110 &&
+                                  recent.slope < -coolingTailRateTolerance;
+    if (responseOnset < 0 && responseEstimateCurrent(lastSample) && coolingContinues &&
+        peakResponse >= std::max(.0625, 2 * noiseC)) {
+      responseOnset = std::max(0., lastSample - pulseStarted);
+      observedDelay = std::max(observedDelay, responseOnset);
+    }
+    const bool coolingArrived = responseOnset >= 0 || coolingContinues;
+    responseSettled = settled(now);
     const bool pilotWindow = weakPilot && !coolingArrived && now - switched >= std::max<uint32_t>(300U, minimumOff);
-    if (!responseSettled && now < deadline && !pilotWindow)
+    if (!responseSettled && now >= deadline) {
+      finish(now, End::Inconclusive, Reason::ObservationTimeout);
       return;
+    }
+    if (!responseSettled && !pilotWindow)
+      return;
+    if (responseSettled)
+      observedCoast = std::max(observedCoast, now - switched);
     if (role == Role::Validation) {
       beginController(now);
       return;
     }
     if (peakResponse >= usefulThreshold()) {
-      if (responseSettled)
-        observedCoast = std::max(observedCoast, now - switched);
       usefulResponse = true;
       if (!usefulPulseSeconds) {
         usefulPulseSeconds = lastPulseSeconds;
@@ -421,6 +635,8 @@ struct Program {
       }
     }
     if (contrastStarted) {
+      if (responseSettled)
+        refreshBaseline(now);
       role = Role::Validation;
       ++block;
       nextPulsePending = true;
@@ -435,6 +651,8 @@ struct Program {
       finish(now, End::Inconclusive, Reason::NoResponse);
       return;
     }
+    if (responseSettled)
+      refreshBaseline(now);
     beginPulse(now);
   }
 };
@@ -446,7 +664,7 @@ struct Record {
   uint32_t seq;
   uint32_t conversion_us; // sample read minus conversion start
   int16_t raw;
-  uint8_t kind; // 0 boot, 1 clock, 2 sample, 3 output, 4 phase, 5 fault, 6 gap, 7 controller
+  uint8_t kind; // 0 boot, 1 clock, 2 sample, 3 output, 4 phase, 5 fault, 6 gap, 7 controller, 8 controller_episode (legacy), 9 controller_run, 10 controller_observation
   uint8_t boot;
   uint8_t role;  // sample 0 beer/1 glycol, output 0 pump/1 heater
   uint8_t flags; // 1 valid, 2 pump, 4 requested, 8 edge

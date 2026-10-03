@@ -137,21 +137,39 @@ const navigation = computed(() => [
 const sidebarOpen = ref(false);
 const TempControlStore = useTempControlStore();  // Updated in App.vue
 
-let intervalObject = null;
+let pollTimer = null;
+let requestTimer = null;
+let requestController = null;
+let mounted = false;
+
+async function refreshTemperatures() {
+  if (!mounted || requestController) return;
+  const controller = new AbortController();
+  requestController = controller;
+  requestTimer = setTimeout(() => controller.abort(), 8000);
+  try {
+    await TempControlStore.getTempInfo({ signal: controller.signal });
+  } finally {
+    clearTimeout(requestTimer);
+    requestTimer = null;
+    requestController = null;
+    // Wait for this response before scheduling another request to the device.
+    if (mounted) pollTimer = setTimeout(refreshTemperatures, 7000);
+  }
+}
 
 onMounted(() => {
   // Retrieve initial data
-  TempControlStore.getTempInfo();
+  mounted = true;
+  refreshTemperatures();
   ExtendedSettingsStore.getExtendedSettings();
-
-  // Set up periodic refreshes
-  intervalObject = window.setInterval(() => {
-    TempControlStore.getTempInfo();
-  }, 7000)
 });
 
 onBeforeUnmount(() => {
-  clearInterval(intervalObject);
+  mounted = false;
+  clearTimeout(pollTimer);
+  clearTimeout(requestTimer);
+  requestController?.abort();
 });
 </script>
 

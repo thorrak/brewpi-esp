@@ -1,4 +1,5 @@
 #include "PredictiveCoastController.h"
+#include "../glycol_cooling_measurements/regressions.h"
 
 #include <cassert>
 #include <cmath>
@@ -29,6 +30,7 @@ Config shortObservation() {
 }
 
 int main() {
+    rateMaturityRegressions<Controller>();
     {
         // Near target, use the small startup exposure and wait for its coast.
         Controller controller;

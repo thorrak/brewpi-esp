@@ -83,7 +83,7 @@ private:
 
 // The on-disk format has always been {"payload":"...","crc32":N}.
 // Decode that JSON string incrementally, including legacy JSON escapes, so a
-// document can be parsed directly or copied into one caller-owned upload buffer.
+// document can be parsed directly or sent through a bounded streaming writer.
 class PayloadReader {
 public:
   explicit PayloadReader(FILE *file) : file_(file) {
@@ -269,34 +269,46 @@ bool saveDocument(const char *path, const JsonDocument &document) {
     fs_remove(temporary);
   return ok;
 }
-bool readDocumentPayload(const char *path, char *destination, size_t capacity, size_t &length) {
+bool validateDocumentPayload(const char *path, size_t &length) {
   length = 0;
   FILE *file = fs_open(path, "rb");
   if (!file)
     return false;
   PayloadReader reader(file);
-  bool fits = true;
-  int c;
-  while ((c = reader.read()) >= 0) {
-    if (destination) {
-      if (length < capacity)
-        destination[length] = static_cast<char>(c);
-      else
-        fits = false;
-    }
-    ++length;
-  }
-  const bool ok = fits && reader.finish();
-  fclose(file);
+  bool ok = reader.finish();
+  if (fclose(file) != 0)
+    ok = false;
+  if (ok)
+    length = reader.length();
   return ok;
 }
-bool loadDocumentPayload(const char *path, std::string &payload) {
-  size_t length = 0;
-  if (!readDocumentPayload(path, nullptr, 0, length))
+bool streamDocumentPayload(const char *path, bool (*sink)(void *, const char *, size_t),
+                           void *context, size_t expectedLength) {
+  if (!sink || expectedLength > maximumDocumentBytes)
     return false;
-  payload.resize(length);
-  size_t actual = 0;
-  return readDocumentPayload(path, payload.data(), payload.size(), actual) && actual == length;
+  FILE *file = fs_open(path, "rb");
+  if (!file)
+    return false;
+  PayloadReader validator(file);
+  bool ok = validator.finish() && validator.length() == expectedLength;
+  if (ok)
+    ok = fseek(file, 0, SEEK_SET) == 0;
+  if (ok) {
+    PayloadReader reader(file);
+    char buffer[256];
+    size_t count;
+    while ((count = reader.readBytes(buffer, sizeof(buffer))) != 0) {
+      if (!sink(context, buffer, count)) {
+        ok = false;
+        break;
+      }
+    }
+    if (ok)
+      ok = reader.finish() && reader.length() == expectedLength;
+  }
+  if (fclose(file) != 0)
+    ok = false;
+  return ok;
 }
 bool loadDocument(const char *path, JsonDocument &document) {
   FILE *file = fs_open(path, "rb");
@@ -327,8 +339,8 @@ bool reserveMetadata() {
 void releaseMetadataReserve() { fs_remove(reservePath); }
 bool removePreviousDataset() {
   bool removed = true;
-  for (auto path : {journalPath, "/water-test-manifest.json", "/water-test-ack.json", "/water-test-resumed.json",
-                    "/water-test-finish.json", "/water-test-boots.json", "/water-test-reserve.bin"}) {
+  for (auto path : {journalPath, manifestPath, receiptPath, resumedPath, finishPath,
+                    "/water-test-boots.json", controllerOnePath, controllerTwoPath, reservePath}) {
     if (fs_exists(path) && !fs_remove(path))
       removed = false;
     const std::string temporary = std::string(path) + ".tmp";

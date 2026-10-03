@@ -30,6 +30,7 @@
 #include <lwip/sockets.h>
 #include <lwip/netdb.h>
 #include <errno.h>
+#include <unistd.h>
 
 #include <cstdarg>
 #include <cstring>
@@ -134,6 +135,25 @@ public:
 class TcpBackend : public PiStreamBackend {
   int &_fd; // Reference to the external client fd (e.g. telnet_client_fd)
 
+  static bool transientError(int error) {
+    return error == EAGAIN || error == EWOULDBLOCK || error == EINTR;
+  }
+
+  void closeIfCurrent(int fd) {
+    // The accept loop owns replacements. An error from an earlier operation
+    // must not close or clear a client that has since replaced that descriptor.
+    if (_fd != fd) return;
+    _fd = -1;
+    close(fd);
+  }
+
+  int receive(int fd, uint8_t &byte, int flags) {
+    const int received = recv(fd, &byte, 1, flags);
+    if (received == 0 || (received < 0 && !transientError(errno)))
+      closeIfCurrent(fd);
+    return received;
+  }
+
 public:
   /**
    * \brief Construct with a reference to an externally managed socket fd.
@@ -150,38 +170,51 @@ public:
   void init() override {} // Server setup is handled externally
 
   int read() override {
-    if (_fd < 0) return -1;
+    const int fd = _fd;
+    if (fd < 0) return -1;
     uint8_t byte;
-    int n = recv(_fd, &byte, 1, MSG_DONTWAIT);
+    const int n = receive(fd, byte, MSG_DONTWAIT);
     return n > 0 ? byte : -1;
   }
 
   int available() override {
-    if (_fd < 0) return 0;
+    const int fd = _fd;
+    if (fd < 0) return 0;
     int count = 0;
-    ioctl(_fd, FIONREAD, &count);
-    return count;
+    if (ioctl(fd, FIONREAD, &count) < 0) {
+      if (!transientError(errno)) closeIfCurrent(fd);
+      return 0;
+    }
+    // FIONREAD also returns zero after peer EOF. Probe without consuming data
+    // so the regular command-loop poll releases closed clients even when no
+    // command follows. Drain queued bytes before treating peer EOF as closed.
+    if (count > 0) return count;
+    uint8_t byte;
+    const int n = receive(fd, byte, MSG_PEEK | MSG_DONTWAIT);
+    return n > 0 ? n : 0;
   }
 
   size_t write(const uint8_t *buf, size_t len) override {
-    if (_fd < 0) return 0;
-    int sent = send(_fd, buf, len, MSG_NOSIGNAL);
+    const int fd = _fd;
+    if (fd < 0 || len == 0) return 0;
+    const int sent = send(fd, buf, len, MSG_NOSIGNAL);
+    if (sent < 0 && !transientError(errno)) closeIfCurrent(fd);
     return sent > 0 ? static_cast<size_t>(sent) : 0;
   }
 
   bool connected() override {
-    if (_fd < 0) return false;
+    const int fd = _fd;
+    if (fd < 0) return false;
     // Peek to check whether the peer has closed the connection
-    char tmp;
-    int n = recv(_fd, &tmp, 1, MSG_PEEK | MSG_DONTWAIT);
-    if (n == 0) return false;                                  // peer closed
-    if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) return false;
-    return true;
+    uint8_t byte;
+    const int n = receive(fd, byte, MSG_PEEK | MSG_DONTWAIT);
+    return n > 0 || (n < 0 && _fd == fd);
   }
 
   operator bool() override { return _fd >= 0; }
 
-  // Note: fd lifecycle is managed externally (wifi_connect_clients)
+  // New/replacement clients are managed by wifi_connect_clients; terminal I/O
+  // failures release the current client here, including the shared descriptor.
 };
 
 // -----------------------------------------------------------------------

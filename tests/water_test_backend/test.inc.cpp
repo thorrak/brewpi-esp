@@ -1,5 +1,28 @@
+// Native assertions sometimes need the exact durable bytes. Production uploads
+// validate and stream these envelopes without materializing a complete payload.
+namespace WaterTest {
+bool loadDocumentPayload(const char *path, std::string &payload) {
+  payload.clear();
+  size_t length = 0;
+  if (!WaterTestStorage::validateDocumentPayload(path, length))
+    return false;
+  payload.reserve(length);
+  const auto append = [](void *context, const char *data, size_t size) {
+    static_cast<std::string *>(context)->append(data, size);
+    return true;
+  };
+  if (!WaterTestStorage::streamDocumentPayload(path, append, &payload, length)) {
+    payload.clear();
+    return false;
+  }
+  return payload.size() == length;
+}
+} // namespace WaterTest
+
 using namespace WaterTestCore;
 void initializeHardware() {
+  assert(!WaterTest::program.hasHistory());
+  Native::uploadStartHook = [] { assert(!WaterTest::program.hasHistory()); };
   auto &beer = eepromManager.devices[0];
   beer.deviceFunction = DEVICE_BEER_TEMP;
   beer.deviceHardware = DEVICE_HARDWARE_ONEWIRE_TEMP;
@@ -19,6 +42,7 @@ void initializeHardware() {
   heat.deviceHardware = DEVICE_HARDWARE_PIN;
   heat.hw.pinNr = 25;
   WaterTest::init();
+  assert(!WaterTest::program.hasHistory());
 }
 void fresh(double t, int16_t raw = 320, bool valid = true, bool bathValid = true) {
   Native::clock = static_cast<uint64_t>(std::llround(t * 1e6));
@@ -52,7 +76,7 @@ void start() {
   assert(WaterTest::requestStart(d.as<JsonVariantConst>(), error));
   assert(WaterTest::controlOwned());
   WaterTest::tick();
-  assert(WaterTest::active());
+  assert(WaterTest::active() && WaterTest::program.hasHistory());
   assert(!WaterTest::physicalPump());
   assert(WaterTest::manifest["test_id"].as<std::string>().size() == 36);
   assert(WaterTest::manifest["test_id"].as<std::string>().find('\0') == std::string::npos);
@@ -62,6 +86,29 @@ void start() {
   assert(std::distance(std::filesystem::directory_iterator(Native::root),
                        std::filesystem::directory_iterator{}) == 3);
   assert(fs_exists(WaterTest::journalPath));
+}
+void finishBaseline() {
+  while (WaterTest::program.phase == Phase::Baseline &&
+         Native::clock / 1e6 <= WaterTest::program.started + baselineSeconds)
+    fresh(Native::clock / 1e6 + 2);
+  assert(WaterTest::active() && WaterTest::program.phase == Phase::Observe);
+  assert(WaterTest::program.nextPulsePending && !WaterTest::physicalPump());
+}
+double beginFirstPulse() {
+  if (WaterTest::program.phase == Phase::Baseline)
+    finishBaseline();
+  if (!WaterTest::program.pump)
+    fresh(Native::clock / 1e6 + 2);
+  assert(WaterTest::active() && WaterTest::physicalPump());
+  assert(WaterTest::program.phase == Phase::Pulse && WaterTest::program.pulse == 1);
+  return WaterTest::program.pulseStarted;
+}
+double completeFirstPulse() {
+  beginFirstPulse();
+  advance(WaterTest::program.deadline);
+  assert(WaterTest::active() && WaterTest::program.phase == Phase::Observe && !WaterTest::physicalPump());
+  assert(WaterTest::program.completedPulses == 1);
+  return WaterTest::program.switched;
 }
 void uploadOnce() {
   Native::delays = 1;
@@ -80,10 +127,10 @@ void runScheduledUpload() {
   } catch (const Native::TaskDeleted &) {
   }
   assert(Native::taskDeletes == deleted + 1 && Native::scheduledTask == nullptr);
-  assert(!WaterTest::uploaderTaskActive && !WaterTest::uploaderBusy && Native::uploadBuffer == nullptr);
+  assert(!WaterTest::uploaderTaskActive && !WaterTest::uploaderBusy && Native::uploadWorkspace == nullptr);
 }
 void finishEligibleStopped() {
-  advance(WaterTest::program.started + 72);
+  completeFirstPulse();
   assert(WaterTest::active() && !WaterTest::physicalPump());
   assert(WaterTest::program.completedPulses == 1 && WaterTest::program.totalPump == 10);
   std::string error;
@@ -92,8 +139,10 @@ void finishEligibleStopped() {
   assert(WaterTest::terminal["outcome"] == "stopped");
   assert(WaterTest::terminal["completed_pulses"] == 1);
   assert(WaterTest::uploadState == "pending");
+  assert(!WaterTest::program.hasHistory());
 }
 void submit() {
+  assert(!WaterTest::program.hasHistory());
   const auto requests = Native::payloads.size();
   for (unsigned n = 0; n < 600 && WaterTest::uploadState != "submitted"; ++n)
     uploadOnce();
@@ -111,6 +160,7 @@ void submitAndResume() {
   assert(!WaterTest::controlOwned());
 }
 void verifyRetainedAndRestart(unsigned completedPulses = 0) {
+  assert(!WaterTest::program.hasHistory());
   assert(!WaterTest::active() && WaterTest::controlOwned());
   assert(!WaterTest::physicalPump() && !WaterTest::physicalHeat());
   assert(WaterTest::program.completedPulses == completedPulses);
@@ -149,6 +199,7 @@ void writeFile(const char *path, const char *contents) {
   fclose(file);
 }
 void verifyIdleAfterReboot() {
+  assert(!WaterTest::program.hasHistory());
   assert(!WaterTest::active() && !WaterTest::controlOwned());
   assert(WaterTest::manifest.isNull() && WaterTest::terminal.isNull());
   assert(WaterTest::uploadState == "idle" && WaterTest::uploadError.empty());
@@ -203,6 +254,12 @@ void verifyFlow(JsonVariantConst installation, const char *source, double value,
   assert(installation["glycol_flow_value"].as<double>() == value);
   assert(installation["glycol_flow_unit"] == unit);
 }
+#include "controller_run_write_regressions.h"
+#include "controller_final_observation_regressions.h"
+#include "dual_controller_regressions.h"
+#include "controller_observation_regressions.h"
+#include "controller_checkpoint_precision_regressions.h"
+#include "upload_streaming_regressions.h"
 int main(int argc, char **argv) {
   assert(argc == 3);
   Native::root = argv[2];
@@ -219,14 +276,42 @@ int main(int argc, char **argv) {
   }
   initializeHardware();
   std::string error;
-  if (scenario == "uploader_lifecycle") {
+  if (scenario == "upload_bounded_streaming" || scenario == "upload_metadata_crc" ||
+      scenario == "upload_batch_crc" || scenario == "upload_partial_write_retry" ||
+      scenario == "upload_lost_ack_retry" || scenario == "upload_incomplete_ack_retry" ||
+      scenario == "upload_large_ack_retry" || scenario == "upload_workspace_allocation_failure") {
+    verifyStreamingUpload(scenario);
+  } else if (scenario == "history_allocation_failure" || scenario == "history_held_allocation_failure") {
+    const bool held = scenario == "history_held_allocation_failure";
+    WaterTest::startupHold = held;
+    fresh(2);
+    const auto pumpEdges = tempControl.pump.edges;
+    const auto heatEdges = tempControl.heat.edges;
+    Native::failHistoryAllocation = true;
+    auto request = survey();
+    assert(WaterTest::requestStart(request, error));
+    WaterTest::tick();
+    assert(Native::historyAllocations == 1);
+    assert(Native::historyAllocationSize == historyCapacity * sizeof(Program::Reading));
+    assert(!WaterTest::program.hasHistory() && !WaterTest::active());
+    assert(WaterTest::controlOwned() == held && WaterTest::startupHold == held);
+    assert(WaterTest::manifest.isNull() && !WaterTest::journal);
+    assert(std::filesystem::is_empty(Native::root));
+    assert(tempControl.cs.mode == 'b' && tempControl.cs.beerSetting == 10000 && tempControl.cs.fridgeSetting == 5000);
+    assert(tempControl.pump.edges == pumpEdges && tempControl.heat.edges == heatEdges);
+    assert(Native::taskCreates == 0 && Native::payloads.empty());
+    assert(WaterTest::reason.find("Not enough free memory") != std::string::npos);
+    Native::failHistoryAllocation = false;
+    start();
+    assert(Native::historyAllocations == 2 && WaterTest::program.hasHistory());
+  } else if (scenario == "uploader_lifecycle") {
     assert(Native::taskCreates == 0 && !WaterTest::backgroundServicesReady);
     WaterTest::tick(); // The setup-time tick must not reserve an upload stack.
     assert(Native::taskCreates == 0);
     WaterTest::startBackgroundServices();
     WaterTest::startBackgroundServices();
     start();
-    advance(64);
+    beginFirstPulse();
     assert(Native::taskCreates == 0 && WaterTest::active());
     finishEligibleStopped();
     assert(Native::taskCreates == 1 && WaterTest::uploaderTaskActive);
@@ -417,14 +502,15 @@ int main(int argc, char **argv) {
     if (scenario == "slow_sensor_fault")
       tempControl.glycolRuntime.cooling.minOn = 60;
     start();
-    advance(64);
+    const double pulseAt = beginFirstPulse();
     if (scenario == "slow_sensor_fault") {
-      fresh(94, -2048, false);
+      fresh(pulseAt + freshnessSeconds, -2048, false);
       assert(WaterTest::active() && WaterTest::physicalPump());
     }
     Native::fsyncDelayUs = 12000000;
-    const uint64_t readAt = scenario == "slow_sensor_fault" ? 94100000 : 64100000;
-    fresh(readAt / 1e6, scenario == "slow_temperature_limit" ? 272 : 320, scenario != "slow_sensor_fault");
+    const double faultAt = pulseAt + (scenario == "slow_sensor_fault" ? freshnessSeconds : 0) + .1;
+    const uint64_t readAt = uint64_t(std::llround(faultAt * 1e6));
+    fresh(readAt / 1e6, scenario == "slow_temperature_limit" ? 262 : 320, scenario != "slow_sensor_fault");
     assert(!WaterTest::active() && !WaterTest::physicalPump());
     assert(tempControl.pump.edgeTimes.back() == readAt);
     assert(WaterTest::terminal["reason"] ==
@@ -443,41 +529,44 @@ int main(int argc, char **argv) {
     verifyRetainedAndRestart();
   } else if (scenario == "slow_deadline") {
     start();
-    advance(72);
-    Native::clock = 73000000;
+    beginFirstPulse();
+    const auto deadlineUs = uint64_t(std::llround(WaterTest::program.deadline * 1e6));
+    advance(WaterTest::program.deadline - 2);
+    Native::clock = deadlineUs - 1000000;
     Native::fsyncDelayUs = 3000000;
     WaterTest::lastLoggedRead[0] = 0;
     for (unsigned n = 0; n < 6; ++n)
-      WaterTest::onSample(WaterTest::beerAddress, 320, true, 72000000, 72500000 + n);
+      WaterTest::onSample(WaterTest::beerAddress, 320, true, deadlineUs - 2000000, deadlineUs - 1500000 + n);
     WaterTest::tick();
     assert(!WaterTest::physicalPump());
     // A synchronous write cannot be interrupted. Recheck immediately afterward,
     // rather than allowing the remaining queue to extend the pulse further.
-    assert(tempControl.pump.edgeTimes.back() == 76000000);
+    assert(tempControl.pump.edgeTimes.back() == deadlineUs + 2000000);
     verifyJournal();
   } else if (scenario == "slow_on_edge" || scenario == "slow_phase") {
     start();
-    advance(62);
-    Native::clock = 64000000;
+    finishBaseline();
+    Native::clock += 2000000;
+    const auto pulseUs = Native::clock;
     Native::fsyncDelayUs = scenario == "slow_on_edge" ? 12000000 : 6000000;
     WaterTest::tick();
     assert(!WaterTest::physicalPump());
     assert(tempControl.pump.edgeTimes.size() == 2);
-    assert(tempControl.pump.edgeTimes.front() == 64000000);
-    assert(tempControl.pump.edgeTimes.back() == 76000000);
+    assert(tempControl.pump.edgeTimes.front() == pulseUs);
+    assert(tempControl.pump.edgeTimes.back() == pulseUs + 12000000);
     verifyJournal();
   } else if (scenario == "slow_storage_repair") {
     start();
-    advance(64);
+    const double pulseAt = beginFirstPulse();
     Native::fsyncUntilFail = 0;
     WaterTest::lastLoggedRead[0] = WaterTest::lastLoggedRead[1] = 0;
     Native::truncateHook = [] {
       assert(!WaterTest::physicalPump() && !WaterTest::physicalHeat());
       Native::clock += 12000000;
     };
-    fresh(64.1);
+    fresh(pulseAt + .1);
     assert(!WaterTest::active());
-    assert(tempControl.pump.edgeTimes.back() == 64100000);
+    assert(tempControl.pump.edgeTimes.back() == uint64_t(std::llround((pulseAt + .1) * 1e6)));
     assert(WaterTest::terminal["reason"] == "recording_failure");
     verifyJournal();
   } else if (scenario == "queue_snapshot") {
@@ -496,17 +585,18 @@ int main(int argc, char **argv) {
     verifyJournal();
   } else if (scenario == "slow_queue_overflow" || scenario == "queued_unexpected_output") {
     start();
-    advance(64);
-    Native::clock = 64100000;
+    beginFirstPulse();
+    Native::clock += 100000;
+    const auto faultUs = Native::clock;
     Native::fsyncDelayUs = 12000000;
     const unsigned count = scenario == "slow_queue_overflow" ? 65 : 1;
     for (unsigned n = 0; n < count; ++n)
-      WaterTest::onSample(WaterTest::beerAddress, 320, true, 63350000, Native::clock + n);
+      WaterTest::onSample(WaterTest::beerAddress, 320, true, Native::clock - 750000, Native::clock + n);
     if (scenario == "queued_unexpected_output")
       tempControl.heater->setActive(true);
     WaterTest::tick();
     assert(!WaterTest::physicalPump() && !WaterTest::physicalHeat());
-    assert(tempControl.pump.edgeTimes.back() == 64100000);
+    assert(tempControl.pump.edgeTimes.back() == faultUs);
     assert(WaterTest::terminal["reason"] ==
            (scenario == "slow_queue_overflow" ? "sample_queue_overflow" : "unexpected_output"));
     verifyJournal();
@@ -544,10 +634,10 @@ int main(int argc, char **argv) {
     if (scenario == "recovered_active_after_reboot" || scenario == "recover_only_after_reboot") {
       assert(WaterTest::terminal["outcome"] == "interrupted");
       assert(WaterTest::terminal["unobserved_shutdown"] == true);
-      assert(WaterTest::terminal["controller"]["initialized"].isNull());
-      assert(WaterTest::terminal["controller"]["learning_status"] == "unavailable_after_restart");
-      assert(WaterTest::terminal["controller"]["final_tuning"].isNull());
-      assert(WaterTest::terminal["controller"]["final_tuning_exact"].isNull());
+      assert(WaterTest::terminal["controllers"][0]["initialized"] == false);
+      assert(WaterTest::terminal["controllers"][0]["learning_status"] == "not_started");
+      assert(WaterTest::terminal["controllers"][0]["final_tuning"].isNull());
+      assert(WaterTest::terminal["controllers"][0]["final_tuning_exact"].isNull());
       assert(WaterTest::terminal["t_us"].isNull());
       assert(WaterTest::terminal["lost_ranges"].size() == 1);
     } else {
@@ -636,6 +726,11 @@ int main(int argc, char **argv) {
     assert(Native::payloads.empty());
     assert(files == std::distance(std::filesystem::directory_iterator(Native::root),
                                   std::filesystem::directory_iterator{}));
+  } else if (scenario == "orphan_controller_only_before_reboot" ||
+             scenario == "orphan_controller_tmp_only_before_reboot") {
+    const std::string path = std::string(WaterTest::controllerOnePath) +
+                            (scenario == "orphan_controller_tmp_only_before_reboot" ? ".tmp" : "");
+    writeFile(path.c_str(), "saved controller results without campaign metadata");
   } else if (scenario.rfind("orphan_", 0) == 0) {
     writeFile(WaterTest::journalPath, scenario == "orphan_nonempty_before_reboot" ? "x" : "");
     writeFile("/water-test-manifest.json.tmp", "partial startup metadata");
@@ -646,6 +741,10 @@ int main(int argc, char **argv) {
     if (scenario == "orphan_ack_tmp_before_reboot") writeFile("/water-test-ack.json.tmp", "invalid");
     if (scenario == "orphan_resumed_tmp_before_reboot") writeFile("/water-test-resumed.json.tmp", "invalid");
     if (scenario == "orphan_boots_tmp_before_reboot") writeFile("/water-test-boots.json.tmp", "invalid");
+    if (scenario == "orphan_controller_one_tmp_before_reboot")
+      writeFile((std::string(WaterTest::controllerOnePath) + ".tmp").c_str(), "invalid");
+    if (scenario == "orphan_controller_two_tmp_before_reboot")
+      writeFile((std::string(WaterTest::controllerTwoPath) + ".tmp").c_str(), "invalid");
   } else if (scenario == "corrupt_before_reboot") {
     writeFile(WaterTest::journalPath, "torn");
     for (auto path : {"/water-test-manifest.json", "/water-test-boots.json", "/water-test-finish.json",
@@ -658,9 +757,8 @@ int main(int argc, char **argv) {
     submitAndResume();
   } else if (scenario == "normal_stop") {
     start();
-    advance(64);
-    assert(WaterTest::physicalPump());
-    advance(69);
+    const double pulseAt = beginFirstPulse();
+    advance(pulseAt + 5);
     assert(WaterTest::requestStop(error));
     WaterTest::tick();
     assert(!WaterTest::active() && !WaterTest::physicalPump());
@@ -676,15 +774,15 @@ int main(int argc, char **argv) {
     WaterTest::tick();
     assert(WaterTest::terminal["outcome"] == "stopped");
     assert(tempControl.pump.edges.empty());
-    assert(WaterTest::terminal["controller"]["initialized"] == false);
-    assert(WaterTest::terminal["controller"]["learning_status"] == "not_started");
-    assert(WaterTest::terminal["controller"]["final_tuning"].isNull());
+    assert(WaterTest::terminal["controllers"][0]["initialized"] == false);
+    assert(WaterTest::terminal["controllers"][0]["learning_status"] == "not_started");
+    assert(WaterTest::terminal["controllers"][0]["final_tuning"].isNull());
     verifyJournal();
     verifyRetainedAndRestart();
   } else if (scenario == "full_pulse_stop") {
     start();
     finishEligibleStopped();
-    assert(WaterTest::program.phase == Phase::Finished && Native::clock == 74000000);
+    assert(WaterTest::program.phase == Phase::Finished && WaterTest::program.totalPump == 10);
     verifyJournal();
     submit();
   } else if (scenario == "resume_pending_upload") {
@@ -712,14 +810,13 @@ int main(int argc, char **argv) {
     assert(!fs_exists(WaterTest::journalPath));
   } else if (scenario == "minimum_stop") {
     start();
-    advance(64);
-    assert(WaterTest::physicalPump());
+    const double pulseAt = beginFirstPulse();
     assert(WaterTest::requestStop(error));
     WaterTest::tick();
     assert(WaterTest::physicalPump());
-    fresh(65);
+    fresh(pulseAt + 1);
     assert(WaterTest::physicalPump());
-    fresh(66);
+    fresh(pulseAt + 2);
     assert(!WaterTest::physicalPump());
     assert(WaterTest::terminal["outcome"] == "stopped");
     assert(WaterTest::program.totalPump == 2);
@@ -727,10 +824,10 @@ int main(int argc, char **argv) {
     verifyRetainedAndRestart();
   } else if (scenario == "transient_sensor_errors") {
     start();
-    advance(64);
-    fresh(64.1, -2048, false, false);
+    const double pulseAt = beginFirstPulse();
+    fresh(pulseAt + .1, -2048, false, false);
     assert(WaterTest::active() && WaterTest::physicalPump());
-    assert(WaterTest::program.lastSample == 64 && WaterTest::program.latestC == 20);
+    assert(WaterTest::program.lastSample == pulseAt && WaterTest::program.latestC == 20);
     JsonDocument status;
     WaterTest::status(status);
     assert(status["beer_c"] == 20 && status["glycol_c"] == 7);
@@ -740,16 +837,16 @@ int main(int argc, char **argv) {
     Record record{};
     unsigned badReadings = 0;
     while (fread(&record, sizeof(record), 1, journal) == 1)
-      if (record.kind == 2 && record.read_us == 64100000) {
+      if (record.kind == 2 && record.read_us == uint64_t(std::llround((pulseAt + .1) * 1e6))) {
         assert(!(record.flags & 1) && (record.flags & 2));
         assert(record.raw == (record.role == 0 ? -2048 : 112));
         ++badReadings;
       }
     fclose(journal);
     assert(badReadings == 2);
-    fresh(66, 319);
+    fresh(pulseAt + 2, 319);
     assert(WaterTest::active() && WaterTest::physicalPump());
-    assert(WaterTest::program.lastSample == 66 && WaterTest::program.latestC == 19.9375);
+    assert(WaterTest::program.lastSample == pulseAt + 2 && WaterTest::program.latestC == 19.9375);
     WaterTest::status(status);
     assert(status["beer_c"] == 19.9375);
     verifyJournal();
@@ -770,23 +867,24 @@ int main(int argc, char **argv) {
   } else if (scenario == "prolonged_invalid" || scenario == "silent_sensor") {
     tempControl.glycolRuntime.cooling.minOn = 60;
     start();
-    advance(64);
+    const double pulseAt = beginFirstPulse();
+    const double staleAt = pulseAt + freshnessSeconds;
     if (scenario == "prolonged_invalid") {
-      for (double at = 66; at <= 94; at += 2) {
+      for (double at = pulseAt + 2; at <= staleAt; at += 2) {
         fresh(at, -2048, false);
         assert(WaterTest::active() && WaterTest::physicalPump());
-        assert(WaterTest::program.lastSample == 64);
+        assert(WaterTest::program.lastSample == pulseAt);
       }
-      fresh(94.1, -2048, false);
+      fresh(staleAt + .1, -2048, false);
     } else {
-      Native::clock = 94000000;
+      Native::clock = uint64_t(std::llround(staleAt * 1e6));
       WaterTest::tick();
       assert(WaterTest::active() && WaterTest::physicalPump());
-      Native::clock = 94100000;
+      Native::clock = uint64_t(std::llround((staleAt + .1) * 1e6));
       WaterTest::tick();
     }
     assert(!WaterTest::active() && !WaterTest::physicalPump());
-    assert(tempControl.pump.edgeTimes.back() == 94100000);
+    assert(tempControl.pump.edgeTimes.back() == uint64_t(std::llround((staleAt + .1) * 1e6)));
     assert(WaterTest::terminal["outcome"] == "failed");
     assert(WaterTest::terminal["reason"] == "beer_sensor_stale");
     verifyJournal();
@@ -794,17 +892,18 @@ int main(int argc, char **argv) {
   } else if (scenario == "minimum_water_limit") {
     tempControl.glycolRuntime.cooling.minOn = 60;
     start();
-    advance(64);
-    fresh(64.1, 64);
-    assert(!WaterTest::physicalPump() && tempControl.pump.edgeTimes.back() == 64100000);
+    const double pulseAt = beginFirstPulse();
+    fresh(pulseAt + .1, 64);
+    assert(!WaterTest::physicalPump());
+    assert(tempControl.pump.edgeTimes.back() == uint64_t(std::llround((pulseAt + .1) * 1e6)));
     assert(WaterTest::terminal["outcome"] == "stopped");
     assert(WaterTest::terminal["reason"] == "temperature_limit");
     verifyJournal();
     verifyRetainedAndRestart();
   } else if (scenario == "bath_fault") {
     start();
-    advance(64);
-    fresh(64.1, 320, true, false);
+    const double pulseAt = beginFirstPulse();
+    fresh(pulseAt + .1, 320, true, false);
     assert(WaterTest::active() && WaterTest::physicalPump());
     verifyJournal();
   } else if (scenario == "independent_hardware_availability") {
@@ -892,11 +991,24 @@ int main(int argc, char **argv) {
     assert(WaterTest::requestStop(error));
     WaterTest::tick();
     assert(!WaterTest::active() && !WaterTest::terminalDurable && WaterTest::uploadState=="error");
+    assert(!WaterTest::program.hasHistory());
+    assert(WaterTest::program.head == 0 && WaterTest::program.count == 0);
+    std::string finalMetadata;
+    serializeJson(WaterTest::terminal, finalMetadata);
+    const auto finalRecords = WaterTest::recordCount;
+    const auto journalBytes = std::filesystem::file_size(Native::root + WaterTest::journalPath);
+    assert(finalRecords > 0 && journalBytes == finalRecords * sizeof(Record));
+    verifyJournal();
     uploadOnce();
     assert(Native::payloads.empty() && fs_exists(WaterTest::journalPath));
+    assert(!WaterTest::program.hasHistory());
     Native::openFailurePath.clear();
     uploadOnce();
     assert(WaterTest::terminalDurable && Native::payloads.size()==1);
+    std::string savedMetadata;
+    assert(WaterTest::loadDocumentPayload(WaterTest::finishPath, savedMetadata));
+    assert(savedMetadata == finalMetadata && WaterTest::recordCount == finalRecords);
+    assert(std::filesystem::file_size(Native::root + WaterTest::journalPath) == journalBytes);
     submit();
   } else if (scenario == "receipt_persistence_failure") {
     start();
@@ -916,7 +1028,7 @@ int main(int argc, char **argv) {
     tempControl.glycolRuntime.cooling.minOn = 7;
     tempControl.glycolRuntime.cooling.minOff = 11;
     start();
-    const auto initial = WaterTest::manifest["test_program"]["controller"];
+    const auto initial = WaterTest::manifest["test_program"]["controllers"][0];
     assert(initial["initialization"] == "fresh_defaults");
     assert(initial["configuration"].size() == 19 && initial["configuration_exact"].size() == 19);
     assert(initial["configuration"]["min_on_s"] == 7 && initial["configuration"]["min_off_s"] == 11);
@@ -934,7 +1046,8 @@ int main(int argc, char **argv) {
     WaterTest::manifest = persisted;
     extendedSettings.glycolCoolingAlgorithm = dose ? GlycolCooling::Algorithm::PredictiveCoast
                                                  : GlycolCooling::Algorithm::PulseDose;
-    WaterTest::program.phase = Phase::Controller;
+    WaterTest::program.usefulResponse = true;
+    WaterTest::program.beginController(Native::clock / 1e6);
     WaterTest::program.role = Role::Controller;
     WaterTest::program.controllerStarted = Native::clock/1e6;
     WaterTest::program.targetC = std::nextafter(19.75, 20.);
@@ -948,9 +1061,9 @@ int main(int argc, char **argv) {
     assert(WaterTest::testController->restoreTuning(learned));
     assert(WaterTest::requestStop(error));
     WaterTest::tick();
-    verifyControllerSnapshot(WaterTest::terminal["controller"], dose);
+    verifyControllerSnapshot(WaterTest::terminal["controllers"][0], dose);
     assert(WaterTest::loadDocument(WaterTest::finishPath, persisted));
-    verifyControllerSnapshot(persisted["controller"], dose);
+    verifyControllerSnapshot(persisted["controllers"][0], dose);
     before.clear(); after.clear();
     serializeJson(WaterTest::terminal,before);
     assert(WaterTest::loadDocumentPayload(WaterTest::finishPath,after));
@@ -963,19 +1076,20 @@ int main(int argc, char **argv) {
     assert(Native::payloads.back() == originalFinish);
     JsonDocument uploaded;
     assert(deserializeJson(uploaded,Native::payloads.back()) == DeserializationError::Ok);
-    verifyControllerSnapshot(uploaded["controller"], dose);
+    verifyControllerSnapshot(uploaded["controllers"][0], dose);
   } else if (scenario == "recovered_snapshot_after_reboot") {
     assert(WaterTest::terminalDurable && !WaterTest::testController);
-    verifyControllerSnapshot(WaterTest::terminal["controller"], false);
+    verifyControllerSnapshot(WaterTest::terminal["controllers"][0], false);
     submit();
     JsonDocument uploaded;
     assert(deserializeJson(uploaded,Native::payloads.back()) == DeserializationError::Ok);
-    verifyControllerSnapshot(uploaded["controller"], false);
+    verifyControllerSnapshot(uploaded["controllers"][0], false);
   } else if (scenario == "controller_fast_loop_predictive" || scenario == "controller_fast_loop_dose") {
     const bool dose = scenario == "controller_fast_loop_dose";
     if (dose) extendedSettings.glycolCoolingAlgorithm = GlycolCooling::Algorithm::PulseDose;
     start();
-    WaterTest::program.phase = Phase::Controller;
+    WaterTest::program.usefulResponse = true;
+    WaterTest::program.beginController(Native::clock / 1e6);
     WaterTest::program.role = Role::Controller;
     WaterTest::program.controllerStarted = Native::clock/1e6;
     WaterTest::program.targetC = 18;
@@ -1018,14 +1132,15 @@ int main(int argc, char **argv) {
     assert(!WaterTest::active() && !WaterTest::physicalPump() && !WaterTest::physicalHeat());
     assert(WaterTest::terminal["reason"] == "beer_sensor_stale");
     if (!dose) assert(tempControl.pump.edgeTimes.back() == faultAt);
-    assert(WaterTest::terminal["controller"]["initialized"] == true);
-    assert(WaterTest::terminal["controller"]["learning_status"] == "no_updates");
-    assert(WaterTest::terminal["controller"]["final_tuning"]["learning_updates"] == 0);
+    assert(WaterTest::terminal["controllers"][0]["initialized"] == true);
+    assert(WaterTest::terminal["controllers"][0]["learning_status"] == "no_updates");
+    assert(WaterTest::terminal["controllers"][0]["final_tuning"]["learning_updates"] == 0);
     verifyJournal();
     submit();
   } else if (scenario == "controller_continuous_pulse_limit") {
     start();
-    WaterTest::program.phase = Phase::Controller;
+    WaterTest::program.usefulResponse = true;
+    WaterTest::program.beginController(Native::clock / 1e6);
     WaterTest::program.role = Role::Controller;
     WaterTest::program.controllerStarted = WaterTest::program.pulseStarted = Native::clock/1e6;
     WaterTest::program.switched = Native::clock/1e6;
@@ -1038,10 +1153,57 @@ int main(int argc, char **argv) {
     WaterTest::tick();
     assert(!WaterTest::active() && !WaterTest::physicalPump());
     assert(WaterTest::terminal["reason"] == "pulse_time_limit");
-    assert(WaterTest::terminal["controller_completed"] == false);
+    assert(WaterTest::terminal["controller_completed"].isNull());
     assert(tempControl.pump.edgeTimes.back() == Native::clock);
     verifyJournal();
     submit();
+  } else if (scenario == "controller_checkpoint_precision" || scenario == "checkpoint_precision_before_reboot") {
+    controllerCheckpointPrecisionRegression(scenario == "checkpoint_precision_before_reboot");
+  } else if (scenario == "recovered_checkpoint_precision_after_reboot") {
+    assert(WaterTest::terminal["outcome"] == "interrupted");
+    verifyCheckpointPrecisionUpload();
+  } else if (scenario == "snapshot_exact_restoration") {
+    snapshotExactRestorationRegression();
+  } else if (scenario == "controller_observation_write_deadline") {
+    controllerObservationWriteDeadlineRegression();
+  } else if (scenario == "controller_declared_duration_recovery") {
+    controllerDeclaredDurationRecoveryRegression();
+  } else if (scenario == "controller_duration_boundary_before_reboot") {
+    controllerDurationBoundaryBeforeReboot();
+  } else if (scenario == "recovered_controller_duration_boundary_after_reboot") {
+    recoveredControllerDurationBoundary();
+  } else if (scenario == "controller_run_write_deadline") {
+    controllerRunWriteDeadlineRegression();
+  } else if (scenario.rfind("controller_final_", 0) == 0) {
+    controllerFinalObservationRegression(scenario);
+  } else if (scenario == "recovered_controller_final_tail_after_reboot") {
+    recoveredControllerFinalObservationRegression();
+  } else if (scenario == "dual_controllers_full_duration") {
+    dualFullDurationRegression();
+  } else if (scenario == "dual_settled_before_checkpoint_before_reboot") {
+    legacyControllerEpisodesBeforeReboot(true);
+  } else if (scenario == "recovered_dual_settled_before_checkpoint_after_reboot") {
+    recoveredDualSettledBeforeCheckpointRegression();
+  } else if (scenario == "dual_controller_stale_run") {
+    dualStaleRunRegression();
+  } else if (scenario == "dual_controllers_predictive_first" || scenario == "dual_controllers_dose_first" ||
+             scenario == "dual_first_checkpoint_before_reboot" || scenario == "dual_second_running_before_reboot" ||
+             scenario == "dual_controller_headroom_skip" || scenario == "dual_controller_checkpoint_failure" ||
+             scenario == "dual_controller_corrupt_checkpoint") {
+    dualControllerRegression(scenario);
+  } else if (scenario == "recovered_dual_first_checkpoint_after_reboot" ||
+             scenario == "recovered_dual_second_running_after_reboot") {
+    recoveredDualControllerRegression(scenario);
+  } else if (scenario == "controller_observations_predictive" || scenario == "controller_observations_dose" ||
+             scenario == "controller_observation_write_failure" || scenario == "controller_observations_before_reboot" ||
+             scenario == "controller_observation_stop" || scenario == "controller_observation_stale") {
+    controllerObservationRegression(scenario);
+  } else if (scenario == "recovered_controller_observations_after_reboot") {
+    recoveredControllerObservationsRegression();
+  } else if (scenario == "controller_episodes_before_reboot") {
+    legacyControllerEpisodesBeforeReboot(false);
+  } else if (scenario == "recovered_controller_episodes_after_reboot") {
+    recoveredLegacyControllerEpisodes();
   } else if (scenario == "controller_interrupted_status") {
     start();
     WaterTest::program.controllerStarted = Native::clock/1e6;
@@ -1050,7 +1212,7 @@ int main(int argc, char **argv) {
     assert(WaterTest::requestStop(error));
     WaterTest::tick();
     assert(WaterTest::terminal["outcome"] == "stopped");
-    assert(WaterTest::terminal["controller_completed"] == false);
+    assert(WaterTest::terminal["controller_completed"].isNull());
     submit();
   } else if (scenario == "reserve_persistence_failure") {
     fresh(2);
@@ -1100,10 +1262,10 @@ int main(int argc, char **argv) {
     assert(visible["beer_c"].is<double>() && visible["glycol_c"].is<double>());
   } else if (scenario == "fsync_failure") {
     start();
-    advance(64);
+    const double pulseAt = beginFirstPulse();
     Native::fsyncUntilFail = 0;
     WaterTest::lastLoggedRead[0] = WaterTest::lastLoggedRead[1] = 0;
-    fresh(64.1);
+    fresh(pulseAt + .1);
     assert(!WaterTest::physicalPump());
     assert(WaterTest::terminal["reason"] == "recording_failure");
     assert(WaterTest::terminal["lost_ranges"].size() == 1);
@@ -1111,8 +1273,8 @@ int main(int argc, char **argv) {
     verifyRetainedAndRestart();
   } else if (scenario == "edge_fsync_failure") {
     start();
-    advance(62);
-    Native::clock = 64000000;
+    finishBaseline();
+    Native::clock += 2000000;
     Native::fsyncUntilFail = 0;
     WaterTest::lastLoggedRead[0] = WaterTest::lastLoggedRead[1] = 0;
     WaterTest::tick();
@@ -1127,6 +1289,7 @@ int main(int argc, char **argv) {
     assert(WaterTest::requestStart(d, error));
     WaterTest::tick();
     assert(!WaterTest::active() && !WaterTest::controlOwned() && WaterTest::manifest.isNull());
+    assert(!WaterTest::program.hasHistory());
     assert(tempControl.cs.mode == 'b');
     Native::openFailurePath.clear();
     assert(WaterTest::requestStart(d, error));
@@ -1134,7 +1297,7 @@ int main(int argc, char **argv) {
     assert(WaterTest::active());
   } else if (scenario == "queue_overflow") {
     start();
-    advance(64);
+    beginFirstPulse();
     for (unsigned n = 0; n < 65; ++n)
       WaterTest::onSample(WaterTest::beerAddress, 320, true, Native::clock - 750000, Native::clock + n + 1);
     Native::clock += 100;
@@ -1151,7 +1314,7 @@ int main(int argc, char **argv) {
     verifyJournal();
   } else if (scenario == "active_before_reboot") {
     start();
-    advance(64);
+    beginFirstPulse();
     assert(WaterTest::physicalPump());
     WaterTest::closeJournal();
     FILE *f = fs_open(WaterTest::journalPath, "ab");
@@ -1166,7 +1329,7 @@ int main(int argc, char **argv) {
     const auto deleted = Native::taskDeletes;
     Native::delays = 1000;
     Native::delayHook = [&](int milliseconds) {
-      assert(Native::uploadBuffer == nullptr && !WaterTest::uploaderBusy);
+      assert(Native::uploadWorkspace == nullptr && !WaterTest::uploaderBusy);
       if (!initialWaits) {
         assert(milliseconds == 1500 && Native::payloads.empty());
         ++initialWaits;
@@ -1207,7 +1370,7 @@ int main(int argc, char **argv) {
     const auto deleted = Native::taskDeletes;
     Native::delays = 1000;
     Native::delayHook = [&](int milliseconds) {
-      assert(Native::uploadBuffer == nullptr && !WaterTest::uploaderBusy);
+      assert(Native::uploadWorkspace == nullptr && !WaterTest::uploaderBusy);
       if (step == 0) {
         assert(milliseconds == 1500 && Native::payloads.empty());
         step = 1;
@@ -1216,7 +1379,7 @@ int main(int argc, char **argv) {
         assert(WaterTest::manifestUploaded && WaterTest::uploadedRecords == 0);
         Native::nextHttpCode = scenario == "upload_pacing_http_retry" ? 500 : 201;
         Native::invalidUploadAcknowledgement = scenario == "upload_pacing_ack_retry";
-        Native::failUploadAllocation = preparationFailure;
+        Native::openFailurePath = preparationFailure ? WaterTest::journalPath : "";
         step = 2;
       }
     };
@@ -1228,10 +1391,10 @@ int main(int argc, char **argv) {
     assert(WaterTest::nextUploaderAttemptUs == Native::clock + 30000000);
     Native::nextHttpCode = 201;
     Native::invalidUploadAcknowledgement = false;
-    Native::failUploadAllocation = false;
+    Native::openFailurePath.clear();
     Native::clock = WaterTest::nextUploaderAttemptUs;
     Native::delayHook = [&](int milliseconds) {
-      assert(Native::uploadBuffer == nullptr && !WaterTest::uploaderBusy);
+      assert(Native::uploadWorkspace == nullptr && !WaterTest::uploaderBusy);
       if (step == 2) {
         assert(milliseconds == 1500 && WaterTest::uploadedRecords == 0);
         step = 3;
@@ -1255,7 +1418,7 @@ int main(int argc, char **argv) {
     const auto deleted = Native::taskDeletes;
     Native::delayHook = [&](int milliseconds) {
       assert(milliseconds != 30000); // Backoff releases the task stack now.
-      assert(Native::uploadBuffer == nullptr);
+      assert(Native::uploadWorkspace == nullptr);
     };
     Native::nextHttpCode = 500;
     uploadOnce();
@@ -1277,6 +1440,100 @@ int main(int argc, char **argv) {
     assert(!fs_exists(WaterTest::journalPath));
     assert(!fs_exists(WaterTest::journalPath));
     assert(Native::taskDeletes == deleted + 3); // Two errors, then final completion.
+  } else if (scenario == "upload_transport_diagnostics") {
+    start();
+    JsonDocument state;
+    WaterTest::status(state);
+    assert(state["upload_stage"] == "none");
+    finishEligibleStopped();
+    WaterTest::status(state);
+    assert(state["upload_stage"] == "manifest");
+    assert(state["upload_manifest_uploaded"] == false);
+    assert(state["upload_records_uploaded"] == 0);
+    assert(state["upload_records_total"] == WaterTest::recordCount);
+    Native::nextHttpCode = 0;
+    Native::nextHttpResult = ESP_ERR_HTTP_CONNECT;
+    Native::nextSocketError = 24;
+    uploadOnce();
+    assert(WaterTest::uploadError.find("Manifest upload:") == 0);
+    assert(WaterTest::uploadError.find("no server response") != std::string::npos);
+    assert(WaterTest::uploadError.find("ESP_ERR_HTTP_CONNECT") != std::string::npos);
+    assert(WaterTest::uploadError.find("socket error 24") != std::string::npos);
+    assert(WaterTest::uploadError.find("status 0") == std::string::npos);
+    assert(!WaterTest::manifestUploaded && fs_exists(WaterTest::journalPath));
+    assert(Native::payloads.empty());
+    Native::nextConnectionError = ESP_ERR_ESP_TLS_CANNOT_RESOLVE_HOST;
+    uploadOnce();
+    assert(WaterTest::uploadError.find("ESP_ERR_ESP_TLS_CANNOT_RESOLVE_HOST") != std::string::npos);
+    Native::nextConnectionError = ESP_OK;
+    Native::nextHttpCode = 201;
+    Native::nextHttpResult = ESP_OK;
+    Native::nextSocketError = 0;
+    uploadOnce();
+    assert(Native::payloads.size() == 1);
+    WaterTest::status(state);
+    assert(state["upload_stage"] == "batches");
+    assert(state["upload_manifest_uploaded"] == true);
+    for (unsigned n = 0; n < 100 && WaterTest::uploadedRecords < WaterTest::recordCount; ++n)
+      uploadOnce();
+    WaterTest::status(state);
+    assert(state["upload_stage"] == "finish");
+    assert(state["upload_records_uploaded"] == WaterTest::recordCount);
+    Native::nextHttpCode = 400;
+    Native::nextHttpBody = R"({"error":"controllers[1].target_c is required"})";
+    uploadOnce();
+    assert(WaterTest::uploadError == "Finish upload: HTTP upload pending (status 400). Server: controllers[1].target_c is required");
+    assert(fs_exists(WaterTest::journalPath));
+    const auto finish = Native::payloads.back();
+    Native::nextHttpCode = 201;
+    Native::nextHttpBody.clear();
+    uploadOnce();
+    assert(Native::payloads.back() == finish && WaterTest::uploadState == "submitted");
+    assert(WaterTest::uploadError.empty() && !fs_exists(WaterTest::journalPath));
+    WaterTest::status(state);
+    assert(state["upload_stage"] == "complete");
+  } else if (scenario == "upload_server_error_bounds") {
+    start();
+    finishEligibleStopped();
+    Native::nextHttpCode = 400;
+    Native::nextHttpBody = R"({"error":"invalid\r\nfield\tvalue\u0001"})";
+    uploadOnce();
+    assert(WaterTest::uploadError.find("Server: invalid  field value ") != std::string::npos);
+    assert(WaterTest::uploadError.find('\n') == std::string::npos);
+    Native::nextHttpBody = "{\"error\":\"" + std::string(600, 'x') + "\"}";
+    uploadOnce();
+    assert(WaterTest::uploadError.size() < 350);
+    assert(WaterTest::uploadError.find(std::string(256, 'x') + "...") != std::string::npos);
+    Native::nextHttpBody = "{\"error\":\"" + std::string(255, 'x') + "éé\"}";
+    uploadOnce();
+    assert(WaterTest::uploadError.find(std::string(255, 'x') + "...") != std::string::npos);
+    Native::nextHttpBody = "<html>Private proxy internals</html>";
+    uploadOnce();
+    assert(WaterTest::uploadError.find("Private proxy") == std::string::npos);
+    Native::nextHttpBody = R"({"detail":"Please retry later."})";
+    uploadOnce();
+    assert(WaterTest::uploadError.find("Server: Please retry later.") != std::string::npos);
+    Native::nextHttpBody = std::string(8193, 'x');
+    uploadOnce();
+    assert(WaterTest::uploadError.find("Server reply exceeded 8192 bytes") != std::string::npos);
+    assert(!WaterTest::manifestUploaded && fs_exists(WaterTest::journalPath));
+    for (const auto &payload : Native::payloads)
+      assert(payload == Native::payloads.front());
+  } else if (scenario == "upload_request_setup_failure") {
+    start();
+    finishEligibleStopped();
+    Native::nextHeaderResult = ESP_ERR_NO_MEM;
+    uploadOnce();
+    assert(Native::payloads.empty() && Native::httpCleanups == 1);
+    assert(WaterTest::uploadError.find("HTTP request setup failed (ESP_ERR_NO_MEM)") != std::string::npos);
+    Native::nextHeaderResult = ESP_OK;
+    Native::nextHttpResult = ESP_ERR_NO_MEM;
+    uploadOnce();
+    assert(Native::payloads.empty() && Native::httpCleanups == 2);
+    assert(!WaterTest::manifestUploaded && fs_exists(WaterTest::journalPath));
+    Native::nextHttpResult = ESP_OK;
+    uploadOnce();
+    assert(WaterTest::manifestUploaded && Native::httpCleanups == 3);
   } else if (scenario == "upload_allocation_failure") {
     start();
     finishEligibleStopped();
@@ -1284,16 +1541,16 @@ int main(int argc, char **argv) {
       const size_t sent = Native::payloads.size();
       const uint32_t acknowledged = WaterTest::uploadedRecords;
       const bool manifestAcknowledged = WaterTest::manifestUploaded;
-      Native::failUploadAllocation = true;
+      Native::failHttpAllocation = true;
       uploadOnce();
       assert(WaterTest::uploadState == "error" && !WaterTest::uploaderBusy);
       assert(WaterTest::uploadedRecords == acknowledged);
       assert(WaterTest::manifestUploaded == manifestAcknowledged);
-      assert(Native::payloads.size() == sent && Native::uploadBuffer == nullptr);
+      assert(Native::payloads.size() == sent && Native::uploadWorkspace == nullptr);
       assert(fs_exists(WaterTest::journalPath));
-      Native::failUploadAllocation = false;
+      Native::failHttpAllocation = false;
       uploadOnce();
-      assert(Native::payloads.size() == sent + 1 && Native::uploadBuffer == nullptr);
+      assert(Native::payloads.size() == sent + 1 && Native::uploadWorkspace == nullptr);
     };
     failAndRetry();
     assert(WaterTest::manifestUploaded && WaterTest::uploadedRecords == 0);
@@ -1323,6 +1580,29 @@ int main(int argc, char **argv) {
       assert(tempControl.cs.mode == 'b' && !WaterTest::controlOwned());
     }
     assert(fs_exists(WaterTest::journalPath));
+  } else if (scenario == "observation_timeout") {
+    start();
+    const double offAt = completeFirstPulse();
+    WaterTest::program.deadline = offAt + 240;
+    while (WaterTest::active()) {
+      const double at = Native::clock / 1e6 + 2;
+      assert(at <= offAt + 240);
+      fresh(at, int16_t(std::lround((20 - .002 * (at - offAt)) * 16)));
+    }
+    assert(!WaterTest::physicalPump() && !WaterTest::physicalHeat());
+    assert(WaterTest::program.pulse == 1 && WaterTest::program.completedPulses == 1);
+    assert(!WaterTest::program.responseSettled && WaterTest::program.controllerStarted == 0);
+    assert(WaterTest::terminal["outcome"] == "inconclusive");
+    assert(WaterTest::terminal["reason"] == "observation_timeout");
+    assert(WaterTest::terminal["response_settled"] == false);
+    assert(WaterTest::terminalDurable && WaterTest::uploadState == "pending");
+    assert(!WaterTest::program.hasHistory());
+    assert(fs_exists(WaterTest::journalPath) && fs_exists(WaterTest::finishPath));
+    verifyJournal();
+    submit();
+    JsonDocument finish;
+    assert(deserializeJson(finish, Native::payloads.back()) == DeserializationError::Ok);
+    assert(finish["outcome"] == "inconclusive" && finish["reason"] == "observation_timeout");
   } else if (scenario == "all_pulses") {
     start();
     advance(11000);
@@ -1350,16 +1630,42 @@ int main(int argc, char **argv) {
     assert(WaterTest::terminal["completed_pulses"].as<unsigned>() >= 4);
     assert(WaterTest::terminal["useful_response"] == true);
     assert(WaterTest::uploadState == "pending");
+    assert(!WaterTest::program.hasHistory());
+    assert(WaterTest::program.head == 0 && WaterTest::program.count == 0);
+    const auto finalRecords = WaterTest::recordCount;
+    JsonDocument saved;
+    assert(WaterTest::loadDocument(WaterTest::finishPath, saved));
+    assert(saved["outcome"] == "completed");
+    assert(saved["completed_pulses"] == WaterTest::terminal["completed_pulses"]);
+    assert(saved["final_seq_by_boot"][WaterTest::recordingBoot] == finalRecords - 1);
     verifyJournal();
     submit();
+    unsigned uploaded = 0;
+    bool finishReceived = false;
+    for (const auto &payload : Native::payloads) {
+      JsonDocument request;
+      assert(deserializeJson(request, payload) == DeserializationError::Ok);
+      if (request["records"].is<JsonArray>()) {
+        assert(request["first_seq"] == uploaded);
+        for (const auto record : request["records"].as<JsonArrayConst>())
+          assert(record["seq"] == uploaded++);
+        assert(request["last_seq"] == uploaded - 1);
+      }
+      if (request["final_outputs"].is<JsonObject>()) {
+        assert(request["outcome"] == "completed");
+        assert(request["final_seq_by_boot"][WaterTest::recordingBoot] == finalRecords - 1);
+        finishReceived = true;
+      }
+    }
+    assert(uploaded == finalRecords && finishReceived);
   } else if (scenario == "failure_after_full_pulse" || scenario == "stale_stop_after_full_pulse") {
     start();
-    advance(74);
+    completeFirstPulse();
     assert(WaterTest::active() && WaterTest::program.completedPulses == 1);
     if (scenario == "failure_after_full_pulse") {
       tempControl.heater->setActive(true);
     } else {
-      Native::clock = 104100000;
+      Native::clock += uint64_t(std::llround((freshnessSeconds + .1) * 1e6));
       assert(WaterTest::requestStop(error));
     }
     WaterTest::tick();
@@ -1370,5 +1676,6 @@ int main(int argc, char **argv) {
     verifyRetainedAndRestart(1);
   } else
     assert(false);
+  assert(WaterTest::program.hasHistory() == WaterTest::active());
   std::cout << "water_test_backend: " << scenario << " passed\n";
 }

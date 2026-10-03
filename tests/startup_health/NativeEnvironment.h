@@ -22,6 +22,7 @@ constexpr int TEMP_FIXED_POINT_BITS = 9, C_OFFSET = 0;
 constexpr int DEVICE_DISCONNECTED_RAW = -32768;
 constexpr int DS18B20_RESOLUTION_12B = 12;
 #define BREWPI_SIMULATE 0
+#define CONFIG_LWIP_MAX_SOCKETS 16
 #define pdMS_TO_TICKS(value) (value)
 #define ESP_ERROR_CHECK(value) assert((value) == ESP_OK)
 template <typename... T> void ignored_log(T...) {}
@@ -36,9 +37,22 @@ bool failMutex = false, failBus = false, failWorker = false, failLoop = false;
 bool deviceFound = false, readValid = true;
 unsigned busCalls = 0, taskCalls = 0, deletions = 0, delayCalls = 0, stopAfterDelays = 0;
 unsigned loopCalls = 0, setupCalls = 0, mutexCalls = 0, samples = 0, busIo = 0;
+bool failHttpClientList = false;
 void (*worker)(void*) = nullptr;
 void* workerArgument = nullptr;
 void (*loopTask)(void*) = nullptr;
+}
+struct HttpServerStub {
+    void *getHandle() const { return reinterpret_cast<void*>(6); }
+} http_server;
+esp_err_t httpd_get_client_list(void *handle, size_t *count, int *clients) {
+    assert(handle == http_server.getHandle());
+    if (Native::failHttpClientList) return ESP_FAIL;
+    assert(*count >= 2);
+    clients[0] = 10;
+    clients[1] = 11;
+    *count = 2;
+    return ESP_OK;
 }
 uint64_t esp_timer_get_time() { return Native::now; }
 void esp_log_level_set(const char*, int) {}
