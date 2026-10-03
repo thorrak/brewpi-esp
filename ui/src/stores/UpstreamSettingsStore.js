@@ -50,6 +50,7 @@ export const useUpstreamSettingsStore = defineStore("UpstreamSettingsStore", () 
 
     async function clearUpstreamSettings() {
         hasUpstreamSettings.value = false;
+        awaitingRegistration.value = false;
         upstreamHost.value = "";
         upstreamPort.value = 0;
         deviceID.value = "";
@@ -69,10 +70,8 @@ export const useUpstreamSettingsStore = defineStore("UpstreamSettingsStore", () 
                 // apiKey: apiKeyParam, // String
                 // deviceID: deviceID, // Not processed in the firmware currently
             });
-            if (response && response.status) {
-                // TODO - Make sure the response is successful
-                // TODO - Test once we add a check to make sure the response is successful
-
+            if (response && response.status === 'ok') {
+                upstreamSettingsError.value = false;
                 // On success, update the store
                 this.hasUpstreamSettings = true;
                 this.upstreamHost = upstreamHostParam;

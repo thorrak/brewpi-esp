@@ -1,71 +1,39 @@
 #pragma once
 
-#ifdef ENABLE_GLYCOL_LOGGING // Doing this using define gating instead of an extended setting for now
+#ifdef ENABLE_GLYCOL_LOGGING
 
-#include "GlycolParams.h"
+#include "GlycolCoolingAlgorithm.h"
+#include "TemperatureFormats.h"
+#include <cstddef>
 
-// Forward declaration
+struct GlycolRuntimeState;
 enum GlycolState : uint8_t;
 
-/**
- * \brief Glycol state transition logger
- *
- * Writes CSV entries for each glycol state transition with comprehensive
- * diagnostic information including timestamps, temperatures, rates, and
- * learned parameters.
- */
+// Optional CSV diagnostics for the selectable controllers. Call only after
+// applying relay commands: filesystem latency must never delay an OFF edge.
 class GlycolLogger {
 public:
     GlycolLogger();
-
-    /**
-     * \brief Log a state transition
-     */
-    void logTransition(
-        GlycolState from_state,
-        GlycolState to_state,
-        float current_temp,
-        float setpoint,
-        float cooling_rate,
-        uint16_t cooling_duration_s,
-        float coast_estimate,
-        float learned_k,
-        float learned_C_off,
-        float learned_L,
-        bool force_minimum,
-        const char* reason
-    );
-
-    /**
-     * \brief Log a reboot event
-     */
+    void logTransition(const GlycolRuntimeState& runtime,
+                       temperature raw_temperature, temperature setpoint);
     void logReboot();
-
-    /**
-     * \brief Clear the log file
-     */
     void clearLog();
-
-    /**
-     * \brief Get the log file path
-     */
     static const char* getLogPath() { return LOG_FILENAME; }
-
-    /**
-     * \brief Get the size of the log file in bytes
-     */
     size_t getLogSize();
 
 private:
     static constexpr const char* LOG_FILENAME = "/glycol_log.csv";
     static constexpr const char* ARCHIVED_LOG_FILENAME = "/glycol_log.archived.csv";
-    static constexpr size_t MAX_LOG_SIZE = 30000;  // Keep both logs within the small filesystem budget
+    static constexpr size_t MAX_LOG_SIZE = 30000;
+    GlycolState last_state_;
+    GlycolCooling::Algorithm last_algorithm_;
+    bool schema_checked_ = false;
 
-    void writeHeader();
-    void rotateLogIfNeeded();
+    bool writeHeader();
+    bool archiveLog();
+    bool prepareLog();
     const char* stateToString(GlycolState state);
 };
 
-// Global instance
 extern GlycolLogger glycolLog;
 #endif // ENABLE_GLYCOL_LOGGING

@@ -3,6 +3,7 @@
 
 import subprocess
 import os
+from controller_identity import controller_identity
 
 # This is permanently pinned to 0.2.4 for legacy reasons. The proper version incrementing happens in platformio.ini as FIRMWARE_REVISION
 release = "0.2.4"
@@ -25,6 +26,10 @@ git_rev = (
 
 
 
+git_sha = subprocess.check_output(["git", "rev-parse", "HEAD"]).strip().decode("utf-8")
+git_dirty = bool(subprocess.check_output(["git", "status", "--porcelain", "--untracked-files=normal"]).strip())
+
+
 template = f"""
 #pragma once
 /******************************************************************************
@@ -35,11 +40,15 @@ the next build.  To make persistent changes, edit the template in
 /scripts/gen_version.py
 ******************************************************************************/
 
+#define COOLING_IMPLEMENTATION_ID "{controller_identity()}"
+
 namespace Config {{
     namespace Version {{
         constexpr auto release = "{release}";
         constexpr auto git_tag = "{tag_name}";
         constexpr auto git_rev = "{git_rev}";
+        constexpr auto git_sha = "{git_sha}";
+        constexpr bool git_dirty = {str(git_dirty).lower()};
     }}
 }};
 """

@@ -17,6 +17,7 @@ CTestTestfile.cmake
 
 /.vscode
 /.pio
+/.claude
 
 .DS_Store
 
@@ -30,6 +31,7 @@ apidocs/
 src/Version.h
 
 # Virtualenv / Sphinx
+__pycache__/
 /venv
 /docs/venv
 /docs/_build

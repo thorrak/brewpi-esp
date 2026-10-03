@@ -2,6 +2,7 @@
 
 #include "EspDS18B20.h"
 #include "NumberFormats.h"
+#include "WaterTest.h"
 #include "onewire_device.h"
 #include "onewire_bus_impl_rmt.h"
 
@@ -48,7 +49,7 @@ std::list<onewire_device_record> lOneWireDevices;
 bool onewire_device_record::isConnected() const {
     if (!hasData) return false;
     uint64_t now = esp_timer_get_time();
-    return now <= m_lastUpdate + ONEWIRE_CONNECTED_TIMEOUT_US;
+    return now <= m_lastUpdate + OneWireSensorPolicy::connectedTimeoutUs;
 }
 
 long_temperature onewire_device_record::getTempFixedPoint() const {
@@ -77,6 +78,9 @@ bool OneWireScanner::init(uint8_t pin) {
         return m_bus != nullptr;
     }
 
+    m_last_init_attempt_us.store(esp_timer_get_time(), std::memory_order_relaxed);
+    m_init_attempts.fetch_add(1, std::memory_order_relaxed);
+
     // Silence ESP-IDF's "reset bus failed: no devices found" warning from the
     // device iterator; an empty bus is valid and the worker reports its own
     // state via the bus_failed() interface.
@@ -85,6 +89,8 @@ bool OneWireScanner::init(uint8_t pin) {
     if (m_list_mutex == nullptr) {
         m_list_mutex = xSemaphoreCreateRecursiveMutex();
         if (m_list_mutex == nullptr) {
+            m_last_init_error.store(InitError::MutexAllocation, std::memory_order_relaxed);
+            m_init_failures.fetch_add(1, std::memory_order_relaxed);
             ESP_LOGW(TAG, "failed to allocate list mutex");
             return false;
         }
@@ -92,6 +98,8 @@ bool OneWireScanner::init(uint8_t pin) {
 
     m_pin = pin;
     if (!create_bus()) {
+        m_last_init_error.store(InitError::BusCreation, std::memory_order_relaxed);
+        m_init_failures.fetch_add(1, std::memory_order_relaxed);
         ESP_LOGE(TAG, "failed to create OneWire bus on pin %u", (unsigned)pin);
         return false;
     }
@@ -103,13 +111,44 @@ bool OneWireScanner::init(uint8_t pin) {
                                 WORKER_PRIORITY,
                                 &m_task);
     if (ok != pdPASS) {
+        m_last_init_error.store(InitError::WorkerAllocation, std::memory_order_relaxed);
+        m_init_failures.fetch_add(1, std::memory_order_relaxed);
         ESP_LOGW(TAG, "failed to start worker task");
         destroy_bus();
         m_task = nullptr;
         return false;
     }
+    m_last_init_error.store(InitError::None, std::memory_order_relaxed);
+    m_running.store(true, std::memory_order_relaxed);
     ESP_LOGI(TAG, "worker task started on pin %u", (unsigned)pin);
     return true;
+}
+
+void OneWireScanner::retry_if_stopped(uint8_t pin) {
+    if (is_running()) return;
+    const uint64_t now = esp_timer_get_time();
+    if (m_init_attempts.load(std::memory_order_relaxed) != 0 &&
+        now - m_last_init_attempt_us.load(std::memory_order_relaxed) < 30ULL * 1000000) return;
+    init(pin);
+}
+
+OneWireScanner::Health OneWireScanner::health() const {
+    return {is_running(), bus_failed(), m_last_init_error.load(std::memory_order_relaxed),
+            m_last_bus_create_error.load(std::memory_order_relaxed),
+            m_init_attempts.load(std::memory_order_relaxed), m_init_failures.load(std::memory_order_relaxed),
+            m_enumerations.load(std::memory_order_relaxed), m_successful_reads.load(std::memory_order_relaxed),
+            m_failed_reads.load(std::memory_order_relaxed), m_bus_recovery_attempts.load(std::memory_order_relaxed),
+            m_last_actual_read_us.load(std::memory_order_relaxed)};
+}
+
+const char* OneWireScanner::init_error_name(InitError error) {
+    switch (error) {
+        case InitError::None: return "none";
+        case InitError::MutexAllocation: return "mutex_allocation";
+        case InitError::BusCreation: return "bus_creation";
+        case InitError::WorkerAllocation: return "worker_allocation";
+    }
+    return "unknown";
 }
 
 
@@ -161,7 +200,9 @@ bool OneWireScanner::create_bus() {
         .max_rx_bytes = 10,
     };
 
-    if (onewire_new_bus_rmt(&bus_config, &rmt_config, &m_bus) != ESP_OK) {
+    const esp_err_t error = onewire_new_bus_rmt(&bus_config, &rmt_config, &m_bus);
+    m_last_bus_create_error.store(error, std::memory_order_relaxed);
+    if (error != ESP_OK) {
         m_bus = nullptr;
         return false;
     }
@@ -192,6 +233,7 @@ void OneWireScanner::try_bus_recovery() {
         return;
     }
     ESP_LOGW(TAG, "bus appears dead, tearing down and recreating");
+    m_bus_recovery_attempts.fetch_add(1, std::memory_order_relaxed);
     destroy_bus();
     vTaskDelay(pdMS_TO_TICKS(100));
     if (!create_bus()) {
@@ -211,6 +253,7 @@ void OneWireScanner::try_bus_recovery() {
 
 void OneWireScanner::enumerate_bus() {
     if (!m_bus) return;
+    m_enumerations.fetch_add(1, std::memory_order_relaxed);
 
     onewire_device_iter_handle_t iter = nullptr;
     if (onewire_new_device_iter(m_bus, &iter) != ESP_OK) {
@@ -294,10 +337,20 @@ esp_err_t OneWireScanner::trigger_broadcast_conversion() {
 bool OneWireScanner::read_all_devices() {
     bool any_ok = false;
     for (auto& rec : lOneWireDevices) {
-        if (!rec.handle || !rec.initialized) continue;
+        if (!rec.handle || !rec.initialized) {
+            m_failed_reads.fetch_add(1, std::memory_order_relaxed);
+            WaterTest::onSample(rec.deviceAddress, 0, false,
+                                m_conversion_start_us, esp_timer_get_time());
+            continue;
+        }
 
         int16_t temp = 0;
         esp_err_t rc = ds18b20_get_temperature_raw(rec.handle, &temp);
+        const uint64_t read_us = esp_timer_get_time();
+        const bool valid = rc == ESP_OK && temp != DEVICE_POWERON_RAW &&
+                           temp != DEVICE_DISCONNECTED_RAW && temp >= -880 && temp <= 2000;
+        WaterTest::onSample(rec.deviceAddress, temp, valid, m_conversion_start_us, read_us);
+        if (!valid) m_failed_reads.fetch_add(1, std::memory_order_relaxed);
         if (rc == ESP_ERR_INVALID_STATE) {
             // TH marker read back as 0 — sensor was reset since init_connection.
             // Drop the initialized flag so the next enumeration pass re-seeds it.
@@ -338,8 +391,12 @@ bool OneWireScanner::read_all_devices() {
         }
 
         rec.rawTemp = temp;
-        rec.m_lastUpdate = esp_timer_get_time();
+        rec.m_lastUpdate = read_us;
         rec.hasData = true;
+        if (valid) {
+            m_successful_reads.fetch_add(1, std::memory_order_relaxed);
+            m_last_actual_read_us.store(read_us, std::memory_order_relaxed);
+        }
         any_ok = true;
     }
     return any_ok;
@@ -377,6 +434,7 @@ void OneWireScanner::task_loop() {
         }
 
         // Broadcast a conversion trigger, wait, read everyone.
+        m_conversion_start_us = esp_timer_get_time();
         esp_err_t rc = trigger_broadcast_conversion();
         if (rc == ESP_OK) {
             vTaskDelay(pdMS_TO_TICKS(CONVERSION_WAIT_MS));
@@ -385,6 +443,11 @@ void OneWireScanner::task_loop() {
             }
         } else {
             ESP_LOGW(TAG, "broadcast convert failed, rc=0x%x", (unsigned)rc);
+            for (const auto& rec : lOneWireDevices) {
+                m_failed_reads.fetch_add(1, std::memory_order_relaxed);
+                WaterTest::onSample(rec.deviceAddress, 0, false,
+                                    m_conversion_start_us, esp_timer_get_time());
+            }
         }
 
         // Log connection-state transitions so a silent dropout becomes visible.

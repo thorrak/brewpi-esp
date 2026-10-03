@@ -115,39 +115,61 @@ import {
   CloudArrowUpIcon,
   CpuChipIcon,
   LightBulbIcon,
+  BeakerIcon,
   Cog8ToothIcon
 } from '@heroicons/vue/24/outline'
 // import brewpiespLogoUrl from "@/assets/brewpiesp_logo.svg";
-import { i18n } from "@/main.js";
-import {onBeforeUnmount, onMounted} from "vue";
-import { ref } from "vue";
+import { i18n } from "@/i18n";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useTempControlStore } from "@/stores/TempControlStore.js";
+import { useExtendedSettingsStore } from "@/stores/ExtendedSettingsStore";
 
-const navigation = [
+const ExtendedSettingsStore = useExtendedSettingsStore();
+const navigation = computed(() => [
   { name: i18n.global.t('sitewide.sidebar_options.dashboard'), icon: HomeIcon, route_name: 'Home' },
   { name: i18n.global.t('sitewide.sidebar_options.fermentrack_settings'), icon: CloudArrowUpIcon, route_name: 'UpstreamSettings' },
   { name: i18n.global.t('sitewide.sidebar_options.set_up_sensors'), icon: CpuChipIcon, route_name: 'ConfigSensorsActuators' },
   { name: i18n.global.t('sitewide.sidebar_options.controller_settings'), icon: Cog8ToothIcon, route_name: 'ExtendedSettings' },
+  { name: i18n.global.t('sitewide.sidebar_options.water_test'), icon: BeakerIcon, route_name: 'WaterTest' },
   { name: i18n.global.t('sitewide.sidebar_options.about_controller'), icon: LightBulbIcon, route_name: 'About' },
-]
+].filter(item => item.route_name !== 'WaterTest' || ExtendedSettingsStore.glycol))
 
 const sidebarOpen = ref(false);
 const TempControlStore = useTempControlStore();  // Updated in App.vue
 
-let intervalObject = null;
+let pollTimer = null;
+let requestTimer = null;
+let requestController = null;
+let mounted = false;
+
+async function refreshTemperatures() {
+  if (!mounted || requestController) return;
+  const controller = new AbortController();
+  requestController = controller;
+  requestTimer = setTimeout(() => controller.abort(), 8000);
+  try {
+    await TempControlStore.getTempInfo({ signal: controller.signal });
+  } finally {
+    clearTimeout(requestTimer);
+    requestTimer = null;
+    requestController = null;
+    // Wait for this response before scheduling another request to the device.
+    if (mounted) pollTimer = setTimeout(refreshTemperatures, 7000);
+  }
+}
 
 onMounted(() => {
   // Retrieve initial data
-  TempControlStore.getTempInfo();
-
-  // Set up periodic refreshes
-  intervalObject = window.setInterval(() => {
-    TempControlStore.getTempInfo();
-  }, 7000)
+  mounted = true;
+  refreshTemperatures();
+  ExtendedSettingsStore.getExtendedSettings();
 });
 
 onBeforeUnmount(() => {
-  clearInterval(intervalObject);
+  mounted = false;
+  clearTimeout(pollTimer);
+  clearTimeout(requestTimer);
+  requestController?.abort();
 });
 </script>
 

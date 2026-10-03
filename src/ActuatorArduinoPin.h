@@ -37,7 +37,7 @@ class DigitalPinActuator ACTUATOR_BASE_CLASS_DECL
 	private:
 	bool invert;
 	uint8_t pin;
-	bool active;
+	bool active = false;
 	public:
 	DigitalPinActuator(uint8_t pin, bool invert) {
 		this->invert = invert;
