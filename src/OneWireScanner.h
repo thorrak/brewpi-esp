@@ -3,6 +3,7 @@
 
 #include "Brewpi.h"
 #include "TemperatureFormats.h"
+#include "OneWireSensorPolicy.h"
 #include "onewire_bus.h"
 #include "ds18b20.h"
 
@@ -12,10 +13,6 @@
 #include <atomic>
 #include <list>
 #include <stdint.h>
-
-// A device counts as disconnected if we haven't read it successfully in this long.
-// Worker reads every ~2s, so 30s = 15 missed reads.
-#define ONEWIRE_CONNECTED_TIMEOUT_US   (30ULL * 1000ULL * 1000ULL)
 
 // If no device on the bus has been read successfully for this long, the worker
 // tears down the bus and recreates it.
@@ -101,6 +98,21 @@ extern std::list<onewire_device_record> lOneWireDevices;
  */
 class OneWireScanner {
 public:
+    enum class InitError : uint8_t { None, MutexAllocation, BusCreation, WorkerAllocation };
+    struct Health {
+        bool running;
+        bool busFailed;
+        InitError lastInitError;
+        int lastBusCreateError;
+        uint32_t initAttempts;
+        uint32_t initFailures;
+        uint32_t enumerations;
+        uint32_t successfulReads;
+        uint32_t failedReads;
+        uint32_t busRecoveryAttempts;
+        uint64_t lastSuccessfulReadUs;
+    };
+
     OneWireScanner();
 
     /**
@@ -109,6 +121,12 @@ public:
      * @returns true if the bus is up and the worker is running.
      */
     bool init(uint8_t pin);
+
+    // Retry a failed startup at most every 30 seconds; a live worker handles
+    // its own bus recovery and is never restarted by this call.
+    void retry_if_stopped(uint8_t pin);
+    Health health() const;
+    static const char* init_error_name(InitError error);
 
     /**
      * \brief Look up a cached device record by 64-bit address.
@@ -138,7 +156,7 @@ public:
     /**
      * \brief True once init() has brought up the bus and worker task.
      */
-    bool is_running() const { return m_task != nullptr; }
+    bool is_running() const { return m_running.load(std::memory_order_relaxed); }
 
     /**
      * \brief Invoke \p fn(record) for each discovered device, under the list
@@ -174,10 +192,21 @@ private:
     // Bus health: written by worker, read by any task via bus_failed().
     // Atomic to avoid torn 64-bit reads on 32-bit Xtensa.
     std::atomic<uint64_t> m_last_successful_read_us;
+    std::atomic<bool> m_running{false};
+    std::atomic<InitError> m_last_init_error{InitError::None};
+    std::atomic<int> m_last_bus_create_error{0};
+    std::atomic<uint32_t> m_init_attempts{0}, m_init_failures{0};
+    std::atomic<uint32_t> m_enumerations{0}, m_successful_reads{0}, m_failed_reads{0};
+    std::atomic<uint32_t> m_bus_recovery_attempts{0};
+    std::atomic<uint64_t> m_last_init_attempt_us{0};
+    // Unlike the recovery grace timestamp, this changes only on a real read.
+    std::atomic<uint64_t> m_last_actual_read_us{0};
 
     // Worker-only.
     uint64_t m_last_bus_reset_us;
     uint64_t m_last_enumeration_us;
+    // Used only for WaterTest sample timestamps; remove with the WaterTest hooks.
+    uint64_t m_conversion_start_us = 0;
 };
 
 extern OneWireScanner ow_scanner;

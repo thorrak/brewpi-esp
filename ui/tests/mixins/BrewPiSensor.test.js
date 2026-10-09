@@ -19,9 +19,20 @@ describe('BrewPiSensor', () => {
         };
         sensor.convertFromBrewPi(device_spec);
 
-        // add checks for each property
-        expect(sensor.chamber).toBe(1);
-        // ...
+        expect(sensor).toMatchObject({
+            chamber: 1,
+            beer: 2,
+            device_function_int: 3,
+            hardware_int: 4,
+            pin: 5,
+            invert: true,
+            deactivated: true,
+            index: 6,
+            address: 'address',
+            device_alias: 'alias',
+            child_id: 'child_id',
+            calibrate_adjust: 7,
+        });
     });
 
     it('can convert to BrewPi device spec', () => {
@@ -41,22 +52,35 @@ describe('BrewPiSensor', () => {
 
         const device_spec = sensor.convertToBrewPi();
 
-        // add checks for each property
-        expect(device_spec.c).toBe(sensor.chamber);
-        expect(device_spec.b).toBe(sensor.beer);
-        expect(device_spec.f).toBe(sensor.device_function_int);
-        expect(device_spec.h).toBe(sensor.hardware_int);
-        expect(device_spec.p).toBe(sensor.pin);
-        expect(device_spec.x).toBe(sensor.invert);
-        expect(device_spec.d).toBe(sensor.deactivated);
-        expect(device_spec.a).toBe(sensor.address);
-        expect(device_spec.n).toBe(sensor.child_id);
-        expect(device_spec.i).toBe(sensor.index);
+        expect(device_spec).toEqual({
+            c: 1,
+            b: 1,
+            f: 2,
+            h: 3,
+            p: 4,
+            x: true,
+            d: true,
+            a: 'TestAddress',
+            i: 6,
+        });
     });
 
-    it('includes calibrate_adjust in device_spec if it is non-zero and hardware_int is 2, 5, or 6', () => {
+    it.each(['01', ''])('includes the TP-Link outlet identifier %j for hardware 7', childID => {
         const sensor = new BrewPiSensor();
-        sensor.hardware_int = 2;
+        sensor.hardware_int = 7;
+        sensor.address = 'AA:BB:CC:DD:EE:FF';
+        sensor.child_id = childID;
+
+        expect(sensor.convertToBrewPi()).toMatchObject({
+            h: 7,
+            a: 'AA:BB:CC:DD:EE:FF',
+            n: childID,
+        });
+    });
+
+    it.each([2, 5, 6])('includes a non-zero calibration adjustment for hardware %i', hardware => {
+        const sensor = new BrewPiSensor();
+        sensor.hardware_int = hardware;
         sensor.calibrate_adjust = 5;
 
         const device_spec = sensor.convertToBrewPi();

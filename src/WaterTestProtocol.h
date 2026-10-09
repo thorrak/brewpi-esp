@@ -1,0 +1,181 @@
+#pragma once
+#include "WaterTestCore.h"
+#include <ArduinoJson.h>
+#include <string>
+#include <cstring>
+#include <cmath>
+#include <cstdio>
+
+// Shared by firmware and host contract tests. No network or hardware dependencies.
+namespace WaterTestProtocol {
+using namespace WaterTestCore;
+inline void recordToJson(JsonObject out, const WaterTestCore::Record &r, const char *bootId,
+                         double calibrationOffsetC) {
+  out["boot_id"] = bootId;
+  out["seq"] = r.seq;
+  out["t_us"] = r.t_us;
+  switch (r.kind) {
+  case 0:
+    out["type"] = "boot";
+    out["reason"] = reasonName(static_cast<Reason>(r.code));
+    out["reset_reason"] = r.detail;
+    out["initial_outputs"]["pump_on"] = false;
+    out["initial_outputs"]["heater_on"] = false;
+    break;
+  case 1:
+    out["type"] = "clock_sync";
+    out["utc_us"] = r.read_us;
+    out["source"] = "startup_ntp";
+    out["status"] = "synced";
+    break;
+  case 2: {
+    out["type"] = "sample";
+    out["sensor_role"] = r.role ? "glycol" : "beer";
+    out["quality"] = (r.flags & 1) ? "ok" : "sensor_error";
+    if (r.flags & 1) {
+      out["raw_sixteenths_c"] = r.raw;
+      out["raw_c"] = r.raw / 16.0;
+      double offset = calibrationOffsetC;
+      out["adjusted_c"] = r.raw / 16.0 + offset;
+      out["decision_c"] = r.raw / 16.0 + offset;
+    } else {
+      out["raw_c"] = nullptr;
+      out["raw_sixteenths_c"] = nullptr;
+      out["adjusted_c"] = nullptr;
+      out["decision_c"] = nullptr;
+    }
+    out["conversion_start_us"] = r.read_us >= r.conversion_us ? r.read_us - r.conversion_us : 0;
+    out["read_us"] = r.read_us;
+    out["sample_age_us"] = r.t_us >= r.read_us ? r.t_us - r.read_us : 0;
+    out["pump_on"] = bool(r.flags & 2);
+    out["heater_on"] = false;
+    break;
+  }
+  case 3:
+    out["type"] = "output";
+    out["actuator"] = r.role ? "heater" : "pump";
+    out["requested_on"] = bool(r.flags & 4);
+    out["applied_on"] = r.role ? false : bool(r.flags & 2);
+    out["edge"] = bool(r.flags & 8);
+    out["reason"] = reasonName(static_cast<Reason>(r.code));
+    break;
+  case 4:
+    out["type"] = "phase";
+    out["phase"] = phaseName(static_cast<Phase>(r.code));
+    if (r.code == static_cast<uint8_t>(Phase::ControllerFinalObserve))
+      out["observation_started_us"] = r.read_us;
+    out["pulse_number"] = r.pulse;
+    out["planned_remaining_s"] = r.detail;
+    out["block_id"] = r.raw;
+    {
+      const char *roles[] = {"baseline", "calibration", "validation", "controller", "complete"};
+      out["analysis_role"] = r.flags < 5 ? roles[r.flags] : "unknown";
+    }
+    break;
+  case 7: {
+    out["type"] = "controller";
+    out["algorithm"] = r.code == 0 ? "predictive_coast" : "pulse_dose";
+    if (r.role)
+      out["controller_run"] = r.role;
+    out["controller_phase"] = r.pulse;
+    out["target_c"] = r.raw / 16.0;
+    out["pump_on"] = bool(r.flags & 2);
+    auto number = [&](const char *key, uint32_t bits) {
+      float value;
+      memcpy(&value, &bits, sizeof(value));
+      if (std::isfinite(value))
+        out[key] = value;
+      else
+        out[key] = nullptr;
+    };
+    number("predicted_endpoint_c", r.conversion_us);
+    number("cooling_rate_c_per_s", uint32_t(r.read_us));
+    number("coast_s", uint32_t(r.read_us >> 32));
+    number("gain_c_per_on_s", r.detail);
+    break;
+  }
+  case 8:
+    out["type"] = "controller_episode";
+    if (r.role) {
+      out["controller_run"] = r.role;
+      out["algorithm"] = r.detail == 0 ? "predictive_coast" : "pulse_dose";
+    }
+    out["episode"] = r.pulse;
+    out["stage"] = r.pulse == 1 ? "initial_approach" : "maintenance";
+    out["event"] = r.code == 0 ? "started" : "settled";
+    out["event_us"] = r.read_us;
+    break;
+  case 9: {
+    out["type"] = "controller_run";
+    out["run"] = r.role;
+    out["algorithm"] = r.code == 0 ? "predictive_coast" : "pulse_dose";
+    out["event"] = r.pulse == 0 ? "started" : "finished";
+    if ((r.flags & 128) && r.pulse == 1)
+      out["run_duration_complete"] = bool(r.flags & 1);
+    out["event_us"] = r.read_us;
+    out["start_c"] = r.raw / 16.0;
+    const uint64_t bits = uint64_t(r.conversion_us) | (uint64_t(r.detail) << 32);
+    double target;
+    static_assert(sizeof(target) == sizeof(bits), "Controller targets require 64-bit doubles");
+    memcpy(&target, &bits, sizeof(target));
+    if (std::isfinite(target)) {
+      char exact[32];
+      snprintf(exact, sizeof(exact), "%.17g", target);
+      out["target_c"] = target;
+      out["target_c_exact"] = std::string(exact);
+    } else {
+      out["target_c"] = nullptr;
+      out["target_c_exact"] = nullptr;
+    }
+    break;
+  }
+  case 10: {
+    out["type"] = "controller_observation";
+    out["controller_run"] = r.role;
+    out["algorithm"] = r.code == 0 ? "predictive_coast" : "pulse_dose";
+    out["observation"] = r.detail;
+    out["event"] = "finished";
+    out["event_us"] = r.read_us;
+    const char *reasons[] = {"unknown", "rate_condition", "coast_time_limit", "rate_unqualified", "interrupted"};
+    out["reason"] = r.pulse < 5 ? reasons[r.pulse] : "unknown";
+    out["rate_qualified"] = bool(r.flags & 1);
+    float coast;
+    memcpy(&coast, &r.conversion_us, sizeof(coast));
+    if (std::isfinite(coast) && coast >= 0)
+      out["coast_s"] = coast;
+    else
+      out["coast_s"] = nullptr;
+    break;
+  }
+  default:
+    out["type"] = r.kind == 6 ? "gap" : "fault";
+    out["reason"] = reasonName(static_cast<Reason>(r.code));
+    out["terminated"] = true;
+    break;
+  }
+}
+inline bool acknowledged(JsonVariantConst response, const std::string &testId, const char *deviceGuid) {
+  return response["test_id"] == testId && response["device_guid"] == deviceGuid &&
+         (response["status"] == "stored" || response["status"] == "already_present");
+}
+inline bool batchAcknowledged(JsonVariantConst response, const std::string &testId, const char *guid,
+                              const std::string &batchId, uint32_t first, uint32_t last) {
+  auto ranges = response["accepted_ranges"].as<JsonArrayConst>();
+  return acknowledged(response, testId, guid) && response["batch_id"] == batchId && ranges.size() == 1 &&
+         ranges[0].is<JsonArrayConst>() && ranges[0].size() == 2 && ranges[0][0].is<uint32_t>() &&
+         ranges[0][1].is<uint32_t>() && ranges[0][0].as<uint32_t>() == first && ranges[0][1].as<uint32_t>() == last;
+}
+inline bool finishAcknowledged(JsonVariantConst response, const std::string &testId, const char *guid) {
+  return acknowledged(response, testId, guid) &&
+         (response["upload_status"] == "complete" || response["upload_status"] == "partial") &&
+         response["missing_record_count"].is<uint32_t>() && response["missing_record_count"].as<uint32_t>() == 0 &&
+         response["finish_received"] == true;
+}
+inline std::string batchIdentifier(const std::string &testId, uint32_t firstIndex) {
+  char suffix[9];
+  snprintf(suffix, sizeof(suffix), "%08x", static_cast<unsigned>(firstIndex));
+  std::string id = testId;
+  id.replace(28, 8, suffix);
+  return id;
+}
+} // namespace WaterTestProtocol

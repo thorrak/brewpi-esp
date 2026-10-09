@@ -25,9 +25,24 @@
 #include "SettingsManager.h"
 #include "ESP_BP_WiFi.h"
 #include "GlycolLog.h"
+#include "WaterTest.h"
+#include "CrashDump.h"
+#include "HttpJsonResponse.h"
+#include "OneWireScanner.h"
+#include "RuntimeHealth.h"
+#include <esp_timer.h>
 
 
 httpServer http_server;
+
+namespace {
+constexpr size_t httpClientLimit = 4;
+// Three HTTP-internal sockets plus room for telnet, TP-Link, uploads,
+// upstream traffic, provisioning and a replacement connection.
+constexpr size_t reservedSocketCount = 12;
+static_assert(CONFIG_LWIP_MAX_SOCKETS >= httpClientLimit + reservedSocketCount,
+              "HTTP clients must leave socket capacity for other network services.");
+}
 
 
 // ============================================================================
@@ -35,10 +50,7 @@ httpServer http_server;
 // ============================================================================
 
 esp_err_t httpServer::sendJsonDoc(httpd_req_t *req, JsonDocument &doc) {
-    std::string output;
-    serializeJson(doc, output);
-    httpd_resp_set_type(req, "application/json");
-    return httpd_resp_send(req, output.c_str(), output.length());
+    return HttpJsonResponse::send(req, doc);
 }
 
 esp_err_t httpServer::parseJsonBody(httpd_req_t *req, JsonDocument &doc) {
@@ -86,8 +98,15 @@ static esp_err_t get_json_handler(httpd_req_t *req) {
 
 template<bool (*Handler)(const JsonDocument&, bool)>
 static esp_err_t put_json_handler(httpd_req_t *req) {
+    if (WaterTest::controlOwned()) {
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req,
+            "{\"status\":false,\"error\":\"Water test owns control. Stop the test and explicitly resume control from the Water test page.\"}");
+    }
     JsonDocument doc;
     if (httpServer::parseJsonBody(req, doc) != ESP_OK) {
+        httpd_resp_set_status(req, "400 Bad Request");
         httpd_resp_set_type(req, "application/json");
         httpd_resp_send(req, "{\"status\":\"error\"}", HTTPD_RESP_USE_STRLEN);
         return ESP_OK;  // We handled it, just sent error
@@ -282,6 +301,7 @@ bool processDeviceUpdateJson(const JsonDocument& json, bool triggerUpstreamUpdat
 
 
 void httpServer::processQueuedDeviceDefinition() {
+    if (WaterTest::controlOwned()) return;
     if(device_definition_update_requested) {
         deviceManager.updateDeviceDefinition(dev);
         device_definition_update_requested = false;
@@ -290,6 +310,7 @@ void httpServer::processQueuedDeviceDefinition() {
 
 
 void httpServer::processQueuedActions() {
+    if (WaterTest::controlOwned()) return;
     if(config_reset_requested) {
         Log.notice("Processing config reset request\r\n");
         vTaskDelay(pdMS_TO_TICKS(500));
@@ -379,9 +400,36 @@ bool processUpdateModeJson(const JsonDocument& json, bool triggerUpstreamUpdate)
 
 
 bool processExtendedSettingsJson(const JsonDocument& json, bool triggerUpstreamUpdate) {
-    uint8_t failCount = 0;
+    // Validate the whole partial update before setters can change mode, relay
+    // timing, displays, or flash. Older clients need not send the new selector.
+    if (!ExtendedSettings::validateSettingsJson(json)) {
+        Log.error("Error: Invalid extended settings configuration.\r\n");
+        return false;
+    }
+    const JsonVariantConst choice = json[MinTimesKeys::SETTINGS_CHOICE];
+    if (!choice.isUnbound() &&
+        (!choice.is<uint8_t>() || choice.as<uint8_t>() > MIN_TIMES_CUSTOM)) return false;
+    const char *timeKeys[] = {
+        MinTimesKeys::MIN_COOL_OFF_TIME, MinTimesKeys::MIN_HEAT_OFF_TIME,
+        MinTimesKeys::MIN_COOL_ON_TIME, MinTimesKeys::MIN_HEAT_ON_TIME,
+        MinTimesKeys::MIN_COOL_OFF_TIME_FRIDGE_CONSTANT, MinTimesKeys::MIN_SWITCH_TIME,
+        MinTimesKeys::COOL_PEAK_DETECT_TIME, MinTimesKeys::HEAT_PEAK_DETECT_TIME
+    };
+    for (const char *key : timeKeys) {
+        if (!json[key].isUnbound() && !json[key].is<uint16_t>()) return false;
+    }
     bool saveSettings = false;
     bool saveMinTimes = false;
+
+    // The runtime applies this requested selection at a safe pump-OFF boundary.
+    if (json[ExtendedSettingsKeys::glycolCoolingAlgorithm].is<const char *>()) {
+        GlycolCooling::Algorithm requested = extendedSettings.glycolCoolingAlgorithm;
+        GlycolCooling::parseAlgorithm(json[ExtendedSettingsKeys::glycolCoolingAlgorithm].as<const char *>(), requested);
+        if (extendedSettings.glycolCoolingAlgorithm != requested) {
+            extendedSettings.setGlycolCoolingAlgorithm(requested);
+            saveSettings = true;
+        }
+    }
 
     // Glycol Mode
     if(json[ExtendedSettingsKeys::glycol].is<bool>()) {
@@ -389,9 +437,6 @@ bool processExtendedSettingsJson(const JsonDocument& json, bool triggerUpstreamU
             extendedSettings.setGlycol(json[ExtendedSettingsKeys::glycol].as<bool>());
             saveSettings = true;
         }
-    } else {
-        Log.warning("Invalid [glycol]:(%s) received (wrong type).\r\n", json[ExtendedSettingsKeys::glycol]);
-        failCount++;
     }
 
     // Large TFT flag
@@ -400,9 +445,6 @@ bool processExtendedSettingsJson(const JsonDocument& json, bool triggerUpstreamU
             extendedSettings.setLargeTFT(json[ExtendedSettingsKeys::largeTFT].as<bool>());
             saveSettings = true;
         }
-    } else {
-        Log.warning("Invalid [largeTFT]:(%s) received (wrong type).\r\n", json[ExtendedSettingsKeys::largeTFT]);
-        failCount++;
     }
 
     // Invert TFT Flag
@@ -411,9 +453,6 @@ bool processExtendedSettingsJson(const JsonDocument& json, bool triggerUpstreamU
             extendedSettings.setInvertTFT(json[ExtendedSettingsKeys::invertTFT].as<bool>());
             saveSettings = true;
         }
-    } else {
-        Log.warning("Invalid [invertTFT]:(%s) received (wrong type).\r\n", json[ExtendedSettingsKeys::invertTFT]);
-        failCount++;
     }
 
     // Reset Screen on Pin Toggle Flag
@@ -422,9 +461,6 @@ bool processExtendedSettingsJson(const JsonDocument& json, bool triggerUpstreamU
             extendedSettings.setResetScreenOnPin(json[ExtendedSettingsKeys::resetScreenOnPin].as<bool>());
             saveSettings = true;
         }
-    } else {
-        Log.warning("Invalid [resetScreenOnPin]:(%s) received (wrong type).\r\n", json[ExtendedSettingsKeys::resetScreenOnPin]);
-        failCount++;
     }
 
 
@@ -506,18 +542,14 @@ bool processExtendedSettingsJson(const JsonDocument& json, bool triggerUpstreamU
     }
 
     // Save
-    if (failCount) {
-        Log.error("Error: Invalid extended settings configuration.\r\n");
-    } else {
-        if(saveSettings == true) {
-            extendedSettings.storeToFilesystem();
-        }
-        if(saveMinTimes == true) {
-            minTimes.setDefaults();
-            minTimes.storeToFilesystem();
-        }
+    if(saveSettings == true) {
+        extendedSettings.storeToFilesystem();
     }
-    return failCount == 0;
+    if(saveMinTimes == true) {
+        minTimes.setDefaults();
+        minTimes.storeToFilesystem();
+    }
+    return true;
 }
 
 
@@ -938,6 +970,45 @@ void reset_reason(JsonDocument &doc) {
     doc["description"] = resetDescription[reset];
 }
 
+void health(JsonDocument &doc) {
+    const uint64_t now = esp_timer_get_time();
+    const auto loop = RuntimeHealth::snapshot();
+    auto control = doc["control_loop"].to<JsonObject>();
+    control["started"] = loop.loopStarted;
+    control["task_fallback"] = loop.loopTaskFallback;
+    control["iterations"] = loop.loopIterations;
+    if (loop.loopStarted)
+        control["last_tick_age_ms"] = now >= loop.lastLoopUs ? (now - loop.lastLoopUs) / 1000 : 0;
+    else
+        control["last_tick_age_ms"] = nullptr;
+    const auto scanner = ow_scanner.health();
+    auto oneWire = doc["onewire"].to<JsonObject>();
+    oneWire["running"] = scanner.running;
+    oneWire["bus_failed"] = scanner.busFailed;
+    oneWire["last_init_error"] = OneWireScanner::init_error_name(scanner.lastInitError);
+    oneWire["last_bus_create_error"] = scanner.lastBusCreateError;
+    oneWire["init_attempts"] = scanner.initAttempts;
+    oneWire["init_failures"] = scanner.initFailures;
+    oneWire["enumerations"] = scanner.enumerations;
+    oneWire["successful_reads"] = scanner.successfulReads;
+    oneWire["failed_reads"] = scanner.failedReads;
+    oneWire["bus_recovery_attempts"] = scanner.busRecoveryAttempts;
+    if (scanner.lastSuccessfulReadUs)
+        oneWire["last_read_age_ms"] = now >= scanner.lastSuccessfulReadUs ? (now - scanner.lastSuccessfulReadUs) / 1000 : 0;
+    else
+        oneWire["last_read_age_ms"] = nullptr;
+    auto network = doc["network"].to<JsonObject>();
+    network["socket_limit"] = CONFIG_LWIP_MAX_SOCKETS;
+    network["http_client_limit"] = httpClientLimit;
+    // This handler runs on the HTTP task, which owns the session list.
+    int clients[httpClientLimit];
+    size_t count = httpClientLimit;
+    if (httpd_get_client_list(http_server.getHandle(), &count, clients) == ESP_OK)
+        network["http_clients"] = count;
+    else
+        network["http_clients"] = nullptr;
+}
+
 
 // ============================================================================
 // Static file serving
@@ -967,13 +1038,26 @@ const char* httpServer::getContentType(const char* filename) {
     return "text/plain";
 }
 
+static bool isPublicFilePath(const char* path) {
+    // LittleFS resolves repeated slashes and single-dot components as aliases.
+    // Require canonical absolute paths before checking private runtime names.
+    if (!path || path[0] != '/' || strstr(path, "//") || strstr(path, "/./") ||
+        endsWith(path, "/.") || strstr(path, "..") || strchr(path, '%')) {
+        return false;
+    }
+    return strncmp(path, "/water-test-", 12) != 0;
+}
+
 esp_err_t httpServer::handleFileRead(httpd_req_t *req, const char* path) {
+    if (!isPublicFilePath(path)) {
+        return ESP_FAIL;
+    }
     char fullPath[256];
-    strlcpy(fullPath, path, sizeof(fullPath));
+    if (strlcpy(fullPath, path, sizeof(fullPath)) >= sizeof(fullPath)) return ESP_FAIL;
 
     size_t len = strlen(fullPath);
     if (len > 0 && fullPath[len - 1] == '/') {
-        strlcat(fullPath, "index.html", sizeof(fullPath));
+        if (strlcat(fullPath, "index.html", sizeof(fullPath)) >= sizeof(fullPath)) return ESP_FAIL;
     }
 
     const char* contentType = getContentType(fullPath);
@@ -1036,6 +1120,44 @@ esp_err_t httpServer::not_found_handler(httpd_req_t *req, httpd_err_code_t err) 
 // Route registration
 // ============================================================================
 
+static esp_err_t water_test_action(httpd_req_t *req) {
+    JsonDocument body;
+    JsonDocument response;
+    std::string error;
+    if (req->content_len > 0 && httpServer::parseJsonBody(req, body) != ESP_OK) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        response["status"] = false;
+        response["error"] = "Expected a JSON object smaller than 4096 bytes.";
+        return httpServer::sendJsonDoc(req, response);
+    }
+    bool accepted = false;
+    if (strcmp(req->uri, "/api/water-test/start/") == 0) {
+        if (http_server.device_definition_update_requested || http_server.config_reset_requested ||
+            http_server.restart_requested || http_server.wifi_reset_requested ||
+            http_server.ota_update_requested) {
+            error = "A configuration change is pending. Wait for it to finish before starting.";
+        } else {
+            accepted = WaterTest::requestStart(body.as<JsonVariantConst>(), error);
+        }
+    } else if (strcmp(req->uri, "/api/water-test/stop/") == 0) {
+        accepted = WaterTest::requestStop(error);
+    } else {
+        accepted = WaterTest::requestResume(body.as<JsonVariantConst>(), error);
+    }
+    response["status"] = accepted;
+    if (!accepted) response["error"] = error;
+    httpd_resp_set_status(req, accepted ? "202 Accepted" : "409 Conflict");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpServer::sendJsonDoc(req, response);
+}
+
+static esp_err_t water_test_status(httpd_req_t *req) {
+    JsonDocument doc;
+    WaterTest::status(doc);
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpServer::sendJsonDoc(req, doc);
+}
+
 void httpServer::setStaticPages() {
     // Root and index
     const httpd_uri_t uri_root = { .uri = "/", .method = HTTP_GET, .handler = static_file_handler, .user_ctx = nullptr };
@@ -1054,6 +1176,8 @@ void httpServer::setStaticPages() {
     httpd_register_uri_handler(server_handle, &uri_about);
     const httpd_uri_t uri_settings = { .uri = "/settings", .method = HTTP_GET, .handler = static_file_handler, .user_ctx = nullptr };
     httpd_register_uri_handler(server_handle, &uri_settings);
+    const httpd_uri_t uri_water_test = { .uri = "/water-test", .method = HTTP_GET, .handler = static_file_handler, .user_ctx = nullptr };
+    httpd_register_uri_handler(server_handle, &uri_water_test);
 }
 
 
@@ -1071,6 +1195,7 @@ void httpServer::setJsonPages() {
         { "/api/upstream/",          get_json_handler<serveUpstreamSettings> },
         { "/api/uptime/",            get_json_handler<uptime> },
         { "/api/heap/",              get_json_handler<heap> },
+        { "/api/health/",            get_json_handler<health> },
         { "/api/resetreason/",       get_json_handler<reset_reason> },
     };
 
@@ -1107,7 +1232,15 @@ void httpServer::startServer() {
     config.max_uri_handlers = 64;
     config.max_resp_headers = 8;
     config.uri_match_fn = httpd_uri_match_wildcard;
-    config.max_open_sockets = 7;
+    // Budget four browser sessions plus HTTP's three internal sockets within
+    // CONFIG_LWIP_MAX_SOCKETS=16. Leave room for telnet, TP-Link UDP, uploads,
+    // upstream requests and provisioning. LRU must run before the global
+    // socket table fills; otherwise accept() fails before it can evict a client.
+    config.max_open_sockets = httpClientLimit;
+    config.keep_alive_enable = true;
+    config.keep_alive_idle = 60;
+    config.keep_alive_interval = 10;
+    config.keep_alive_count = 3;
     config.stack_size = 8192;
 
     esp_err_t ret = httpd_start(&server_handle, &config);
@@ -1124,6 +1257,17 @@ void httpServer::registerRoutes() {
     setStaticPages();
     setJsonPages();
     setPutPages();
+
+    if (CrashDump::registerRoutes(server_handle) != ESP_OK) {
+        Log.error("Failed to register crash dump routes.\r\n");
+    }
+
+    const httpd_uri_t water_status = { .uri = "/api/water-test/", .method = HTTP_GET, .handler = water_test_status, .user_ctx = nullptr };
+    httpd_register_uri_handler(server_handle, &water_status);
+    for (const char* path : {"/api/water-test/start/", "/api/water-test/stop/", "/api/water-test/resume/"}) {
+        const httpd_uri_t action = { .uri = path, .method = HTTP_POST, .handler = water_test_action, .user_ctx = nullptr };
+        httpd_register_uri_handler(server_handle, &action);
+    }
 
     // Register 404 handler for file serving fallback
     httpd_register_err_handler(server_handle, HTTPD_404_NOT_FOUND, not_found_handler);

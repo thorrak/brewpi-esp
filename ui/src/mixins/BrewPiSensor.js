@@ -1,3 +1,7 @@
+export function deviceFunctionLabel(functionName, glycol) {
+    return glycol && functionName === 'chamber_temp' ? 'glycol_temp' : functionName;
+}
+
 
 function device_function_for_index(function_index) {
     // Internationalization is handled inside the components that use these names

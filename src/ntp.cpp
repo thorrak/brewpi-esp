@@ -1,82 +1,60 @@
-#include "Brewpi.h"
+#include "ntp.h"
 
 #include <esp_wifi.h>
 #include <esp_sntp.h>
-#include <time.h>
-#include <thorlog.h>
-#include <thorlog_espidf.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <atomic>
+#include <cstdio>
+#include <ctime>
 
-#include "ntp.h"
+namespace {
+std::atomic<bool> synced{false};
+std::atomic<bool> started{false};
 
-static bool ntpTimeSynced = false;
+void onTimeSync(struct timeval*) {
+    synced.store(true, std::memory_order_release);
+}
 
-// NTP Configuration
-static constexpr const char* NTP_SERVER1 = "pool.ntp.org";
-static constexpr const char* NTP_SERVER2 = "time.nist.gov";
-static constexpr long GMT_OFFSET_SEC = 0;  // Use UTC for logging
-static constexpr int DAYLIGHT_OFFSET_SEC = 0;
-
-/**
- * \brief Initialize NTP time synchronization
- */
-void initNTP() {
-    wifi_ap_record_t ap_info;
-    if (esp_wifi_sta_get_ap_info(&ap_info) != ESP_OK) return;  // Not connected
-
-    esp_sntp_setoperatingmode(ESP_SNTP_OPMODE_POLL);
-    esp_sntp_setservername(0, NTP_SERVER1);
-    esp_sntp_setservername(1, NTP_SERVER2);
-    esp_sntp_init();
-
-    // Wait for time to be set (max 10 seconds)
-    struct tm timeinfo;
-    int retry = 0;
-    time_t now = 0;
-    while (retry < 10) {
+void syncOnce(void*) {
+    // Wait for the first network connection, including initial provisioning.
+    // This task never delays sensor acquisition or relay scheduling.
+    wifi_ap_record_t accessPoint{};
+    while (esp_wifi_sta_get_ap_info(&accessPoint) != ESP_OK) {
         vTaskDelay(pdMS_TO_TICKS(1000));
-        time(&now);
-        localtime_r(&now, &timeinfo);
-        if (timeinfo.tm_year > (2020 - 1900)) {
-            break;
-        }
-        retry++;
     }
+    esp_sntp_setoperatingmode(ESP_SNTP_OPMODE_POLL);
+    esp_sntp_setservername(0, "pool.ntp.org");
+    esp_sntp_setservername(1, "time.nist.gov");
+    esp_sntp_set_time_sync_notification_cb(onTimeSync);
+    esp_sntp_init();
+    for (unsigned i = 0; i < 150 && !synced.load(std::memory_order_acquire); ++i) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    // Keep the wall clock running locally. No recurring synchronization.
+    esp_sntp_stop();
+    vTaskDelete(nullptr);
+}
+}
 
-    if (timeinfo.tm_year > (2020 - 1900)) {
-        ntpTimeSynced = true;
-        char timeStr[64];
-        strftime(timeStr, sizeof(timeStr), "%Y-%m-%d %H:%M:%S", &timeinfo);
-        Log.info("NTP time synchronized: %s UTC\r\n", timeStr);
-    } else {
-        Log.warning("Failed to synchronize NTP time\r\n");
+void initNTP() {
+    if (started.exchange(true)) return;
+    if (xTaskCreate(syncOnce, "ntp_once", 3072, nullptr, 2, nullptr) != pdPASS) {
+        started.store(false);
     }
 }
 
-/**
- * \brief Check if NTP time has been synchronized
- * \return true if time is synchronized
- */
 bool isNtpSynced() {
-    return ntpTimeSynced;
+    return synced.load(std::memory_order_acquire);
 }
 
-/**
- * \brief Get current time as formatted string
- * \param buffer - Buffer to store the formatted time
- * \param bufferSize - Size of the buffer
- * \return true if time was successfully formatted
- */
 bool getFormattedTime(char* buffer, size_t bufferSize) {
-    if (!ntpTimeSynced) {
+    if (!isNtpSynced()) {
         snprintf(buffer, bufferSize, "0");
         return false;
     }
-
     time_t now = time(nullptr);
-    struct tm timeinfo;
-    localtime_r(&now, &timeinfo);
-    strftime(buffer, bufferSize, "%Y-%m-%d %H:%M:%S", &timeinfo);
-    return true;
+    struct tm utc{};
+    gmtime_r(&now, &utc);
+    return strftime(buffer, bufferSize, "%Y-%m-%d %H:%M:%S", &utc) != 0;
 }

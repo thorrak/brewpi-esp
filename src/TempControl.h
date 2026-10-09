@@ -29,6 +29,8 @@
 #include "ActuatorAutoOff.h"
 #include "EepromStructs.h"
 #include "GlycolParams.h"
+#include "GlycolCoolingController.h"
+#include "GlycolTuning.h"
 #include <ArduinoJson.h>
 
 struct ControlContext;
@@ -42,25 +44,24 @@ struct ControlContext;
  * @{
  */
 
-// ===== GLYCOL MODE: Predictive Bang-Bang Control =====
-// See GLYCOL_COOLING_ALGORITHM.md for full design documentation
+// ===== GLYCOL MODE: Selectable cooling / time-proportional heating =====
+// See docs/GLYCOL_COOLING_SELECTION.md for the cooling algorithm selection.
 
 /**
- * Glycol controller states for predictive bang-bang control
+ * Runtime states used for glycol control and diagnostics.
  */
 enum GlycolState : uint8_t {
     GLYCOL_IDLE = 0,              //!< Monitoring temperature, waiting to cool
     GLYCOL_COOLING = 1,           //!< Pump on, actively cooling
     GLYCOL_COASTING = 2,          //!< Pump off, temperature still dropping, measuring coast
-    GLYCOL_EMERGENCY_COOLING = 3, //!< Can't keep up - running pump continuously
+    GLYCOL_FULL_COOLING = 3,     //!< Continuous cooling demand
     GLYCOL_HEATING = 4            //!< Beer-only heating via time-proportional duty cycle
 };
 
 /**
  * Internal reason for WAITING_TO_HEAT while in glycol heating mode.
- * The public legacy state remains WAITING_TO_HEAT, but internally we keep
- * track of whether we're blocked by protection delays or just in the PWM off
- * slice.
+ * Distinguishes actuator protection delays from the OFF portion of a heating
+ * duty cycle while the reported control state is WAITING_TO_HEAT.
  */
 enum GlycolHeatingWaitReason : uint8_t {
     GLYCOL_HEATING_WAIT_NONE = 0,
@@ -89,50 +90,30 @@ struct GlycolHeatingGateResult {
 };
 
 /**
- * Sample for rate calculation buffer
- */
-struct RateSample {
-    uint32_t timestamp_ms;
-    float temp;  // Temperature in internal units converted to float
-};
-
-/**
- * Circular buffer size for rate calculation
- * At ~3 second intervals, 30 samples covers ~90 seconds
- */
-constexpr uint8_t RATE_BUFFER_SIZE = 30;
-
-/**
- * Runtime state for glycol controller (not persisted)
+ * Glycol controller state. Only learned cooling tuning is persisted.
  */
 struct GlycolRuntimeState {
+    GlycolCooling::Controller cooling{};
+    GlycolCooling::Output cooling_output{};
+    bool clock_initialized = false;
+    uint32_t clock_last_ms = 0;
+    uint64_t clock_elapsed_ms = 0;
+    bool cooling_step_initialized = false;
+    uint64_t cooling_last_step_ms = 0;
+    bool pid_step_initialized = false;
+    uint64_t pid_last_step_ms = 0;
+    // Real active-interval ends on the extended monotonic clock. Boot starts at 0.
+    double last_heater_active_s = 0;
+    double last_pump_active_s = 0;
+    double pump_started_s = 0;
+
     GlycolState state;                    //!< Current glycol state machine state
-    uint32_t t_pump_on;                   //!< Timestamp when pump turned on (ms)
     uint32_t t_pump_off;                  //!< Timestamp when pump turned off (ms)
-    uint32_t emergency_entry_time;        //!< Timestamp when emergency mode was entered (ms)
-    float temp_at_pump_on;                //!< Temperature when pump was turned on
-    float temp_at_pump_off;               //!< Temperature when pump was turned off
-    float min_temp_reached;               //!< Minimum temperature during coasting
-    float cooling_rate_at_pump_off;       //!< Cooling rate when pump was turned off (°/min)
-    float current_cooling_rate;           //!< Current cooling rate (°/min)
-    bool cooling_confirmed;               //!< True once cooling effect is detected
-    uint8_t negative_rate_count;          //!< Count of consecutive negative rate readings
-    bool setpoint_changed_this_cycle;     //!< True if setpoint changed during this cycle
-    uint16_t cooling_duration_s;          //!< Duration of current cooling cycle in seconds
     temperature heating_output;           //!< Heat authority from PID (0..pidMax_heat)
     bool heating_window_active;          //!< A duty window has been started
     uint32_t heating_window_start_ms;     //!< Start of current heating duty-cycle window
     uint16_t heating_window_on_time_s;    //!< Requested ON time in current heating window
     GlycolHeatingWaitReason heating_wait_reason; //!< Internal reason for WAITING_TO_HEAT
-
-    // Hot glycol compensation: long runs warm the reservoir; after pump stops,
-    // chiller cools it back to setpoint. Next cycle should use minimum time and re-learn.
-    bool force_minimum_cooling;           //!< If true, stop after min_on_time_s (don't trust predictions)
-
-    // Rate calculation buffer
-    RateSample rate_buffer[RATE_BUFFER_SIZE];
-    uint8_t rate_buffer_head;             //!< Index of next write position
-    uint8_t rate_buffer_count;            //!< Number of valid samples in buffer
 
     void reset();
 };
@@ -181,7 +162,7 @@ public:
 
     // Glycol mode time-proportional control settings
     uint16_t GLYCOL_WINDOW_PERIOD;  //! Window period for time-proportional control in seconds (default: 1000s)
-    uint16_t GLYCOL_MIN_ON_TIME;    //! Minimum on-time for glycol pump in seconds (default: 10s)
+    uint16_t GLYCOL_MIN_HEAT_ON_TIME;    //! Minimum heating duty slice; cooling uses the selected cooling configuration (2s)
 
 	void toJson(JsonDocument &doc);
     void storeToFilesystem();
@@ -210,7 +191,7 @@ namespace MinTimesKeys {
 	constexpr auto COOL_PEAK_DETECT_TIME = "COOL_PEAK_DETECT_TIME";
 	constexpr auto HEAT_PEAK_DETECT_TIME = "HEAT_PEAK_DETECT_TIME";
 	constexpr auto GLYCOL_WINDOW_PERIOD = "GLYCOL_WINDOW_PERIOD";
-	constexpr auto GLYCOL_MIN_ON_TIME = "GLYCOL_MIN_ON_TIME";
+	constexpr auto GLYCOL_MIN_HEAT_ON_TIME = "GLYCOL_MIN_HEAT_ON_TIME";
 };
 
 // struct ControlConstants was moved to EepromStructs.h
@@ -322,6 +303,7 @@ public:
 	TEMP_CONTROL_METHOD temperature getRoomTemp();
 
 	TEMP_CONTROL_METHOD void setMode(char newMode, bool force=false);
+    TEMP_CONTROL_METHOD void resumeAfterWaterTest(const ControlSettings& saved);
 
   /**
    * Get current temp control mode
@@ -408,13 +390,12 @@ public:
 	TEMP_CONTROL_FIELD ControlSettings cs;
 	TEMP_CONTROL_FIELD ControlVariables cv;
 
-	// Glycol mode: Predictive bang-bang control
-	TEMP_CONTROL_FIELD GlycolLearnedParams glycolLearned;   //!< Learned parameters (persisted)
-	TEMP_CONTROL_FIELD GlycolConfig glycolConfig;           //!< Configuration (persisted)
-	TEMP_CONTROL_FIELD GlycolRuntimeState glycolRuntime;    //!< Runtime state (not persisted)
+	// Glycol mode: Selectable beer-only cooling
+	TEMP_CONTROL_FIELD GlycolConfig glycolConfig;           //!< Heating configuration (persisted)
+	TEMP_CONTROL_FIELD GlycolTuningStore glycolTuning;
+	TEMP_CONTROL_FIELD GlycolRuntimeState glycolRuntime;    //!< Active cooling and heating state
 
-	TEMP_CONTROL_METHOD void loadGlycolParams();            //!< Load glycol learned params and config
-	TEMP_CONTROL_METHOD void storeGlycolParams();           //!< Store glycol learned params
+	TEMP_CONTROL_METHOD void loadGlycolParams();            //!< Load heating settings and cooling tuning into fresh runtime
 
 	TEMP_CONTROL_FIELD uint16_t getMinCoolOnTime();
 	TEMP_CONTROL_FIELD uint16_t getMinHeatOnTime();

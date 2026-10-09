@@ -52,6 +52,18 @@
                   </div>
                 </div>
 
+                <div v-if="glycol && ExtendedSettingsStore.hasGlycolCoolingAlgorithm" class="my-4">
+                  <label for="glycol-cooling-algorithm" class="block text-sm font-medium leading-6 text-gray-900">{{ $t("extended_settings.glycol_cooling_algorithm") }}</label>
+                  <select id="glycol-cooling-algorithm" v-model="glycolCoolingAlgorithm" name="glycol-cooling-algorithm"
+                          class="mt-2 block w-full rounded-md border-gray-300 py-2 text-gray-900 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:max-w-md sm:text-sm"
+                          aria-describedby="glycol-cooling-algorithm-description glycol-cooling-algorithm-switch">
+                    <option value="predictive_coast">{{ $t("extended_settings.predictive_coast") }}</option>
+                    <option value="pulse_dose">{{ $t("extended_settings.pulse_dose") }}</option>
+                  </select>
+                  <p id="glycol-cooling-algorithm-description" class="mt-2 text-sm text-gray-500">{{ $t("extended_settings.glycol_cooling_algorithm_desc") }}</p>
+                  <p id="glycol-cooling-algorithm-switch" class="mt-2 text-sm text-gray-500">{{ $t("extended_settings.glycol_cooling_algorithm_switch") }}</p>
+                </div>
+
                 <!-- InvertTFT -->
                 <!-- TODO - hide this if using an IIC display -->
                 <SwitchGroup as="div" class="flex items-center my-3">
@@ -248,9 +260,11 @@
 
 
             <div class="pt-5">
+              <p v-if="ExtendedSettingsStore.extendedSettingsUpdateError" role="alert" class="mb-3 text-sm text-red-700">{{ $t("extended_settings.save_failed") }}</p>
+              <p v-else-if="settingsSaved" role="status" class="mb-3 text-sm text-green-700">{{ $t("extended_settings.saved") }}</p>
               <div class="flex justify-end">
                 <!--          <button type="button" class="rounded-md border border-gray-300 bg-white py-2 px-4 text-sm font-medium text-gray-700 shadow-sm hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2">Cancel</button>-->
-                <button type="submit" class="ml-3 inline-flex justify-center rounded-md border border-transparent bg-indigo-600 py-2 px-4 text-sm font-medium text-white shadow-sm hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2">{{ $t("sitewide.save") }}</button>
+                <button type="submit" :disabled="saving" class="ml-3 inline-flex justify-center rounded-md border border-transparent bg-indigo-600 py-2 px-4 text-sm font-medium text-white shadow-sm hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 disabled:opacity-50">{{ $t("sitewide.save") }}</button>
               </div>
             </div>
 
@@ -266,7 +280,7 @@
 import { useExtendedSettingsStore } from "@/stores/ExtendedSettingsStore";
 import { Switch, SwitchGroup, SwitchLabel, Listbox, ListboxButton, ListboxLabel, ListboxOption, ListboxOptions } from "@headlessui/vue";
 import { CheckIcon, ChevronDownIcon, ExclamationTriangleIcon } from '@heroicons/vue/20/solid'
-import { i18n } from "@/main.js";
+import { i18n } from "@/i18n";
 import { onMounted, ref } from "vue";
 import { useLoading } from "vue-loading-overlay";
 import { useControlConstantsStore } from "@/stores/ControlConstantsStore";
@@ -285,6 +299,9 @@ let ControlConstantsStore = useControlConstantsStore();  // Updated in ExtendedS
 
 let largeTFT = ref(false);
 let glycol = ref(false);
+let glycolCoolingAlgorithm = ref(null);
+let settingsSaved = ref(false);
+let saving = ref(false);
 let invertTFT = ref(false);
 let resetScreenOnPin = ref(false);
 let SETTINGS_CHOICE = ref(0);
@@ -310,21 +327,36 @@ onMounted(() => {
   })
 });
 
-function submitForm() {
-  // Validate the information in the form
-  // Nothing needed here for now, as the form is just switches
-
-  let loader = $loading.show({});
-  ExtendedSettingsStore.setExtendedSettings(glycol.value, largeTFT.value, invertTFT.value, resetScreenOnPin.value, selectedSettingSet.value.value, MIN_COOL_OFF_TIME.value, MIN_HEAT_OFF_TIME.value, MIN_COOL_ON_TIME.value, MIN_HEAT_ON_TIME.value,
-      MIN_COOL_OFF_TIME_FRIDGE_CONSTANT.value, MIN_SWITCH_TIME.value, COOL_PEAK_DETECT_TIME.value, HEAT_PEAK_DETECT_TIME.value).then(() => {
-        ExtendedSettingsStore.getExtendedSettings().then(() => {
-          updateCachedSettings();
-          loader.hide();
-        });
-    // TODO - Handle errors here
-    // updateSuccessful.value = res.ok;
-    // alertOpen.value = true;
-  });
+async function submitForm() {
+  if (saving.value) return;
+  saving.value = true;
+  settingsSaved.value = false;
+  const loader = $loading.show({});
+  try {
+    settingsSaved.value = await ExtendedSettingsStore.setExtendedSettings({
+      glycol: glycol.value,
+      largeTFT: largeTFT.value,
+      invertTFT: invertTFT.value,
+      resetScreenOnPin: resetScreenOnPin.value,
+      SETTINGS_CHOICE: selectedSettingSet.value.value,
+      MIN_COOL_OFF_TIME: MIN_COOL_OFF_TIME.value,
+      MIN_HEAT_OFF_TIME: MIN_HEAT_OFF_TIME.value,
+      MIN_COOL_ON_TIME: MIN_COOL_ON_TIME.value,
+      MIN_HEAT_ON_TIME: MIN_HEAT_ON_TIME.value,
+      MIN_COOL_OFF_TIME_FRIDGE_CONSTANT: MIN_COOL_OFF_TIME_FRIDGE_CONSTANT.value,
+      MIN_SWITCH_TIME: MIN_SWITCH_TIME.value,
+      COOL_PEAK_DETECT_TIME: COOL_PEAK_DETECT_TIME.value,
+      HEAT_PEAK_DETECT_TIME: HEAT_PEAK_DETECT_TIME.value,
+      glycolCoolingAlgorithm: ExtendedSettingsStore.hasGlycolCoolingAlgorithm ? glycolCoolingAlgorithm.value : undefined,
+    });
+    if (settingsSaved.value) {
+      await ExtendedSettingsStore.getExtendedSettings();
+      if (!ExtendedSettingsStore.extendedSettingsError) updateCachedSettings();
+    }
+  } finally {
+    saving.value = false;
+    loader.hide();
+  }
 }
 
 function updateCachedSettings() {
@@ -332,6 +364,7 @@ function updateCachedSettings() {
   invertTFT.value = ExtendedSettingsStore.invertTFT;
   resetScreenOnPin.value = ExtendedSettingsStore.resetScreenOnPin;
   glycol.value = ExtendedSettingsStore.glycol;
+  glycolCoolingAlgorithm.value = ExtendedSettingsStore.glycolCoolingAlgorithm;
 
   SETTINGS_CHOICE.value = ExtendedSettingsStore.SETTINGS_CHOICE;
   MIN_COOL_OFF_TIME.value = ExtendedSettingsStore.MIN_COOL_OFF_TIME;

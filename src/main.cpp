@@ -4,6 +4,10 @@
 
 #include <esp_timer.h>
 #include <esp_littlefs.h>
+#include "WaterTest.h"
+#ifdef ENABLE_GLYCOL_LOGGING
+#include "ntp.h"
+#endif
 
 #include <thorlog.h>
 #include <thorlog_espidf.h>
@@ -33,6 +37,9 @@
 
 #include "rest/rest_send.h"
 #include "OneWireTempSensor.h"
+#include "OneWireScanner.h"
+#include "RuntimeHealth.h"
+#include <atomic>
 #include <esp_system.h>
 #include <esp_heap_caps.h>
 
@@ -76,6 +83,22 @@ DisplayType realDisplay;
 DisplayType DISPLAY_REF display = realDisplay;
 
 ValueActuator alarm_actuator;
+
+namespace RuntimeHealth {
+namespace {
+std::atomic<bool> loopStarted{false};
+std::atomic<bool> loopTaskFallback{false};
+std::atomic<uint32_t> loopIterations{0};
+std::atomic<uint64_t> lastLoopUs{0};
+}
+
+Snapshot snapshot() {
+    return {loopStarted.load(std::memory_order_relaxed),
+            loopTaskFallback.load(std::memory_order_relaxed),
+            loopIterations.load(std::memory_order_relaxed),
+            lastLoopUs.load(std::memory_order_relaxed)};
+}
+}
 
 void printMem() {
     const uint32_t free = esp_get_free_heap_size();
@@ -158,15 +181,19 @@ void setup()
   // are NULL until TempControl::init() allocates default sensors, so a
   // browser auto-refresh during boot would otherwise crash the device.
   tempControl.init();
+  WaterTest::init();
 
   // Order matters: wifi_cfg's Network Provisioning backend (esp_wifi_config
   // 0.1.0+) uses Espressif's wifi_prov_scheme_ble, which unconditionally calls
   // esp_bt_controller_init() and brings up its own NimBLE host. If NimBLE is
   // already up, that fails with ESP_ERR_INVALID_STATE and provisioning never
-  // starts. So wifi_cfg has to be initialised first; bt_scanner.init() below
-  // calls NimBLEDevice::init() afterwards and re-attaches to the controller,
-  // which is kept resident by .prov_ble.memory_policy = KEEP_ALL.
+  // starts. So wifi_cfg has to be initialised first. If provisioning ran on
+  // this boot, initialize_wifi() restarts after saving credentials; the scanner
+  // starts on the next boot, when the provisioning BLE host is not running.
   initialize_wifi();
+#ifdef ENABLE_GLYCOL_LOGGING
+  initNTP();
+#endif
 
 #ifdef HAS_BLUETOOTH
   bt_scanner.init();
@@ -203,6 +230,7 @@ void setup()
 	}
 
 	settingsManager.loadSettings();  // Also fully loads devices
+  WaterTest::tick();
 
 #if BREWPI_SIMULATE
 	simulator.step();
@@ -242,6 +270,15 @@ void setup()
  */
 void brewpiLoop()
 {
+  // Setup also calls tick once. Background work is enabled only once the real
+  // control loop and sensor worker have stacks. Give a failed scanner startup
+  // first access to available memory before allowing an upload to allocate it.
+#if !BREWPI_SIMULATE
+  ow_scanner.retry_if_stopped(oneWirePin);
+  if (ow_scanner.is_running())
+#endif
+  WaterTest::startBackgroundServices();
+  WaterTest::tick();
 	static unsigned long lastUpdate = 0;
 	uint8_t oldState;
 #ifdef BREWPI_IIC  // We only want to do this for the IIC displays
@@ -279,7 +316,7 @@ void brewpiLoop()
 		tempControl.updateOutputs();
 
 #if BREWPI_MENU
-		if (rotaryEncoder.pushed()) {
+		if (!WaterTest::controlOwned() && rotaryEncoder.pushed()) {
 			rotaryEncoder.resetPushed();
 			menu.pickSettingToChange();
 		}
@@ -305,13 +342,15 @@ if(bt_scanner.scanning_failed()) {
 #endif
 
 #ifdef EXTERN_SENSOR_ACTUATOR_SUPPORT
-  tp_link_scanner.scan_and_refresh();
+  if (!WaterTest::controlOwned()) tp_link_scanner.scan_and_refresh();
 #endif
 
 #ifdef ENABLE_HTTP_INTERFACE
   // The webserver is now handled asynchronously, so we don't need to call handleClient() here
   http_server.processQueuedDeviceDefinition();  // Do this in the main loop to avoid issues with blocking to read DS18b20s
-  rest_handler.process();
+  // The upstream client performs blocking HTTP. Experiment timing and immutable
+  // configuration must not depend on those requests or upstream commands.
+  if (!WaterTest::controlOwned()) rest_handler.process();
   http_server.processQueuedActions();
 #endif
 
@@ -324,11 +363,21 @@ if(bt_scanner.scanning_failed()) {
  * This dispatches to brewpiLoop(), or if we're in simulation mode simulateLoop()
  */
 void loop() {
+	RuntimeHealth::lastLoopUs.store(esp_timer_get_time(), std::memory_order_relaxed);
+	RuntimeHealth::loopIterations.fetch_add(1, std::memory_order_relaxed);
+	RuntimeHealth::loopStarted.store(true, std::memory_order_relaxed);
 #if BREWPI_SIMULATE
 	simulateLoop();
 #else
 	brewpiLoop();
 #endif
+}
+
+static void runControlLoop(void*) {
+    for (;;) {
+        loop();
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
 }
 
 extern "C" void app_main(void) {
@@ -351,8 +400,8 @@ extern "C" void app_main(void) {
     setup();
 
     // Create loop task on the app core
-    xTaskCreatePinnedToCore(
-        [](void*) { for (;;) { loop(); vTaskDelay(pdMS_TO_TICKS(10)); } },
+    const BaseType_t created = xTaskCreatePinnedToCore(
+        runControlLoop,
         "loopTask",
         8192,
         nullptr,
@@ -360,5 +409,11 @@ extern "C" void app_main(void) {
         nullptr,
         1  // Core 1 = app core
     );
+    if (created != pdPASS) {
+        RuntimeHealth::loopTaskFallback.store(true, std::memory_order_relaxed);
+        // app_main already has an 8 KiB stack. Keep servicing sensors and
+        // actuator safety here instead of returning with only HTTP alive.
+        printf("Unable to allocate loopTask; using the existing main task.\n");
+        runControlLoop(nullptr);
+    }
 }
-
