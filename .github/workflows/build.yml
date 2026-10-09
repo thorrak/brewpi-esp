@@ -4,7 +4,7 @@ on:
   push:
     branches:
       - esp-idf
-      - v17_glycol
+      - refactor/glycol-heating-v17
       - master
     # tags:
     #   - "v*"
